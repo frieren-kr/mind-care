@@ -7,6 +7,7 @@
 - **백엔드**: Python + FastAPI
 - **프론트엔드**: React Native + Expo
 - **DB**: PostgreSQL + pgvector
+  - 논문 관련성은 수집 단계 키워드 필터(전역 관련 여부 보장) + `feed_items.relevance_score`(사용자별 관련도) 2단계로 처리하며, 논문 테이블에 전역 관련성 플래그는 두지 않습니다.
 - **AI**: 범용 LLM API(GPT/Gemini) + RAG + Embedding
 - **논문 수집**: PubMed(NCBI E-utilities) API — 주 1회 배치
 
@@ -19,7 +20,7 @@ mine-care/
 │  ├─ app/
 │  │  ├─ config.py      환경 변수
 │  │  ├─ schemas.py     데이터 접근 함수 입출력 스키마
-│  │  ├─ db/            DB 접근 함수 계층 (팀 공용 관문)
+│  │  ├─ db/            DB 접근 함수 계층 (팀 공용 관문) + migrations/
 │  │  └─ collectors/    PubMed 수집
 │  └─ requirements.txt
 ├─ frontend/    React Native(Expo) 앱
