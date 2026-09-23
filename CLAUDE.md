@@ -108,6 +108,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 초기 스캐폴딩 단계. DB 스키마 초안(`001_init.sql`)은 올라왔고 **팀 리뷰 대기 중**.
 아직 함수 구현, AI 파이프라인, 화면이 없다.
 
-미해결: `001_init.sql`의 `paper_embeddings.embedding`은 `vector(768)`인데
-`config.py`의 `embedding_dim`은 1536(`text-embedding-3-small` 기준)이다.
-임베딩 모델을 정하고 둘 중 하나로 맞춰야 한다.
+**미해결 — AI 담당 확인 후 `vector(768)` 차원 확정 예정.**
+`001_init.sql`의 `paper_embeddings.embedding`은 `vector(768)`인데 `config.py`의
+`embedding_dim`은 1536(`text-embedding-3-small` 기준)이라 현재 서로 맞지 않는다.
+AI 담당이 임베딩 모델을 확정하면 그 차원에 맞춰 `001_init.sql`과 `config.py`를
+함께 고친다. **그 전까지는 어느 쪽도 임의로 바꾸지 않는다.**
