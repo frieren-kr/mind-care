@@ -1,0 +1,42 @@
+# ---- Python / Backend ----
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- Node / Frontend ----
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# ---- React Native / Mobile ----
+.gradle/
+*.keystore
+!debug.keystore
+ios/Pods/
+ios/build/
+android/app/build/
+android/.cxx/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- Data / temp ----
+*.sqlite3
+*.db
