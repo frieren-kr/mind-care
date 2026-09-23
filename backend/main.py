@@ -1,4 +1,4 @@
-"""마인 케어(Mind Care) 백엔드 진입점.
+"""마인드 케어(Mind Care) 백엔드 진입점.
 
 FastAPI 앱을 생성하고 라우터를 등록한다.
 실행: uvicorn main:app --reload

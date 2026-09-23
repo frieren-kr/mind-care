@@ -4,7 +4,7 @@ import { StyleSheet, Text, View } from "react-native";
 export default function App() {
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>마인 케어</Text>
+      <Text style={styles.title}>마인드 케어</Text>
       <Text style={styles.subtitle}>
         치매·경도인지장애 가족 간병인을 위한 연구 요약 앱
       </Text>
