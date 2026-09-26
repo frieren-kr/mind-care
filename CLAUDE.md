@@ -95,11 +95,14 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - `save_papers()`는 `(source, external_id)` UNIQUE + `ON CONFLICT DO NOTHING`으로 이미 있는 논문을
   건너뛴다(기존 행은 갱신하지 않는다). 배치 안의 중복도 먼저 제거해 집계를 맞춘다.
 - `get_new_papers()` = `papers` 중 `paper_analysis`가 없는 논문 (`paper_analysis`는 `paper_id` UNIQUE).
+  정렬은 `published_date DESC NULLS LAST` → `collected_at DESC` → `id`. 한 배치는 `collected_at`이
+  모두 같아서, 마지막 `id` 키가 있어야 `limit`을 준 결과 순서가 호출마다 흔들리지 않는다.
+  `since`/`source`는 `None`이면 해당 조건을 적용하지 않고, `limit <= 0`이면 빈 목록을 돌려준다.
 - `save_summary()`는 `paper_analysis`에 upsert 하고, `embedding`을 함께 주면 `paper_embeddings`에도 upsert 한다.
 - `search_similar()`는 `paper_embeddings`(코사인)를 검색해 `papers`/`paper_analysis`를 조인해 돌려준다.
   `paper_id`는 `chat_messages.cited_paper_ids`에 그대로 넣을 수 있다.
-> `save_papers()`는 구현 완료. 나머지 셋은 아직 스텁(`NotImplementedError`)이다
-> — 시그니처/스키마 합의가 먼저, 구현은 그 다음.
+> `save_papers()` / `get_new_papers()`는 구현 완료. `save_summary()`와 `search_similar()`는
+> 아직 스텁(`NotImplementedError`)이다 — 시그니처/스키마 합의가 먼저, 구현은 그 다음.
 
 ### 결정사항: 논문 관련성 판단 (2026-09-23)
 
@@ -122,7 +125,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **로컬 DB는 Docker로 띄운다** — `backend/docker-compose.yml` (pgvector/pgvector:pg17).
   최초 기동 시 `001_init.sql`이 자동 실행된다(테이블 11개 + `vector`/`uuid-ossp` 확장 확인).
   실행 방법은 `backend/README.md` 참고. 스키마를 고쳐 다시 적용할 때는 `docker compose down -v`.
-- 아직 나머지 데이터 접근 함수 구현, AI 파이프라인, 화면이 없다.
+- **`get_new_papers()` 구현·검증 완료** (2026-09-26, 실 DB). 미분석 50건 반환,
+  `paper_analysis`를 1건 넣으면 49건으로 줄고, `limit`/`source`/`since` 필터 동작 확인.
+- 아직 `save_summary()` / `search_similar()` 구현, AI 파이프라인, 화면이 없다.
 
 **미해결 — AI 담당 확인 후 `vector(768)` 차원 확정 예정.**
 `001_init.sql`의 `paper_embeddings.embedding`은 `vector(768)`인데 `config.py`의

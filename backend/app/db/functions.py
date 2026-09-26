@@ -6,11 +6,13 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 CLAUDE.md에 기록한다.
 
 테이블 정의는 `app/db/migrations/001_init.sql`이 정본이다.
-save_papers()는 구현되어 있고, 나머지 함수는 아직 시그니처/반환 스키마만 확정한
-스텁이다. 실제 SQL 구현은 스키마 팀 리뷰 후 채운다.
+save_papers() / get_new_papers()는 구현되어 있고, 나머지 함수는 아직 시그니처와
+반환 스키마만 확정한 스텁이다. 실제 SQL 구현은 스키마 팀 리뷰 후 채운다.
 """
 from typing import Optional
 from uuid import UUID
+
+from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
 from app.schemas import AnalysisIn, PaperIn, PaperOut, SavePapersResult, SearchResult
@@ -89,9 +91,37 @@ def get_new_papers(
         source: 'pubmed' 등 수집처 필터. None이면 전체 수집처.
 
     Returns:
-        PaperOut 리스트. published_date DESC 정렬. (schemas.py 참고)
+        PaperOut 리스트. published_date DESC 정렬 (발행일이 없는 논문은 뒤로 보내고,
+        동점은 collected_at DESC → id 순으로 깨서 순서를 고정한다 — 같은 limit으로
+        다시 불러도 같은 결과가 나온다). (schemas.py 참고)
     """
-    raise NotImplementedError
+    if limit <= 0:
+        return []
+
+    # LEFT JOIN 후 a.paper_id IS NULL → 분석 결과가 아직 없는 논문만 남는다.
+    # since/source는 NULL이면 조건을 통째로 무시한다 (SQL 한 벌로 네 경우를 모두 처리).
+    # 마지막 정렬 키 p.id는 필수다: save_papers()가 배치를 한 INSERT로 넣어서
+    # 같은 배치의 collected_at이 전부 동일하고, published_date도 겹치는 논문이 많다.
+    # 유니크한 키로 동점을 깨지 않으면 limit을 준 결과의 순서가 호출마다 달라진다.
+    sql = """
+        SELECT p.id, p.source, p.external_id, p.title,
+               p.abstract, p.published_date, p.url, p.collected_at
+          FROM papers AS p
+          LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+         WHERE a.paper_id IS NULL
+           AND (%(since)s::timestamptz IS NULL OR p.collected_at >= %(since)s::timestamptz)
+           AND (%(source)s::text IS NULL OR p.source = %(source)s::text)
+         ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
+         LIMIT %(limit)s
+    """
+    params = {"since": since, "source": source, "limit": limit}
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [PaperOut(**row) for row in rows]
 
 
 def save_summary(analysis: AnalysisIn) -> UUID:
