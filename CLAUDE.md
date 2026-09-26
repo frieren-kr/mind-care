@@ -25,6 +25,7 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1        # Windows PowerShell
 pip install -r requirements.txt
 cp .env.example .env              # 값 채우기 (.env는 커밋 금지)
+docker compose up -d              # 로컬 DB(PostgreSQL 17 + pgvector) 기동
 uvicorn main:app --reload         # http://127.0.0.1:8000 , API 문서: /docs
 ```
 
@@ -78,21 +79,27 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 
 | 함수 | 입력 | 반환 |
 |------|------|------|
+| `save_papers(papers: list[PaperIn])` | `papers`: 수집기가 만든 `PaperIn` 목록 | `SavePapersResult` |
 | `get_new_papers(since=None, limit=100, source=None)` | `since`: ISO8601 날짜/시각(선택), `limit`: int, `source`: `'pubmed'` 등(선택) | `list[PaperOut]` |
 | `save_summary(analysis: AnalysisIn)` | `AnalysisIn` | 저장된 `paper_analysis` id (`UUID`) |
 | `search_similar(embedding, top_k=5, model_name=None)` | `embedding`: `list[float]`(길이=`001_init.sql`의 `vector(N)`), `top_k`: int, `model_name`: 임베딩 모델 필터(선택) | `list[SearchResult]` |
 
 스키마 (요약) — **모든 id는 `UUID`**:
+- **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?` — `id`/`collected_at`은 DB가 채운다.
+- **SavePapersResult**: `total, inserted, skipped, inserted_ids`
 - **PaperOut** (`papers`): `id, source, external_id, title, abstract?, published_date?, url?, collected_at`
 - **AnalysisIn** (`paper_analysis` + 선택적 `paper_embeddings`): `paper_id, study_type?, evidence_level?, guideline_relation?, summary_finding?, summary_comparison?, summary_limitation?, tags, model_name?, embedding?, embedding_model?`
 - **SearchResult**: `paper_id, title, url?, summary_finding?, evidence_level?, score`
 
 동작 메모:
+- `save_papers()`는 `(source, external_id)` UNIQUE + `ON CONFLICT DO NOTHING`으로 이미 있는 논문을
+  건너뛴다(기존 행은 갱신하지 않는다). 배치 안의 중복도 먼저 제거해 집계를 맞춘다.
 - `get_new_papers()` = `papers` 중 `paper_analysis`가 없는 논문 (`paper_analysis`는 `paper_id` UNIQUE).
 - `save_summary()`는 `paper_analysis`에 upsert 하고, `embedding`을 함께 주면 `paper_embeddings`에도 upsert 한다.
 - `search_similar()`는 `paper_embeddings`(코사인)를 검색해 `papers`/`paper_analysis`를 조인해 돌려준다.
   `paper_id`는 `chat_messages.cited_paper_ids`에 그대로 넣을 수 있다.
-> 현재 함수들은 스텁(`NotImplementedError`)이다 — 시그니처/스키마 합의가 먼저, 구현은 그 다음.
+> `save_papers()`는 구현 완료. 나머지 셋은 아직 스텁(`NotImplementedError`)이다
+> — 시그니처/스키마 합의가 먼저, 구현은 그 다음.
 
 ### 결정사항: 논문 관련성 판단 (2026-09-23)
 
@@ -106,7 +113,16 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 ## 상태
 
 초기 스캐폴딩 단계. DB 스키마 초안(`001_init.sql`)은 올라왔고 **팀 리뷰 대기 중**.
-아직 함수 구현, AI 파이프라인, 화면이 없다.
+
+- **PubMed 수집 구현 완료** — `collectors/pubmed.py`의 `fetch_papers()` / `collect_and_store()`.
+  검색어는 `SEARCH_QUERY` 상수, API 키는 없어도 동작(초당 3회 제한 자동 준수).
+  단독 실행: `python -m app.collectors.pubmed --days-back 7 --max-results 20 --dry-run`
+- **`save_papers()` 구현·검증 완료** (2026-09-26, 실 DB). PubMed 50건을 저장 → 신규 50건,
+  같은 데이터로 재저장 → 신규 0건 / 스킵 50건으로 중복 스킵 동작 확인.
+- **로컬 DB는 Docker로 띄운다** — `backend/docker-compose.yml` (pgvector/pgvector:pg17).
+  최초 기동 시 `001_init.sql`이 자동 실행된다(테이블 11개 + `vector`/`uuid-ossp` 확장 확인).
+  실행 방법은 `backend/README.md` 참고. 스키마를 고쳐 다시 적용할 때는 `docker compose down -v`.
+- 아직 나머지 데이터 접근 함수 구현, AI 파이프라인, 화면이 없다.
 
 **미해결 — AI 담당 확인 후 `vector(768)` 차원 확정 예정.**
 `001_init.sql`의 `paper_embeddings.embedding`은 `vector(768)`인데 `config.py`의

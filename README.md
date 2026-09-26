@@ -11,6 +11,37 @@
 - **AI**: 범용 LLM API(GPT/Gemini) + RAG + Embedding
 - **논문 수집**: PubMed(NCBI E-utilities) API — 주 1회 배치
 
+## 빠른 시작
+
+DB는 Docker로 띄웁니다. 로컬에 PostgreSQL을 설치할 필요가 없고, 최초 기동 시
+스키마(`001_init.sql`)가 자동으로 적용됩니다. (준비물: Docker Desktop)
+
+```bash
+cd backend
+cp .env.example .env          # POSTGRES_PASSWORD / DATABASE_URL 채우기 (.env는 커밋 금지)
+docker compose up -d          # PostgreSQL 17 + pgvector 기동
+docker compose ps             # STATUS가 "healthy"면 준비 완료
+```
+
+백엔드 실행:
+
+```bash
+python -m venv .venv
+.venv\Scripts\Activate.ps1    # Windows PowerShell
+pip install -r requirements.txt
+uvicorn main:app --reload     # http://127.0.0.1:8000 , API 문서: /docs
+```
+
+프론트엔드 실행:
+
+```bash
+cd frontend
+npm install
+npm start
+```
+
+DB 확인·재생성·문제 해결 등 자세한 내용은 [`backend/README.md`](backend/README.md)를 참고하세요.
+
 ## 폴더 구조
 
 ```

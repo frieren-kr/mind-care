@@ -66,3 +66,30 @@ class SearchResult(BaseModel):
     summary_finding: Optional[str] = Field(default=None, description="분석 전이면 None")
     evidence_level: Optional[str] = None
     score: float = Field(description="유사도 점수 (1 - 코사인 거리)")
+
+
+class PaperIn(BaseModel):
+    """save_papers()가 받는 수집된 논문 한 건. (papers 테이블 입력)
+
+    수집기(collectors/)가 만들어서 save_papers()에 넘긴다.
+    id / collected_at은 DB가 채우므로 여기에 없다.
+    (source, external_id)가 UNIQUE라 같은 논문을 다시 넣어도 중복 저장되지 않는다.
+    """
+
+    source: str = Field(description="pubmed / semantic_scholar / openalex")
+    external_id: str = Field(description="PMID 또는 DOI")
+    title: str
+    abstract: Optional[str] = None
+    published_date: Optional[date] = None
+    url: Optional[str] = None
+
+
+class SavePapersResult(BaseModel):
+    """save_papers()가 반환하는 저장 결과 집계."""
+
+    total: int = Field(description="저장을 시도한 건수 (입력 개수, 배치 내 중복 제거 후)")
+    inserted: int = Field(description="새로 저장된 건수")
+    skipped: int = Field(description="이미 있어서 건너뛴 건수 (source, external_id 중복)")
+    inserted_ids: list[UUID] = Field(
+        default_factory=list, description="새로 저장된 papers.id 목록"
+    )

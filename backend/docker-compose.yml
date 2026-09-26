@@ -1,0 +1,37 @@
+# 마인드 케어 로컬 개발용 DB (PostgreSQL 17 + pgvector)
+#
+# ★ 비밀번호를 이 파일에 직접 쓰지 않는다. ★
+# 이 파일은 팀원 공유용으로 커밋되므로, 실제 값은 각자의 backend/.env에만 둔다.
+# docker compose는 같은 디렉터리의 .env를 자동으로 읽어 ${POSTGRES_PASSWORD}를 채운다.
+#
+# 사용법 (backend/ 디렉터리에서):
+#   cp .env.example .env      # POSTGRES_PASSWORD / DATABASE_URL 값 채우기
+#   docker compose up -d      # 최초 기동 시 001_init.sql이 자동 실행된다
+#   docker compose logs -f db # 초기화 로그 확인
+#   docker compose down       # 중지 (데이터는 볼륨에 남는다)
+#   docker compose down -v    # 중지 + 데이터 삭제 (스키마부터 다시 만들 때)
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    container_name: mindcare-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mindcare
+      POSTGRES_DB: mindcare
+      # .env에 POSTGRES_PASSWORD가 없으면 여기서 바로 실패한다 (빈 비밀번호 방지).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?backend/.env에 POSTGRES_PASSWORD를 설정하세요}
+    ports:
+      - "5432:5432"
+    volumes:
+      - mindcare-pgdata:/var/lib/postgresql/data
+      # 최초 기동(볼륨이 비어 있을 때)에만 이 폴더의 *.sql이 파일명 순서대로 실행된다.
+      - ./app/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindcare -d mindcare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mindcare-pgdata:
