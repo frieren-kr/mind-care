@@ -6,14 +6,15 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
 
 테이블 정의는 `app/db/migrations/001_init.sql`이 정본이다.
-save_papers() / get_new_papers()는 구현되어 있고, 나머지 함수는 아직 시그니처와
-반환 스키마만 확정한 스텁이다. 실제 SQL 구현은 스키마 팀 리뷰 후 채운다.
+search_similar()만 아직 시그니처와 반환 스키마를 확정한 스텁이다.
+나머지 함수는 구현되어 있다.
 """
 import json
 import logging
 from typing import Optional
 from uuid import UUID
 
+from pgvector.psycopg import Vector
 from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
@@ -289,8 +290,17 @@ def update_paper_metadata(papers: list[PaperIn]) -> UpdateMetadataResult:
 def save_summary(analysis: AnalysisIn) -> UUID:
     """AI 배치가 만든 논문 분석 결과를 저장한다.
 
-    paper_analysis에 upsert 한다 (paper_id UNIQUE → 재분석 시 갱신).
-    analysis.embedding이 있으면 paper_embeddings에도 함께 upsert 한다.
+    paper_analysis에 upsert 한다 (paper_id UNIQUE → 재분석하면 기존 행을 갱신하고
+    generated_at을 갱신 시각으로 다시 찍는다. 행이 새로 생기지 않으므로 id는 그대로다).
+    저장이 끝나면 그 논문은 get_new_papers()의 '미분석' 목록에서 빠진다.
+
+    analysis.embedding이 있으면 paper_embeddings에도 같은 트랜잭션으로 함께 upsert 한다
+    (둘 다 성공하거나 둘 다 취소된다). embedding이 없으면 paper_embeddings는 건드리지 않는다.
+
+    ⚠️ 임베딩 경로는 구현만 해두고 아직 실 데이터로 검증하지 않았다.
+      001_init.sql의 vector(768)과 config.embedding_dim(1536)이 아직 어긋나 있어서,
+      차원이 맞지 않는 벡터를 주면 DB가 거부한다(pgvector 차원 오류).
+      AI 담당이 임베딩 모델을 확정해 차원을 맞춘 뒤에 검증한다.
 
     Args:
         analysis: 근거분류(study_type/evidence_level/guideline_relation) +
@@ -299,8 +309,83 @@ def save_summary(analysis: AnalysisIn) -> UUID:
 
     Returns:
         저장된 paper_analysis row의 id (UUID).
+
+    Raises:
+        ValueError: embedding을 주면서 embedding_model을 주지 않은 경우.
+            (paper_embeddings.model_name이 NOT NULL이라 모델 이름이 반드시 필요하다.)
     """
-    raise NotImplementedError
+    if analysis.embedding is not None and not analysis.embedding_model:
+        raise ValueError("embedding을 저장하려면 embedding_model도 함께 주어야 합니다.")
+
+    # EXCLUDED = INSERT 하려던 새 값. 충돌하면 기존 행을 새 값으로 덮어쓴다.
+    # generated_at도 now()로 다시 찍어 '언제 재분석했는지'가 남게 한다.
+    analysis_sql = """
+        INSERT INTO paper_analysis (
+            paper_id, study_type, evidence_level, guideline_relation,
+            summary_finding, summary_comparison, summary_limitation, tags, model_name
+        )
+        VALUES (
+            %(paper_id)s, %(study_type)s, %(evidence_level)s, %(guideline_relation)s,
+            %(summary_finding)s, %(summary_comparison)s, %(summary_limitation)s,
+            %(tags)s, %(model_name)s
+        )
+        ON CONFLICT (paper_id) DO UPDATE
+           SET study_type         = EXCLUDED.study_type,
+               evidence_level     = EXCLUDED.evidence_level,
+               guideline_relation = EXCLUDED.guideline_relation,
+               summary_finding    = EXCLUDED.summary_finding,
+               summary_comparison = EXCLUDED.summary_comparison,
+               summary_limitation = EXCLUDED.summary_limitation,
+               tags               = EXCLUDED.tags,
+               model_name         = EXCLUDED.model_name,
+               generated_at       = now()
+        RETURNING id
+    """
+    params = {
+        "paper_id": analysis.paper_id,
+        "study_type": analysis.study_type,
+        "evidence_level": analysis.evidence_level,
+        "guideline_relation": analysis.guideline_relation,
+        "summary_finding": analysis.summary_finding,
+        "summary_comparison": analysis.summary_comparison,
+        "summary_limitation": analysis.summary_limitation,
+        "tags": analysis.tags,
+        "model_name": analysis.model_name,
+    }
+
+    # paper_embeddings는 paper_id가 PRIMARY KEY라 같은 논문을 다시 넣으면 갱신된다.
+    embedding_sql = """
+        INSERT INTO paper_embeddings (paper_id, embedding, model_name)
+        VALUES (%(paper_id)s, %(embedding)s, %(model_name)s)
+        ON CONFLICT (paper_id) DO UPDATE
+           SET embedding  = EXCLUDED.embedding,
+               model_name = EXCLUDED.model_name,
+               created_at = now()
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(analysis_sql, params)
+            analysis_id = cur.fetchone()[0]
+
+            if analysis.embedding is not None:
+                # Vector()로 감싸야 pgvector 타입으로 넘어간다 (list 그대로면 배열로 해석됨).
+                cur.execute(
+                    embedding_sql,
+                    {
+                        "paper_id": analysis.paper_id,
+                        "embedding": Vector(analysis.embedding),
+                        "model_name": analysis.embedding_model,
+                    },
+                )
+
+    logger.info(
+        "save_summary: paper_id=%s 저장 (analysis_id=%s, embedding=%s)",
+        analysis.paper_id,
+        analysis_id,
+        "있음" if analysis.embedding is not None else "없음",
+    )
+    return analysis_id
 
 
 def search_similar(

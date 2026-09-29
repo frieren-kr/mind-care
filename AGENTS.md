@@ -167,9 +167,14 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `FetchByPmidsResult(papers, missing_abstract, not_found)`를 돌려줘서, 초록이 없거나 PubMed에 없는
   PMID를 조용히 버리지 않는다. 저장은 `save_papers()`로 따로 한다.
 
-> `save_papers()` / `get_new_papers()` / `get_papers_by_ids()` / `update_paper_metadata()` /
-> `get_papers_missing_metadata()`는 구현 완료. `save_summary()`와 `search_similar()`는
-> 아직 스텁(`NotImplementedError`)이다 — 시그니처/스키마 합의가 먼저, 구현은 그 다음.
+- `save_summary()`는 `paper_analysis`에 upsert 한다 (`paper_id` UNIQUE → 재분석하면 기존 행을 갱신하고
+  `generated_at`을 다시 찍는다. id는 그대로). 저장한 논문은 `get_new_papers()` 목록에서 빠진다.
+  `embedding`을 함께 주면 `paper_embeddings`에도 같은 트랜잭션으로 upsert 하며, 이때 `embedding_model`이
+  없으면 `ValueError`를 던진다(`paper_embeddings.model_name`이 NOT NULL).
+  **임베딩 경로는 구현만 해둔 상태로 아직 검증하지 않았다** — 아래 `vector(768)` 차원 문제가 풀린 뒤에 검증한다.
+
+> `search_similar()`만 아직 스텁(`NotImplementedError`)이다 — 시그니처/스키마 합의가 먼저,
+> 구현은 그 다음. 나머지 함수는 모두 구현 완료.
 
 ### 결정사항: 논문 관련성 판단 (2026-09-23)
 
@@ -199,7 +204,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   기존 50건은 `scripts/backfill_paper_metadata.py`로 채웠다(50/50).
   새 DB는 `docker compose up -d` 시 001 → 002 순서로 자동 실행된다(임시 컨테이너로 확인).
 - `get_papers_by_ids()` 구현·검증 완료 (2026-09-29, 실 DB). 입력 순서 유지, 없는 id는 제외 확인.
-- 아직 `save_summary()` / `search_similar()` 구현, AI 파이프라인, 화면이 없다.
+- **`save_summary()` 구현·검증 완료** (2026-09-29, 실 DB). 요약 저장 → 같은 논문 재저장 시
+  같은 id로 갱신(행 1개 유지) → `get_new_papers()` 50건에서 49건으로 줄어드는 것까지 확인하고
+  테스트 데이터는 삭제했다. 임베딩 경로는 차원 문제 때문에 아직 미검증.
+- 아직 `search_similar()` 구현, AI 파이프라인, 화면이 없다.
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **미해결 — AI 담당 확인 후 `vector(768)` 차원 확정 예정.**
