@@ -14,7 +14,8 @@
 ## 빠른 시작
 
 DB는 Docker로 띄웁니다. 로컬에 PostgreSQL을 설치할 필요가 없고, 최초 기동 시
-스키마(`001_init.sql`)가 자동으로 적용됩니다. (준비물: Docker Desktop)
+`app/db/migrations/` 안의 SQL이 파일명 순서대로(`001` → `002` → …) 자동 적용됩니다.
+(준비물: Docker Desktop)
 
 ```bash
 cd backend
@@ -22,6 +23,32 @@ cp .env.example .env          # POSTGRES_PASSWORD / DATABASE_URL 채우기 (.env
 docker compose up -d          # PostgreSQL 17 + pgvector 기동
 docker compose ps             # STATUS가 "healthy"면 준비 완료
 ```
+
+### ⚠️ 이미 DB를 띄워 둔 사람은 002를 직접 적용해야 합니다
+
+마이그레이션 자동 실행은 **DB를 처음 만들 때(볼륨이 비어 있을 때) 한 번만** 일어납니다.
+이미 `docker compose up -d`로 DB를 쓰고 있었다면 `002_add_paper_metadata.sql`
+(논문 메타데이터 컬럼: `journal` / `doi` / `publication_types` / `mesh_terms`)이
+자동으로 반영되지 않으므로, `backend/` 에서 아래 명령으로 직접 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\002_add_paper_metadata.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/002_add_paper_metadata.sql
+```
+
+`ADD COLUMN IF NOT EXISTS`라서 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d papers"
+```
+
+`journal` / `doi` / `publication_types` / `mesh_terms` 네 컬럼이 보이면 완료입니다.
+(DB를 처음부터 다시 만들어도 됩니다 — `docker compose down -v` 후 `up -d`. 단, **저장된 논문 데이터가 모두 지워집니다.**)
 
 백엔드 실행:
 
@@ -42,6 +69,19 @@ npm start
 
 DB 확인·재생성·문제 해결 등 자세한 내용은 [`backend/README.md`](backend/README.md)를 참고하세요.
 
+## 팀 협업 규칙 (핵심)
+
+- 작업은 `develop` 브랜치에 push한다.
+- `main`에는 직접 push하지 않는다 (PR + 팀장 승인 후 병합).
+- 자기 담당 폴더만 수정한다. 다른 영역은 담당자에게 먼저 확인한다.
+- `.env` / API 키 / 비밀번호는 커밋하지 않는다.
+- AI 도구가 알아서 커밋·push하지 않게 한다 (명시적으로 요청할 때만).
+
+자세한 규칙은 [`AGENTS.md`](AGENTS.md)를 참고하세요.
+
+> **사용하는 AI 도구가 `AGENTS.md`를 읽는지 확인해주세요.**
+> Gemini CLI는 설정에서 `AGENTS.md`를 지정해야 합니다.
+
 ## 폴더 구조
 
 ```
@@ -55,7 +95,7 @@ mind-care/
 │  │  └─ collectors/    PubMed 수집
 │  └─ requirements.txt
 ├─ frontend/    React Native(Expo) 앱
-└─ CLAUDE.md    아키텍처·역할·코딩 규칙 문서
+└─ AGENTS.md    아키텍처·팀 협업 규칙·데이터 접근 계약 (모든 AI 도구 공통)
 ```
 
-자세한 개발 환경 설정과 실행 방법은 [`backend/README.md`](backend/README.md), 아키텍처·팀 규칙은 [`CLAUDE.md`](CLAUDE.md)를 참고하세요.
+자세한 개발 환경 설정과 실행 방법은 [`backend/README.md`](backend/README.md), 아키텍처·팀 규칙은 [`AGENTS.md`](AGENTS.md)를 참고하세요.

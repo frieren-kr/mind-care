@@ -3,7 +3,7 @@
 ★ 팀 규칙 ★
 AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 반드시 이 모듈의 함수를 통해서만 데이터에 접근한다.
-함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 CLAUDE.md에 기록한다.
+함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
 
 테이블 정의는 `app/db/migrations/001_init.sql`이 정본이다.
 save_papers() / get_new_papers()는 구현되어 있고, 나머지 함수는 아직 시그니처와

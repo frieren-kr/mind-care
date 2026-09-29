@@ -2,7 +2,7 @@
 
 테이블 정의는 `app/db/migrations/001_init.sql`이 정본이고,
 이 파일은 그 스키마를 파이썬 쪽에서 드러내는 계약이다.
-스키마가 바뀌면 반드시 CLAUDE.md의 "데이터 접근 계약" 섹션도 갱신한다.
+스키마가 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약" 섹션도 갱신한다.
 """
 from datetime import date, datetime
 from typing import Optional
