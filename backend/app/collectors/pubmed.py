@@ -4,6 +4,9 @@ NCBI E-utilities를 두 단계로 호출한다:
   1. esearch — 검색어 + 최근 N일 조건으로 PMID 목록을 받는다.
   2. efetch  — PMID 묶음의 상세 정보(XML)를 받아 papers 스키마에 맞게 파싱한다.
 
+PMID를 이미 알고 있을 때는 `fetch_papers_by_pmids()`로 검색 단계를 건너뛴다
+(라벨링 후보 적재, 기존 논문 메타데이터 채우기 등).
+
 주 1회 배치(Celery/cron)로 `collect_and_store()`를 실행한다.
 저장은 반드시 `app.db.functions.save_papers()`를 통해서만 한다 (팀 규칙: raw SQL 금지).
 
@@ -18,6 +21,7 @@ from typing import Optional
 from xml.etree import ElementTree as ET
 
 import httpx
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.db.functions import save_papers
@@ -178,8 +182,58 @@ def _parse_published_date(article: ET.Element) -> Optional[date]:
     return None
 
 
-def _parse_article(article: ET.Element) -> Optional[PaperIn]:
-    """PubmedArticle 하나를 PaperIn으로 바꾼다. PMID/제목/초록이 없으면 None."""
+def _parse_journal(article: ET.Element) -> Optional[str]:
+    """학술지명. 정식 명칭(Title)을 우선하고 없으면 약어(ISOAbbreviation)를 쓴다."""
+    journal = _text(article.find(".//Article/Journal/Title"))
+    if not journal:
+        journal = _text(article.find(".//Article/Journal/ISOAbbreviation"))
+    return journal or None
+
+
+def _parse_doi(article: ET.Element) -> Optional[str]:
+    """DOI. PubmedData/ArticleIdList를 먼저 보고, 없으면 ELocationID에서 찾는다."""
+    for node in article.findall(".//PubmedData/ArticleIdList/ArticleId"):
+        if node.get("IdType") == "doi":
+            doi = _text(node)
+            if doi:
+                return doi
+    for node in article.findall(".//Article/ELocationID"):
+        if node.get("EIdType") == "doi":
+            doi = _text(node)
+            if doi:
+                return doi
+    return None
+
+
+def _parse_publication_types(article: ET.Element) -> list[str]:
+    """PublicationType 목록 (예: Randomized Controlled Trial, Review).
+
+    AI 담당이 study_type / evidence_level을 판단하는 입력으로 쓴다.
+    순서는 PubMed XML 순서를 그대로 유지하고 중복만 제거한다.
+    """
+    types = [_text(node) for node in article.findall(".//Article/PublicationTypeList/PublicationType")]
+    return list(dict.fromkeys(t for t in types if t))
+
+
+def _parse_mesh_terms(article: ET.Element) -> list[str]:
+    """MeSH 용어 목록 (DescriptorName). 주제 필터링용.
+
+    Qualifier(하위 한정어)는 제외하고 주제어만 담는다.
+    MeSH는 색인 이후에 붙어서, 최근 논문은 비어 있을 수 있다 (정상).
+    """
+    terms = [_text(node) for node in article.findall(".//MeshHeadingList/MeshHeading/DescriptorName")]
+    return list(dict.fromkeys(t for t in terms if t))
+
+
+def _parse_article(article: ET.Element, require_abstract: bool = True) -> Optional[PaperIn]:
+    """PubmedArticle 하나를 PaperIn으로 바꾼다. PMID/제목이 없으면 None.
+
+    Args:
+        article: PubmedArticle 엘리먼트.
+        require_abstract: True면 초록 없는 논문을 버린다(기본, 주 1회 배치용).
+            False면 abstract=None인 채로 돌려준다 — 초록 유무와 상관없이
+            지정한 PMID를 반드시 받아야 할 때(예: 라벨링 후보) 쓴다.
+    """
     pmid = _text(article.find(".//MedlineCitation/PMID"))
     title = _text(article.find(".//Article/ArticleTitle"))
     abstract = _parse_abstract(article)
@@ -187,7 +241,7 @@ def _parse_article(article: ET.Element) -> Optional[PaperIn]:
     if not pmid or not title:
         logger.debug("PMID/제목이 없어 건너뜀 (pmid=%r, title=%r)", pmid, title)
         return None
-    if not abstract:
+    if not abstract and require_abstract:
         logger.debug("초록이 없어 건너뜀 (PMID %s)", pmid)
         return None
 
@@ -198,6 +252,10 @@ def _parse_article(article: ET.Element) -> Optional[PaperIn]:
         abstract=abstract,
         published_date=_parse_published_date(article),
         url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+        journal=_parse_journal(article),
+        doi=_parse_doi(article),
+        publication_types=_parse_publication_types(article),
+        mesh_terms=_parse_mesh_terms(article),
     )
 
 
@@ -233,6 +291,75 @@ def fetch_papers(days_back: int = 7, max_results: int = 100) -> list[PaperIn]:
         len(pmids) - len(papers),
     )
     return papers
+
+
+class FetchByPmidsResult(BaseModel):
+    """fetch_papers_by_pmids() 결과.
+
+    초록이 없거나 PubMed에 없는 PMID를 조용히 버리지 않고 따로 돌려준다.
+    (라벨링 후보처럼 '빠지면 안 되는' 목록을 다룰 때 무엇이 빠졌는지 봐야 한다.)
+    """
+
+    papers: list[PaperIn] = Field(default_factory=list, description="파싱된 논문")
+    missing_abstract: list[str] = Field(
+        default_factory=list, description="초록이 없어 제외된 PMID (require_abstract=True일 때만)"
+    )
+    not_found: list[str] = Field(
+        default_factory=list, description="PubMed 응답에 아예 없던 PMID (오타/철회 등)"
+    )
+
+
+def fetch_papers_by_pmids(
+    pmids: list[str],
+    require_abstract: bool = True,
+) -> FetchByPmidsResult:
+    """PMID 목록으로 논문 상세를 가져온다. (검색 단계 없이 efetch만 사용)
+
+    esearch를 건너뛰므로 이미 PMID를 알고 있을 때 쓴다 — 라벨링 후보 적재,
+    기존 논문의 메타데이터 채우기 등. 요청 간격 제한(_throttle)은 그대로 지킨다.
+
+    Args:
+        pmids: PMID 문자열 목록. 중복은 제거하고 입력 순서를 유지한다.
+        require_abstract: 초록 없는 논문을 버릴지 여부. 버린 PMID는
+            결과의 missing_abstract에 담는다.
+
+    Returns:
+        FetchByPmidsResult — 파싱된 논문 + 초록 없어 빠진 PMID + 못 찾은 PMID.
+        (저장은 하지 않는다. 저장은 save_papers()로.)
+    """
+    ordered = list(dict.fromkeys(p.strip() for p in pmids if p and p.strip()))
+    if not ordered:
+        return FetchByPmidsResult()
+
+    papers: list[PaperIn] = []
+    missing_abstract: list[str] = []
+    seen: set[str] = set()
+
+    for start in range(0, len(ordered), EFETCH_BATCH_SIZE):
+        batch = ordered[start:start + EFETCH_BATCH_SIZE]
+        root = _fetch_articles_xml(batch)
+        for article in root.findall(".//PubmedArticle"):
+            pmid = _text(article.find(".//MedlineCitation/PMID"))
+            if pmid:
+                seen.add(pmid)
+            paper = _parse_article(article, require_abstract=require_abstract)
+            if paper is not None:
+                papers.append(paper)
+            elif pmid and not _parse_abstract(article):
+                missing_abstract.append(pmid)
+        logger.info("efetch: %d개 요청 → 누적 %d건 파싱", len(batch), len(papers))
+
+    not_found = [pmid for pmid in ordered if pmid not in seen]
+    if missing_abstract:
+        logger.warning("초록 없음 %d건: %s", len(missing_abstract), ", ".join(missing_abstract))
+    if not_found:
+        logger.warning("PubMed에서 찾지 못함 %d건: %s", len(not_found), ", ".join(not_found))
+
+    return FetchByPmidsResult(
+        papers=papers,
+        missing_abstract=missing_abstract,
+        not_found=not_found,
+    )
 
 
 def collect_and_store(days_back: int = 7, max_results: int = 100) -> SavePapersResult:

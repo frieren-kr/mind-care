@@ -82,6 +82,16 @@ class PaperIn(BaseModel):
     abstract: Optional[str] = None
     published_date: Optional[date] = None
     url: Optional[str] = None
+    # --- 002_add_paper_metadata.sql에서 추가된 컬럼 (2026-09-29) ---
+    journal: Optional[str] = Field(default=None, description="학술지명")
+    doi: Optional[str] = Field(default=None, description="DOI")
+    publication_types: list[str] = Field(
+        default_factory=list,
+        description="PubMed PublicationType 목록 (RCT / Review 등) — 근거 등급 분류 입력",
+    )
+    mesh_terms: list[str] = Field(
+        default_factory=list, description="MeSH 용어 목록 — 주제 필터링"
+    )
 
 
 class SavePapersResult(BaseModel):
@@ -92,4 +102,33 @@ class SavePapersResult(BaseModel):
     skipped: int = Field(description="이미 있어서 건너뛴 건수 (source, external_id 중복)")
     inserted_ids: list[UUID] = Field(
         default_factory=list, description="새로 저장된 papers.id 목록"
+    )
+
+
+class PaperDetail(BaseModel):
+    """get_papers_by_ids()가 반환하는 논문 한 건.
+
+    search_similar()가 돌려준 paper_id로 본문·메타데이터를 마저 받아올 때 쓴다.
+    (AI 담당이 근거 등급 분류·주제 필터링에 필요한 필드만 모은 형태)
+    """
+
+    paper_id: UUID = Field(description="papers.id — 입력으로 준 id와 같다")
+    external_id: str = Field(description="PMID (source='pubmed'인 경우)")
+    title: str
+    abstract: Optional[str] = None
+    journal: Optional[str] = None
+    published_date: Optional[date] = None
+    publication_types: list[str] = Field(default_factory=list)
+    mesh_terms: list[str] = Field(default_factory=list)
+    doi: Optional[str] = None
+
+
+class UpdateMetadataResult(BaseModel):
+    """update_paper_metadata()가 반환하는 갱신 결과 집계."""
+
+    total: int = Field(description="갱신을 시도한 건수 (입력 개수, 중복 제거 후)")
+    updated: int = Field(description="실제로 갱신된 papers 행 수")
+    not_found: list[str] = Field(
+        default_factory=list,
+        description="papers에 없어서 갱신하지 못한 external_id 목록 (이 함수는 새로 넣지 않는다)",
     )
