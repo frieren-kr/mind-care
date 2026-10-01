@@ -8,7 +8,13 @@ from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+# 임베딩 차원 — DB 스키마와 반드시 같아야 하는 값.
+# 정본은 app/db/migrations/003_embedding_dim_1024.sql 의 vector(1024) 이고,
+# 이 상수는 DB에 가기 전에 벡터 길이를 걸러내기 위해 둔다 (bge-m3 = 1024차원).
+# ★ 차원을 바꿀 때는 새 마이그레이션 + 이 상수 + config.py embedding_dim 을 함께 고친다.
+EMBEDDING_DIM = 1024
 
 
 class PaperOut(BaseModel):
@@ -131,4 +137,49 @@ class UpdateMetadataResult(BaseModel):
     not_found: list[str] = Field(
         default_factory=list,
         description="papers에 없어서 갱신하지 못한 external_id 목록 (이 함수는 새로 넣지 않는다)",
+    )
+
+
+# ------------------------------------------------------------
+# 임베딩 전용 (paper_embeddings) — 2026-10-01 추가
+# 요약(paper_analysis)과 임베딩을 따로 돌릴 수 있게 분리한 경로다.
+# 이 두 모델을 쓰는 함수는 paper_analysis를 건드리지 않는다.
+# ------------------------------------------------------------
+
+
+class EmbeddingIn(BaseModel):
+    """save_embeddings()가 받는 임베딩 한 건. (paper_embeddings 입력)
+
+    논문당 임베딩은 1건만 유지한다 (paper_embeddings.paper_id가 PRIMARY KEY).
+    모델 이름은 배치 전체가 같으므로 save_embeddings()의 model_name 인자로 따로 받는다.
+    """
+
+    paper_id: UUID = Field(description="papers.id (external_id 아님)")
+    embedding: list[float] = Field(description=f"임베딩 벡터. 길이는 반드시 {EMBEDDING_DIM}")
+
+    @field_validator("embedding")
+    @classmethod
+    def _check_dim(cls, value: list[float]) -> list[float]:
+        """DB에 가기 전에 차원을 검사한다.
+
+        다른 모델(예: 1536차원 OpenAI)로 만든 벡터가 섞여 들어오면
+        DB는 거부하지만 어떤 논문이 문제인지 알기 어렵다. 여기서 먼저 걸러
+        paper_id와 실제 길이를 함께 알려 준다.
+        """
+        if len(value) != EMBEDDING_DIM:
+            raise ValueError(
+                f"임베딩 차원이 맞지 않습니다: {len(value)} (기대값 {EMBEDDING_DIM}). "
+                "bge-m3가 아닌 모델의 벡터가 섞이지 않았는지 확인하세요."
+            )
+        return value
+
+
+class SaveEmbeddingsResult(BaseModel):
+    """save_embeddings()가 반환하는 저장 결과 집계."""
+
+    total: int = Field(description="저장을 시도한 건수 (배치 내 중복 paper_id 제거 후)")
+    saved: int = Field(description="실제로 저장/갱신된 건수")
+    not_found: list[UUID] = Field(
+        default_factory=list,
+        description="papers에 없어서 저장하지 못한 paper_id 목록 (이 함수는 논문을 새로 넣지 않는다)",
     )
