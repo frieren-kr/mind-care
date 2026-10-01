@@ -5,9 +5,8 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 반드시 이 모듈의 함수를 통해서만 데이터에 접근한다.
 함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
 
-테이블 정의는 `app/db/migrations/001_init.sql`이 정본이다.
-search_similar()만 아직 시그니처와 반환 스키마를 확정한 스텁이다.
-나머지 함수는 구현되어 있다.
+테이블 정의는 `app/db/migrations/001_init.sql`(+ 002, 003 마이그레이션)이 정본이다.
+이 모듈의 함수는 모두 구현·검증되어 있다.
 """
 import json
 import logging
@@ -565,15 +564,58 @@ def search_similar(
 ) -> list[SearchResult]:
     """질의 임베딩과 유사한 논문을 pgvector 코사인 거리 기준으로 검색한다.
 
-    paper_embeddings를 검색하고 papers / paper_analysis를 조인해 돌려준다.
+    paper_embeddings만 본다. **논문 제목·초록·요약은 돌려주지 않는다** —
+    paper_id와 유사도 점수만 가까운 순서대로 준다. 나머지 정보는 받은 순서대로
+    get_papers_by_ids()에 넣으면 된다 (그 함수가 입력 순서를 유지하므로
+    유사도 순서가 그대로 보존된다).
+
+    점수는 코사인 유사도(= 1 - 코사인 거리)다. 1에 가까울수록 비슷하고,
+    같은 벡터로 검색하면 자기 자신이 1.0으로 1위에 온다.
 
     Args:
-        embedding: 질의 벡터. 길이는 001_init.sql의 vector(N)과 일치해야 한다.
-        top_k: 반환할 개수.
-        model_name: 임베딩 모델 필터. 여러 모델이 섞여 있을 때 같은 모델끼리만
-            비교하기 위해 쓴다. None이면 전체.
+        embedding: 질의 벡터. 길이는 반드시 EMBEDDING_DIM(= 1024, bge-m3)이어야 한다.
+        top_k: 반환할 개수. 0 이하면 DB에 가지 않고 빈 목록을 돌려준다.
+        model_name: 임베딩 모델 필터. 모델이 다르면 벡터 공간이 달라서 점수를
+            비교하는 의미가 없으므로, 여러 모델이 섞여 있을 때는 반드시 지정한다.
+            None이면 저장된 전체를 대상으로 한다.
 
     Returns:
-        SearchResult 리스트 (score 내림차순).
+        SearchResult(paper_id, score) 리스트, score 내림차순.
+        임베딩이 아직 하나도 없으면 빈 목록.
+
+    Raises:
+        ValueError: 벡터 길이가 EMBEDDING_DIM과 다른 경우.
     """
-    raise NotImplementedError
+    if len(embedding) != EMBEDDING_DIM:
+        raise ValueError(
+            f"질의 임베딩 차원이 맞지 않습니다: {len(embedding)} (기대값 {EMBEDDING_DIM}). "
+            "검색할 때는 논문을 저장할 때와 같은 모델(bge-m3)을 써야 합니다."
+        )
+    if top_k <= 0:
+        return []
+
+    # <=> 는 pgvector의 코사인 거리 연산자(0=같음 ~ 2=반대).
+    # 거리 오름차순 = 유사도 내림차순이고, ORDER BY 를 이 형태로 써야
+    # 003에서 만든 HNSW 인덱스(vector_cosine_ops)를 탄다.
+    # model_name은 NULL이면 조건을 통째로 무시한다 (SQL 한 벌로 두 경우를 처리).
+    sql = """
+        SELECT e.paper_id,
+               1 - (e.embedding <=> %(embedding)s) AS score
+          FROM paper_embeddings AS e
+         WHERE (%(model_name)s::text IS NULL OR e.model_name = %(model_name)s::text)
+         ORDER BY e.embedding <=> %(embedding)s
+         LIMIT %(top_k)s
+    """
+    params = {
+        # Vector()로 감싸야 pgvector 타입으로 넘어간다 (list 그대로면 배열로 해석됨).
+        "embedding": Vector(embedding),
+        "model_name": model_name,
+        "top_k": top_k,
+    }
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [SearchResult(**row) for row in rows]

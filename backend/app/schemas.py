@@ -62,16 +62,19 @@ class AnalysisIn(BaseModel):
 class SearchResult(BaseModel):
     """search_similar()가 반환하는 검색 결과 한 건.
 
-    paper_embeddings 유사도 검색 결과에 papers / paper_analysis를 조인한 형태.
+    ★ 2026-10-01 변경: paper_id와 점수만 돌려준다.
+      이전 초안에는 title / url / summary_finding / evidence_level도 들어 있었지만,
+      그 정보는 AI 쪽이 get_papers_by_ids()로 받아 붙이기로 정리했다
+      (get_papers_by_ids()는 입력 순서를 그대로 유지하므로 유사도 순서가 보존된다).
+      검색 함수는 paper_embeddings만 보고, 논문 본문·요약과 결합하지 않는다.
+
     paper_id는 chat_messages.cited_paper_ids에 그대로 넣을 수 있다.
     """
 
     paper_id: UUID
-    title: str
-    url: Optional[str] = None
-    summary_finding: Optional[str] = Field(default=None, description="분석 전이면 None")
-    evidence_level: Optional[str] = None
-    score: float = Field(description="유사도 점수 (1 - 코사인 거리)")
+    score: float = Field(
+        description="코사인 유사도 (1 - 코사인 거리). 1에 가까울수록 비슷하다"
+    )
 
 
 class PaperIn(BaseModel):
