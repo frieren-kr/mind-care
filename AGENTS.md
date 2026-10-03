@@ -244,9 +244,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   같은 id로 갱신(행 1개 유지) → `get_new_papers()` 50건에서 49건으로 줄어드는 것까지 확인하고
   테스트 데이터는 삭제했다. 임베딩 경로는 차원 문제 때문에 아직 미검증.
 - 아직 AI 파이프라인(분류·요약·실제 임베딩 생성)과 화면이 없다.
-- **라벨링 후보 60편은 아직 적재하지 않았다** — `backend/app/db/seed/`에 PMID 목록 파일
-  (`labeling_candidates.txt`)이 없다. 파일이 올라오면 `python -m scripts.seed_labeling_papers --dry-run`
-  → 확인 후 실제 적재한다. (형식은 `backend/app/db/seed/README.md`)
+- **라벨링 후보 60편 적재 완료** (2026-10-03, 실 DB). `backend/app/db/seed/labeling_candidates.txt`의
+  PMID 60건을 `python -m scripts.seed_labeling_papers`로 적재 → **신규 56건 + 기존 4건**(이미 있던
+  논문은 `save_papers()`의 중복 스킵 동작대로 건너뜀).
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**
