@@ -86,6 +86,34 @@ EMBEDDING_MODEL=bge-m3
 EMBEDDING_DIM=1024
 ```
 
+### ⚠️ 이미 DB를 띄워 둔 사람은 004도 직접 적용해야 합니다
+
+위와 같은 이유로 `004_patient_management.sql`도 자동 반영되지 않습니다.
+`users`에 `phone_number` 컬럼을 추가하고, 환자 관리 테이블 4개
+(`clinical_assessments` / `safety_events` / `medications` / `medical_visits`)를 만드는 마이그레이션입니다.
+`backend/` 에서 아래 명령으로 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\004_patient_management.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/004_patient_management.sql
+```
+
+`ADD COLUMN IF NOT EXISTS` / `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`라서
+**여러 번 실행해도 안전합니다** (이미 있으면 NOTICE만 남기고 건너뜁니다). 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d clinical_assessments"
+```
+
+`clinical_assessments` / `safety_events` / `medications` / `medical_visits` 네 테이블과
+`users`의 `phone_number` 컬럼이 보이면 완료입니다.
+(논문 `papers`·임베딩 `paper_embeddings` 데이터는 건드리지 않습니다.)
+
 ### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
 
 팀은 **같은 논문 1,000편 + bge-m3 임베딩 1,000개**를 기준 데이터로 공유합니다.

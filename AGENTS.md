@@ -126,6 +126,19 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 함수 입출력은 `backend/app/schemas.py`가 정본.
 **아래 표를 바꿀 때는 항상 코드와 이 문서를 동시에 수정한다.**
 
+### 데이터 접근 함수 담당 나누기
+
+`backend/app/db/functions.py`는 팀 공용 관문이고, **DB는 이 함수들로만 접근한다**는
+규칙은 그대로다(직접 SQL 금지). 다만 도메인별로 함수 담당을 아래처럼 나눈다.
+
+| 도메인 | 다루는 테이블 | 담당 |
+|---|---|---|
+| 논문·임베딩·요약·검색 | `papers`, `paper_embeddings`, `paper_analysis` | 박주현 |
+| 사용자·환자 관련 | `users`, `patient_profiles`, `caregiver_profiles`, `clinical_assessments`, `safety_events`, `medications`, `medical_visits` | 김한슬 |
+
+**함수를 추가·변경한 사람이 위 "데이터 접근 계약" 표(와 `schemas.py`)도 같이 고친다.**
+(계약 표를 바꾸기 전에는 팀에 공지한다 — "담당 영역" 규칙과 동일.)
+
 | 함수 | 입력 | 반환 |
 |------|------|------|
 | `save_papers(papers: list[PaperIn])` | `papers`: 수집기가 만든 `PaperIn` 목록 | `SavePapersResult` |
