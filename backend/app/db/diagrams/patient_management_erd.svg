@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1900" height="1300" viewBox="0 0 1900 1300" role="img" aria-labelledby="title desc">
+  <title id="title">Mind Care 환자 관리 ERD</title>
+  <desc id="desc">사용자, 환자 프로필, 치매 평가 이력, 안전 행동 이벤트, 복약 정보, 병원 방문 기록의 일대다 관계</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#111827" flood-opacity="0.12"/></filter>
+    <style>
+      .title{font:700 28px Arial,sans-serif;fill:#111827}.subtitle{font:14px Arial,sans-serif;fill:#4b5563}
+      .box{fill:#fff;stroke-width:2;rx:10;filter:url(#shadow)}.head{stroke:none}.h{font:700 16px Arial,sans-serif}.f{font:13px 'Courier New',monospace;fill:#111827}.muted{fill:#6b7280}.key{font-weight:700}.rel{fill:none;stroke:#374151;stroke-width:2}.rlabel{font:700 13px Arial,sans-serif;fill:#374151}.legend{font:13px 'Courier New',monospace;fill:#374151}
+    </style>
+  </defs>
+  <rect width="1900" height="1300" fill="#f8fafc"/>
+  <text x="950" y="38" text-anchor="middle" class="title">Mind Care — 환자 관리 ERD</text>
+  <text x="950" y="66" text-anchor="middle" class="subtitle">Crow's Foot · 모든 FK 관계 ON DELETE CASCADE</text>
+
+  <!-- Relationships, drawn behind entities -->
+  <path class="rel" d="M950 310 V400"/><path class="rel" d="M938 322 H962 M938 388 L950 400 L962 388"/>
+  <text x="968" y="360" class="rlabel">1 : N</text>
+  <path class="rel" d="M950 710 V775 H255 V850 M950 775 H715 V850 M950 775 H1175 V850 M950 775 H1635 V850"/>
+  <path class="rel" d="M938 722 H962"/>
+  <path class="rel" d="M243 838 L255 850 L267 838 M703 838 L715 850 L727 838 M1163 838 L1175 850 L1187 838 M1623 838 L1635 850 L1647 838"/>
+  <text x="280" y="795" class="rlabel">1 : N</text><text x="730" y="795" class="rlabel">1 : N</text><text x="1190" y="795" class="rlabel">1 : N</text><text x="1650" y="795" class="rlabel">1 : N</text>
+
+  <!-- users -->
+  <g><rect x="740" y="90" width="420" height="220" class="box" stroke="#2563eb"/><path d="M750 90H1150Q1160 90 1160 100V132H740V100Q740 90 750 90" class="head" fill="#dbeafe"/><text x="760" y="117" class="h" fill="#1e3a8a">users (사용자/간병인)</text>
+    <text x="760" y="157" class="f"><tspan class="key">PK</tspan><tspan dx="12">id : UUID</tspan><tspan x="760" dy="25">name : TEXT NOT NULL</tspan><tspan x="760" dy="25" class="key">UQ  email : TEXT NOT NULL</tspan><tspan x="760" dy="25" class="key">UQ  phone_number : TEXT NULL</tspan><tspan x="760" dy="25">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="760" dy="25">updated_at : TIMESTAMPTZ NOT NULL</tspan></text>
+  </g>
+
+  <!-- patient_profiles -->
+  <g><rect x="740" y="400" width="420" height="310" class="box" stroke="#059669"/><path d="M750 400H1150Q1160 400 1160 410V442H740V410Q740 400 750 400" class="head" fill="#d1fae5"/><text x="760" y="427" class="h" fill="#064e3b">patient_profiles (환자 프로필)</text>
+    <text x="760" y="467" class="f"><tspan class="key">PK  id : UUID</tspan><tspan x="760" dy="25" class="key">FK  caregiver_id : UUID NOT NULL</tspan><tspan x="760" dy="25">name : TEXT NULL</tspan><tspan x="760" dy="25">dementia_stage : TEXT NULL</tspan><tspan x="760" dy="25">diagnosis_date : DATE NULL</tspan><tspan x="760" dy="25">symptoms : TEXT[]</tspan><tspan x="760" dy="25">interests : TEXT[]</tspan><tspan x="760" dy="25">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="760" dy="25">updated_at : TIMESTAMPTZ NOT NULL</tspan></text>
+  </g>
+
+  <!-- clinical_assessments -->
+  <g><rect x="35" y="850" width="440" height="350" class="box" stroke="#d97706"/><path d="M45 850H465Q475 850 475 860V892H35V860Q35 850 45 850" class="head" fill="#fef3c7"/><text x="55" y="877" class="h" fill="#78350f">clinical_assessments (치매 평가 이력)</text>
+    <text x="55" y="917" class="f"><tspan class="key">PK  id : UUID</tspan><tspan x="55" dy="24" class="key">FK  patient_id : UUID NOT NULL</tspan><tspan x="55" dy="24">assessment_type : TEXT NOT NULL</tspan><tspan x="55" dy="24">score : NUMERIC(5,2) NULL</tspan><tspan x="55" dy="24">result_detail : TEXT NULL</tspan><tspan x="55" dy="24">assessed_at : DATE NOT NULL</tspan><tspan x="55" dy="24">assessed_by : TEXT NULL</tspan><tspan x="55" dy="24">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="55" dy="32" class="muted">IDX (patient_id, assessment_type,</tspan><tspan x="55" dy="20" class="muted">     assessed_at DESC)</tspan></text>
+  </g>
+
+  <!-- safety_events -->
+  <g><rect x="495" y="850" width="440" height="350" class="box" stroke="#dc2626"/><path d="M505 850H925Q935 850 935 860V892H495V860Q495 850 505 850" class="head" fill="#fee2e2"/><text x="515" y="877" class="h" fill="#7f1d1d">safety_events (안전·행동 이벤트)</text>
+    <text x="515" y="917" class="f"><tspan class="key">PK  id : UUID</tspan><tspan x="515" dy="24" class="key">FK  patient_id : UUID NOT NULL</tspan><tspan x="515" dy="24" class="key">UQ  (patient_id, event_date)</tspan><tspan x="515" dy="24">event_date : DATE NOT NULL</tspan><tspan x="515" dy="24">has_fall : BOOLEAN NOT NULL</tspan><tspan x="515" dy="24">has_wandering : BOOLEAN NOT NULL</tspan><tspan x="515" dy="24">has_missing : BOOLEAN NOT NULL</tspan><tspan x="515" dy="24">note : TEXT NULL</tspan><tspan x="515" dy="24">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="515" dy="32" class="muted">IDX (patient_id, event_date DESC)</tspan></text>
+  </g>
+
+  <!-- medications -->
+  <g><rect x="955" y="850" width="440" height="385" class="box" stroke="#7c3aed"/><path d="M965 850H1385Q1395 850 1395 860V892H955V860Q955 850 965 850" class="head" fill="#ede9fe"/><text x="975" y="877" class="h" fill="#4c1d95">medications (복약 정보)</text>
+    <text x="975" y="917" class="f"><tspan class="key">PK  id : UUID</tspan><tspan x="975" dy="24" class="key">FK  patient_id : UUID NOT NULL</tspan><tspan x="975" dy="24">drug_name : TEXT NOT NULL</tspan><tspan x="975" dy="24">dosage : TEXT NULL</tspan><tspan x="975" dy="24">frequency : TEXT NULL</tspan><tspan x="975" dy="24">is_taking : BOOLEAN NOT NULL</tspan><tspan x="975" dy="24">start_date : DATE NULL</tspan><tspan x="975" dy="24">end_date : DATE NULL</tspan><tspan x="975" dy="24">note : TEXT NULL</tspan><tspan x="975" dy="24">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="975" dy="24">updated_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="975" dy="32" class="muted">IDX (patient_id, is_taking)</tspan></text>
+  </g>
+
+  <!-- medical_visits -->
+  <g><rect x="1415" y="850" width="440" height="365" class="box" stroke="#0891b2"/><path d="M1425 850H1845Q1855 850 1855 860V892H1415V860Q1415 850 1425 850" class="head" fill="#cffafe"/><text x="1435" y="877" class="h" fill="#164e63">medical_visits (병원 방문 기록)</text>
+    <text x="1435" y="917" class="f"><tspan class="key">PK  id : UUID</tspan><tspan x="1435" dy="24" class="key">FK  patient_id : UUID NOT NULL</tspan><tspan x="1435" dy="24">visit_date : DATE NOT NULL</tspan><tspan x="1435" dy="24">is_visited : BOOLEAN NOT NULL</tspan><tspan x="1435" dy="24">hospital_name : TEXT NULL</tspan><tspan x="1435" dy="24">department : TEXT NULL</tspan><tspan x="1435" dy="24">visit_content : TEXT NULL</tspan><tspan x="1435" dy="24">created_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="1435" dy="24">updated_at : TIMESTAMPTZ NOT NULL</tspan><tspan x="1435" dy="32" class="muted">IDX (patient_id, visit_date DESC)</tspan></text>
+  </g>
+
+  <rect x="35" y="1250" width="600" height="34" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="55" y="1272" class="legend"><tspan class="key">PK</tspan> 기본 키　 <tspan class="key">FK</tspan> 외래 키　 <tspan class="key">UQ</tspan> 고유 제약　 <tspan class="key">IDX</tspan> 인덱스</text>
+</svg>
