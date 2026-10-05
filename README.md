@@ -86,6 +86,37 @@ EMBEDDING_MODEL=bge-m3
 EMBEDDING_DIM=1024
 ```
 
+### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
+
+팀은 **같은 논문 1,000편 + bge-m3 임베딩 1,000개**를 기준 데이터로 공유합니다.
+논문 덤프는 용량이 커서 **레포에 넣지 않고 노션에서 받습니다**
+(`mindcare_papers_bge-m3.dump`, custom 형식·데이터만).
+
+> 같은 덤프로 복원하면 모든 팀원의 `papers.id`(= AI가 쓰는 `paper_id`)가 **똑같아집니다.**
+> 그래서 임베딩·요약·검색 결과를 팀원끼리 그대로 주고받을 수 있습니다.
+
+1. 노션에서 `mindcare_papers_bge-m3.dump`를 받습니다. (레포 밖, 예: 바탕화면)
+2. DB를 띄웁니다: `docker compose up -d` (STATUS가 healthy인지 `docker compose ps`로 확인).
+3. 기존 논문을 비우고 덤프를 복원합니다. PowerShell은 `<` 입력 리다이렉트가 안 되므로
+   **`docker cp`로 컨테이너에 넣고 그 안에서 `pg_restore`** 하세요.
+
+```powershell
+# Windows PowerShell — 덤프 경로는 각자 받은 위치로 바꾸세요
+docker exec mindcare-db psql -U mindcare -d mindcare -c "TRUNCATE papers CASCADE;"
+docker cp "$HOME\Desktop\mindcare_papers_bge-m3.dump" mindcare-db:/tmp/restore.dump
+docker exec mindcare-db pg_restore --data-only --single-transaction -U mindcare -d mindcare /tmp/restore.dump
+docker exec mindcare-db rm /tmp/restore.dump
+```
+
+`--single-transaction`이라 중간에 실패하면 전부 되돌아갑니다. 확인:
+
+```powershell
+docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*) FROM papers) AS papers, (SELECT count(*) FROM paper_embeddings) AS embeddings;"
+```
+
+`papers 1000 / embeddings 1000`이면 완료입니다.
+(덤프 파일은 `.env`처럼 **레포에 커밋하지 않습니다.**)
+
 백엔드 실행:
 
 ```bash

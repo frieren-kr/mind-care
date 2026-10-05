@@ -247,6 +247,13 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **라벨링 후보 60편 적재 완료** (2026-10-03, 실 DB). `backend/app/db/seed/labeling_candidates.txt`의
   PMID 60건을 `python -m scripts.seed_labeling_papers`로 적재 → **신규 56건 + 기존 4건**(이미 있던
   논문은 `save_papers()`의 중복 스킵 동작대로 건너뜀).
+- **팀 기준 데이터: 논문 1,000편 + bge-m3 임베딩 1,000개** (2026-10-06, 실 DB). AI 담당 김현서 님의
+  DB 덤프(`mindcare_papers_bge-m3.dump`, custom·데이터만)로 교체했다. PMID 목록은
+  `backend/app/db/seed/team_pmids_1000.txt`, 라벨링 후보 60편도 모두 포함된다.
+  검증: `papers`/`paper_embeddings` 각 1,000건, 임베딩 전부 `bge-m3`·1024차원,
+  `get_papers_without_embedding('bge-m3')` 0건, `search_similar()`가 질의 논문을 score 1.0 1위로 반환.
+  **같은 덤프로 복원하면 팀원 모두 `paper_id`가 동일해진다.** 덤프는 레포에 없고 노션에서 받는다
+  (복원 방법은 `README.md`의 "팀원 데이터 맞추기").
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**
