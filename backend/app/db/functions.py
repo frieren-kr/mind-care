@@ -5,23 +5,26 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 반드시 이 모듈의 함수를 통해서만 데이터에 접근한다.
 함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
 
-테이블 정의는 `app/db/migrations/001_init.sql`이 정본이다.
-save_papers() / get_new_papers()는 구현되어 있고, 나머지 함수는 아직 시그니처와
-반환 스키마만 확정한 스텁이다. 실제 SQL 구현은 스키마 팀 리뷰 후 채운다.
+테이블 정의는 `app/db/migrations/001_init.sql`(+ 002, 003 마이그레이션)이 정본이다.
+이 모듈의 함수는 모두 구현·검증되어 있다.
 """
 import json
 import logging
 from typing import Optional
 from uuid import UUID
 
+from pgvector.psycopg import Vector
 from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
 from app.schemas import (
+    EMBEDDING_DIM,
     AnalysisIn,
+    EmbeddingIn,
     PaperDetail,
     PaperIn,
     PaperOut,
+    SaveEmbeddingsResult,
     SavePapersResult,
     SearchResult,
     UpdateMetadataResult,
@@ -42,6 +45,15 @@ _PAPER_COLUMNS = """
 def _papers_as_json(papers: list[PaperIn]) -> str:
     """PaperIn 목록을 jsonb_to_recordset에 넘길 JSON 문자열로 바꾼다 (date → 'YYYY-MM-DD')."""
     return json.dumps([p.model_dump(mode="json") for p in papers])
+
+
+def _as_vector_literal(embedding: list[float]) -> str:
+    """파이썬 리스트를 pgvector 입력 리터럴 문자열로 바꾼다 ([1,2,3] 형태, 공백 없음).
+
+    jsonb_to_recordset으로 배치를 한 번에 넣을 때 vector 타입을 바로 만들 수 없어서,
+    JSON에는 이 문자열로 담아 보내고 SQL에서 ::vector로 되돌린다.
+    """
+    return "[" + ",".join(repr(float(v)) for v in embedding) + "]"
 
 
 def save_papers(papers: list[PaperIn]) -> SavePapersResult:
@@ -185,7 +197,7 @@ def get_papers_by_ids(paper_ids: list[UUID]) -> list[PaperDetail]:
     found = {row["paper_id"] for row in rows}
     missing = [str(pid) for pid in paper_ids if pid not in found]
     if missing:
-        logger.warning("get_papers_by_ids: papers에 없는 id %d개 — %s", len(missing), ", ".join(missing))
+        logger.warning("get_papers_by_ids: papers에 없는 id %d개: %s", len(missing), ", ".join(missing))
 
     return [PaperDetail(**row) for row in rows]
 
@@ -289,8 +301,17 @@ def update_paper_metadata(papers: list[PaperIn]) -> UpdateMetadataResult:
 def save_summary(analysis: AnalysisIn) -> UUID:
     """AI 배치가 만든 논문 분석 결과를 저장한다.
 
-    paper_analysis에 upsert 한다 (paper_id UNIQUE → 재분석 시 갱신).
-    analysis.embedding이 있으면 paper_embeddings에도 함께 upsert 한다.
+    paper_analysis에 upsert 한다 (paper_id UNIQUE → 재분석하면 기존 행을 갱신하고
+    generated_at을 갱신 시각으로 다시 찍는다. 행이 새로 생기지 않으므로 id는 그대로다).
+    저장이 끝나면 그 논문은 get_new_papers()의 '미분석' 목록에서 빠진다.
+
+    analysis.embedding이 있으면 paper_embeddings에도 같은 트랜잭션으로 함께 upsert 한다
+    (둘 다 성공하거나 둘 다 취소된다). embedding이 없으면 paper_embeddings는 건드리지 않는다.
+
+    ⚠️ 임베딩 경로는 구현만 해두고 아직 실 데이터로 검증하지 않았다.
+      001_init.sql의 vector(768)과 config.embedding_dim(1536)이 아직 어긋나 있어서,
+      차원이 맞지 않는 벡터를 주면 DB가 거부한다(pgvector 차원 오류).
+      AI 담당이 임베딩 모델을 확정해 차원을 맞춘 뒤에 검증한다.
 
     Args:
         analysis: 근거분류(study_type/evidence_level/guideline_relation) +
@@ -299,8 +320,241 @@ def save_summary(analysis: AnalysisIn) -> UUID:
 
     Returns:
         저장된 paper_analysis row의 id (UUID).
+
+    Raises:
+        ValueError: embedding을 주면서 embedding_model을 주지 않은 경우.
+            (paper_embeddings.model_name이 NOT NULL이라 모델 이름이 반드시 필요하다.)
     """
-    raise NotImplementedError
+    if analysis.embedding is not None and not analysis.embedding_model:
+        raise ValueError("embedding을 저장하려면 embedding_model도 함께 주어야 합니다.")
+
+    # EXCLUDED = INSERT 하려던 새 값. 충돌하면 기존 행을 새 값으로 덮어쓴다.
+    # generated_at도 now()로 다시 찍어 '언제 재분석했는지'가 남게 한다.
+    analysis_sql = """
+        INSERT INTO paper_analysis (
+            paper_id, study_type, evidence_level, guideline_relation,
+            summary_finding, summary_comparison, summary_limitation, tags, model_name
+        )
+        VALUES (
+            %(paper_id)s, %(study_type)s, %(evidence_level)s, %(guideline_relation)s,
+            %(summary_finding)s, %(summary_comparison)s, %(summary_limitation)s,
+            %(tags)s, %(model_name)s
+        )
+        ON CONFLICT (paper_id) DO UPDATE
+           SET study_type         = EXCLUDED.study_type,
+               evidence_level     = EXCLUDED.evidence_level,
+               guideline_relation = EXCLUDED.guideline_relation,
+               summary_finding    = EXCLUDED.summary_finding,
+               summary_comparison = EXCLUDED.summary_comparison,
+               summary_limitation = EXCLUDED.summary_limitation,
+               tags               = EXCLUDED.tags,
+               model_name         = EXCLUDED.model_name,
+               generated_at       = now()
+        RETURNING id
+    """
+    params = {
+        "paper_id": analysis.paper_id,
+        "study_type": analysis.study_type,
+        "evidence_level": analysis.evidence_level,
+        "guideline_relation": analysis.guideline_relation,
+        "summary_finding": analysis.summary_finding,
+        "summary_comparison": analysis.summary_comparison,
+        "summary_limitation": analysis.summary_limitation,
+        "tags": analysis.tags,
+        "model_name": analysis.model_name,
+    }
+
+    # paper_embeddings는 paper_id가 PRIMARY KEY라 같은 논문을 다시 넣으면 갱신된다.
+    embedding_sql = """
+        INSERT INTO paper_embeddings (paper_id, embedding, model_name)
+        VALUES (%(paper_id)s, %(embedding)s, %(model_name)s)
+        ON CONFLICT (paper_id) DO UPDATE
+           SET embedding  = EXCLUDED.embedding,
+               model_name = EXCLUDED.model_name,
+               created_at = now()
+    """
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(analysis_sql, params)
+            analysis_id = cur.fetchone()[0]
+
+            if analysis.embedding is not None:
+                # Vector()로 감싸야 pgvector 타입으로 넘어간다 (list 그대로면 배열로 해석됨).
+                cur.execute(
+                    embedding_sql,
+                    {
+                        "paper_id": analysis.paper_id,
+                        "embedding": Vector(analysis.embedding),
+                        "model_name": analysis.embedding_model,
+                    },
+                )
+
+    logger.info(
+        "save_summary: paper_id=%s 저장 (analysis_id=%s, embedding=%s)",
+        analysis.paper_id,
+        analysis_id,
+        "있음" if analysis.embedding is not None else "없음",
+    )
+    return analysis_id
+
+
+def get_papers_without_embedding(
+    model_name: str,
+    limit: int = 100,
+) -> list[PaperOut]:
+    """지정한 모델로 임베딩된 적 없는 논문을 반환한다. (임베딩 배치 대상 고르기)
+
+    다음 두 경우를 모두 돌려준다.
+      1) paper_embeddings에 아예 행이 없는 논문
+      2) 행은 있지만 다른 model_name으로 저장된 논문 (모델을 바꿔서 다시 만들어야 하는 논문)
+
+    ★ 요약(paper_analysis)과는 무관하다. 요약이 끝났는지 여부를 보지 않으므로
+      임베딩 배치와 요약 배치를 서로 기다리지 않고 따로 돌릴 수 있다.
+      (요약 대상을 고르는 함수는 get_new_papers()다.)
+
+    Args:
+        model_name: 기준이 되는 임베딩 모델 이름 (예: 'bge-m3').
+            이 이름으로 이미 저장된 논문만 결과에서 빠진다.
+        limit: 최대 반환 개수.
+
+    Returns:
+        PaperOut 리스트 (임베딩에 쓸 title / abstract 포함).
+        정렬은 get_new_papers()와 같다 — published_date DESC NULLS LAST →
+        collected_at DESC → id. 마지막 id 키가 있어야 같은 limit으로 다시 불러도
+        순서가 흔들리지 않는다 (한 배치는 collected_at이 전부 같다).
+    """
+    if limit <= 0:
+        return []
+
+    # LEFT JOIN 후 e.paper_id IS NULL → 임베딩이 없는 논문,
+    # e.model_name <> model_name → 다른 모델로 저장된 논문. 둘 다 대상이다.
+    sql = """
+        SELECT p.id, p.source, p.external_id, p.title,
+               p.abstract, p.published_date, p.url, p.collected_at
+          FROM papers AS p
+          LEFT JOIN paper_embeddings AS e ON e.paper_id = p.id
+         WHERE e.paper_id IS NULL
+            OR e.model_name <> %(model_name)s
+         ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
+         LIMIT %(limit)s
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, {"model_name": model_name, "limit": limit})
+            rows = cur.fetchall()
+
+    return [PaperOut(**row) for row in rows]
+
+
+def save_embeddings(
+    items: list[tuple[UUID, list[float]]] | list[EmbeddingIn],
+    model_name: str,
+) -> SaveEmbeddingsResult:
+    """논문 임베딩을 paper_embeddings에 저장한다. (논문당 1건, 있으면 덮어쓰기)
+
+    ★ paper_analysis(요약) 테이블은 전혀 건드리지 않는다. 요약과 임베딩을
+      따로 돌릴 수 있게 분리해 둔 경로다. (요약 저장은 save_summary())
+
+    차원 검사를 DB에 보내기 **전에** 한다. 다른 모델(예: 1536차원 OpenAI)로 만든
+    벡터가 한 건이라도 섞여 있으면 아무것도 저장하지 않고 ValueError를 던진다 —
+    배치 절반만 저장돼서 모델이 섞이는 사고를 막기 위함이다.
+
+    Args:
+        items: (paper_id, 벡터) 쌍의 목록. schemas.EmbeddingIn 객체를 줘도 된다.
+            벡터 길이는 반드시 EMBEDDING_DIM(= 1024, bge-m3)이어야 한다.
+            같은 paper_id가 배치 안에 여러 번 있으면 **첫 건만** 쓰고 경고 로그를 남긴다
+            (save_papers()와 같은 규칙. 한 INSERT에서 같은 행을 두 번 고칠 수 없다).
+        model_name: 이 배치를 만든 임베딩 모델 이름 (예: 'bge-m3'). 기록용이고,
+            get_papers_without_embedding()이 '다른 모델로 저장된 논문'을 고를 때 쓴다.
+            paper_embeddings.model_name이 NOT NULL이라 빈 값은 받지 않는다.
+
+    Returns:
+        SaveEmbeddingsResult — 시도 건수 / 저장·갱신된 건수 /
+        papers에 없어서 저장하지 못한 paper_id 목록.
+
+    Raises:
+        ValueError: model_name이 비었거나, 벡터 길이가 EMBEDDING_DIM과 다른 경우.
+    """
+    if not model_name or not model_name.strip():
+        raise ValueError("model_name은 비울 수 없습니다 (paper_embeddings.model_name이 NOT NULL).")
+
+    # 1) 입력을 EmbeddingIn으로 정규화 — 이 과정에서 차원 검사가 함께 일어난다.
+    #    한 건이라도 어긋나면 여기서 멈추므로 DB에는 아무것도 들어가지 않는다.
+    rows: list[EmbeddingIn] = []
+    for item in items:
+        if isinstance(item, EmbeddingIn):
+            rows.append(item)
+            continue
+        paper_id, embedding = item
+        if len(embedding) != EMBEDDING_DIM:
+            # paper_id를 함께 알려 줘야 어느 논문이 문제인지 바로 찾을 수 있다.
+            raise ValueError(
+                f"paper_id={paper_id}: 임베딩 차원이 맞지 않습니다: "
+                f"{len(embedding)} (기대값 {EMBEDDING_DIM}). "
+                "bge-m3가 아닌 모델의 벡터가 섞이지 않았는지 확인하세요."
+            )
+        rows.append(EmbeddingIn(paper_id=paper_id, embedding=embedding))
+
+    # 2) 배치 내 중복 paper_id 제거 (첫 건 우선).
+    #    ON CONFLICT DO UPDATE는 한 명령에서 같은 행을 두 번 고칠 수 없다.
+    unique: dict[UUID, EmbeddingIn] = {}
+    for row in rows:
+        unique.setdefault(row.paper_id, row)
+    if len(unique) < len(rows):
+        logger.warning(
+            "save_embeddings: 배치 안에 중복 paper_id %d건, 첫 건만 저장합니다.",
+            len(rows) - len(unique),
+        )
+    rows = list(unique.values())
+
+    if not rows:
+        return SaveEmbeddingsResult(total=0, saved=0, not_found=[])
+
+    # 3) 한 번의 INSERT로 저장한다 (왕복 1회).
+    #    벡터는 JSON에 pgvector 리터럴 문자열('[1,2,3]')로 담아 보내고 ::vector로 되돌린다.
+    #    (jsonb_to_recordset은 vector 타입을 바로 만들 수 없다.)
+    #    WHERE EXISTS: papers에 없는 paper_id는 넣지 않고 건너뛴다. 이 조건이 없으면
+    #    외래키 위반으로 배치 전체가 실패해서, 멀쩡한 나머지 논문까지 저장되지 않는다.
+    #    paper_id가 PRIMARY KEY라 ON CONFLICT DO UPDATE로 논문당 1건만 유지된다.
+    sql = """
+        INSERT INTO paper_embeddings (paper_id, embedding, model_name)
+        SELECT x.paper_id, x.embedding::vector, %(model_name)s
+          FROM jsonb_to_recordset(%(items)s::jsonb) AS x(paper_id uuid, embedding text)
+         WHERE EXISTS (SELECT 1 FROM papers AS p WHERE p.id = x.paper_id)
+        ON CONFLICT (paper_id) DO UPDATE
+           SET embedding  = EXCLUDED.embedding,
+               model_name = EXCLUDED.model_name,
+               created_at = now()
+        RETURNING paper_id
+    """
+    payload = json.dumps(
+        [
+            {"paper_id": str(row.paper_id), "embedding": _as_vector_literal(row.embedding)}
+            for row in rows
+        ]
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, {"items": payload, "model_name": model_name})
+            saved_ids = {r[0] for r in cur.fetchall()}
+
+    not_found = [row.paper_id for row in rows if row.paper_id not in saved_ids]
+    if not_found:
+        logger.warning(
+            "save_embeddings: papers에 없는 paper_id %d개, 저장하지 않았습니다: %s",
+            len(not_found),
+            ", ".join(str(pid) for pid in not_found),
+        )
+    logger.info(
+        "save_embeddings: %d건 저장/갱신 (model_name=%s, 건너뜀 %d건)",
+        len(saved_ids),
+        model_name,
+        len(not_found),
+    )
+    return SaveEmbeddingsResult(total=len(rows), saved=len(saved_ids), not_found=not_found)
 
 
 def search_similar(
@@ -310,15 +564,58 @@ def search_similar(
 ) -> list[SearchResult]:
     """질의 임베딩과 유사한 논문을 pgvector 코사인 거리 기준으로 검색한다.
 
-    paper_embeddings를 검색하고 papers / paper_analysis를 조인해 돌려준다.
+    paper_embeddings만 본다. **논문 제목·초록·요약은 돌려주지 않는다** —
+    paper_id와 유사도 점수만 가까운 순서대로 준다. 나머지 정보는 받은 순서대로
+    get_papers_by_ids()에 넣으면 된다 (그 함수가 입력 순서를 유지하므로
+    유사도 순서가 그대로 보존된다).
+
+    점수는 코사인 유사도(= 1 - 코사인 거리)다. 1에 가까울수록 비슷하고,
+    같은 벡터로 검색하면 자기 자신이 1.0으로 1위에 온다.
 
     Args:
-        embedding: 질의 벡터. 길이는 001_init.sql의 vector(N)과 일치해야 한다.
-        top_k: 반환할 개수.
-        model_name: 임베딩 모델 필터. 여러 모델이 섞여 있을 때 같은 모델끼리만
-            비교하기 위해 쓴다. None이면 전체.
+        embedding: 질의 벡터. 길이는 반드시 EMBEDDING_DIM(= 1024, bge-m3)이어야 한다.
+        top_k: 반환할 개수. 0 이하면 DB에 가지 않고 빈 목록을 돌려준다.
+        model_name: 임베딩 모델 필터. 모델이 다르면 벡터 공간이 달라서 점수를
+            비교하는 의미가 없으므로, 여러 모델이 섞여 있을 때는 반드시 지정한다.
+            None이면 저장된 전체를 대상으로 한다.
 
     Returns:
-        SearchResult 리스트 (score 내림차순).
+        SearchResult(paper_id, score) 리스트, score 내림차순.
+        임베딩이 아직 하나도 없으면 빈 목록.
+
+    Raises:
+        ValueError: 벡터 길이가 EMBEDDING_DIM과 다른 경우.
     """
-    raise NotImplementedError
+    if len(embedding) != EMBEDDING_DIM:
+        raise ValueError(
+            f"질의 임베딩 차원이 맞지 않습니다: {len(embedding)} (기대값 {EMBEDDING_DIM}). "
+            "검색할 때는 논문을 저장할 때와 같은 모델(bge-m3)을 써야 합니다."
+        )
+    if top_k <= 0:
+        return []
+
+    # <=> 는 pgvector의 코사인 거리 연산자(0=같음 ~ 2=반대).
+    # 거리 오름차순 = 유사도 내림차순이고, ORDER BY 를 이 형태로 써야
+    # 003에서 만든 HNSW 인덱스(vector_cosine_ops)를 탄다.
+    # model_name은 NULL이면 조건을 통째로 무시한다 (SQL 한 벌로 두 경우를 처리).
+    sql = """
+        SELECT e.paper_id,
+               1 - (e.embedding <=> %(embedding)s) AS score
+          FROM paper_embeddings AS e
+         WHERE (%(model_name)s::text IS NULL OR e.model_name = %(model_name)s::text)
+         ORDER BY e.embedding <=> %(embedding)s
+         LIMIT %(top_k)s
+    """
+    params = {
+        # Vector()로 감싸야 pgvector 타입으로 넘어간다 (list 그대로면 배열로 해석됨).
+        "embedding": Vector(embedding),
+        "model_name": model_name,
+        "top_k": top_k,
+    }
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [SearchResult(**row) for row in rows]

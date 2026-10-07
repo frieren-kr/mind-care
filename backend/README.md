@@ -16,7 +16,8 @@ cp .env.example .env          # 값 채우기
 
 로컬에 PostgreSQL을 직접 설치하지 않아도 됩니다. `docker-compose.yml`이
 pgvector가 들어 있는 PostgreSQL 17 이미지를 띄우고, **최초 기동 시
-`app/db/migrations/001_init.sql`을 자동 실행**해 테이블을 만들어 줍니다.
+`app/db/migrations/` 안의 SQL을 파일명 순서대로(`001` → `002` → `003`) 자동 실행**해
+테이블을 만들어 줍니다.
 
 준비물: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (설치 후 Engine이 running 상태여야 합니다)
 
@@ -47,8 +48,9 @@ docker compose down           # 컨테이너 삭제 (데이터는 볼륨에 남�
 docker compose down -v        # 데이터까지 삭제 → 다음 기동 때 001_init.sql 재실행
 ```
 
-`001_init.sql`은 **볼륨이 비어 있을 때만** 실행됩니다. 스키마를 고친 뒤 다시 적용하려면
-`docker compose down -v`로 데이터를 지우고 올려야 합니다.
+마이그레이션은 **볼륨이 비어 있을 때만** 실행됩니다. 이미 DB를 쓰고 있었다면 새 마이그레이션
+(`002`, `003`)은 자동 반영되지 않으니 루트 [`README.md`](../README.md)의 직접 적용 안내를 따르세요.
+스키마를 처음부터 다시 만들려면 `docker compose down -v`로 데이터를 지우고 올립니다.
 
 ### 문제가 생기면
 
