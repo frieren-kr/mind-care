@@ -151,8 +151,17 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 python -m venv .venv
 .venv\Scripts\Activate.ps1    # Windows PowerShell
 pip install -r requirements.txt
-uvicorn main:app --reload     # http://127.0.0.1:8000 , API 문서: /docs
+uvicorn main:app --reload     # http://127.0.0.1:8000
 ```
+
+서버는 `backend/` 폴더에서, DB(`docker compose up -d`)가 떠 있는 상태로 실행합니다.
+띄운 뒤 브라우저에서 **Swagger 문서 http://127.0.0.1:8000/docs** 를 열면 API 주소와 응답 예시를 보고
+바로 호출해 볼 수 있습니다.
+
+| 주소 | 설명 |
+|---|---|
+| `GET /papers?limit=20&offset=0` | 논문 목록 (최신 발행일 순, `limit` 최대 100) |
+| `GET /papers/{paper_id}` | 논문 상세 + 요약 (요약이 아직 없으면 `null`) |
 
 프론트엔드 실행:
 
@@ -186,6 +195,7 @@ mind-care/
 │  ├─ app/
 │  │  ├─ config.py      환경 변수
 │  │  ├─ schemas.py     데이터 접근 함수 입출력 스키마
+│  │  ├─ api/           API 라우터 (기능별 파일: papers.py …)
 │  │  ├─ db/            DB 접근 함수 계층 (팀 공용 관문) + migrations/
 │  │  └─ collectors/    PubMed 수집
 │  └─ requirements.txt

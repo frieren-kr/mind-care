@@ -60,6 +60,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `002_add_paper_metadata.sql`(논문 메타데이터 컬럼) + `003_embedding_dim_1024.sql`(임베딩 `vector(1024)` + HNSW).
 - `backend/app/schemas.py` — 함수 입출력 스키마(pydantic). 이 계약의 단일 출처.
 - `backend/app/collectors/pubmed.py` — PubMed 수집(주 1회 배치).
+- `backend/app/api/` — API 라우터. 기능별 파일(`papers.py` …)에 `router`를 두고 `main.py`에서 등록.
 
 ---
 
@@ -112,7 +113,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `backend/app/db/migrations/` | 데이터 (스키마) — **변경 전 팀 공지** | |
 | `backend/app/schemas.py` | 데이터 (공용 계약) — **변경 전 팀 공지** | |
 | `backend/main.py`, `backend/app/config.py` | 백엔드 (앱 진입점·설정) — 공용, 라우터 등록만 추가 | |
-| `backend/app/api/` *(예정)* | 백엔드 (API 라우터) | |
+| `backend/app/api/` | 백엔드 (API 라우터) — 기능별 파일. `papers.py`는 박주현 | |
 | `backend/app/ai/` 검색·RAG *(예정)* | AI-검색 (임베딩, `search_similar` 활용, 챗봇) | |
 | `backend/app/ai/` 분류·요약 *(예정)* | AI-요약 (관련성/근거 분류, 구조화 요약) | |
 | `frontend/` | 프론트 (React Native + Expo) | |
@@ -150,6 +151,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_papers_missing_metadata(limit=500, source=None)` | `limit`: int, `source`: `'pubmed'` 등(선택) | `list[PaperOut]` |
 | `get_papers_without_embedding(model_name, limit=100)` | `model_name`: 기준 임베딩 모델(예: `'bge-m3'`), `limit`: int | `list[PaperOut]` |
 | `save_embeddings(items, model_name)` | `items`: `(paper_id, 벡터)` 쌍 목록 (`EmbeddingIn`도 가능), `model_name`: str(필수) | `SaveEmbeddingsResult` |
+| `list_papers(limit=20, offset=0)` | `limit`: int, `offset`: int | `PaperListResponse` — `total` + `items` |
+| `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
 
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
@@ -161,6 +164,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **UpdateMetadataResult**: `total, updated, not_found`(papers에 없던 `external_id` 목록)
 - **EmbeddingIn** (`paper_embeddings` 입력): `paper_id, embedding` — `embedding` 길이는 반드시 `EMBEDDING_DIM`(=1024).
 - **SaveEmbeddingsResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
+- **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, summary_finding?` — 초록 없음.
+- **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
+- **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
+  - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
 - **EMBEDDING_DIM** = `1024` (`schemas.py` 상수). DB의 `vector(1024)`와 같아야 한다 — 바꿀 때는 새 마이그레이션 + 이 상수 + `config.py`의 `embedding_dim`을 **함께** 고친다.
 
 동작 메모:
@@ -212,6 +219,28 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 
 > `functions.py`의 함수는 **모두 구현·검증 완료**다 (스텁 없음).
 
+- **화면용 조회 함수 2개** (`list_papers` / `get_paper_detail`)는 `papers LEFT JOIN paper_analysis`로 읽기만 한다.
+  요약이 아직 없는 논문은 요약 쪽 필드(`study_type`, `evidence_level`, `summary_*`)가 모두 `None`이다.
+  - `list_papers()`는 전체 논문이 대상이다(`get_new_papers()`는 미분석 논문만). 정렬은 `get_new_papers()`와 같고
+    (`published_date DESC NULLS LAST` → `collected_at DESC` → `id`), `total`은 `limit`/`offset`과 무관한 전체 개수다.
+  - `get_paper_detail()`은 없는 id면 예외 없이 `None`을 돌려준다 (API가 404로 바꾼다).
+    `get_papers_by_ids()`(AI용 계약, url·요약 없음)는 그대로 두고 따로 만든 함수다.
+
+## API 주소 목록
+
+라우터는 `backend/app/api/`에 기능별 파일로 두고 `backend/main.py`에서 `app.include_router(...)`로 등록한다.
+응답 형식의 정본은 `backend/app/schemas.py`이고, 실행 중인 서버의 `/docs`(Swagger)에서 예시와 함께 볼 수 있다.
+**주소를 추가·변경하면 이 표도 같이 고친다.**
+
+| 주소 | 파일 | 설명 | 응답 |
+|---|---|---|---|
+| `GET /health` | `main.py` | 헬스 체크 | `{status, env}` |
+| `GET /papers?limit=20&offset=0` | `api/papers.py` | 논문 목록, 최신 발행일 순. `limit` 1~100(기본 20), `offset` 0 이상. 범위를 벗어나면 422 | `PaperListResponse` |
+| `GET /papers/{paper_id}` | `api/papers.py` | 논문 상세 + 요약 3칸. 없는 id는 404, UUID 형식이 아니면 422 | `PaperDetailResponse` |
+
+- 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
+- `evidence_level`은 DB에 저장된 값을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
+
 ### 결정사항: 논문 관련성 판단 (2026-09-23)
 
 논문 관련성 판단은 두 단계로 한다:
@@ -257,6 +286,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   같은 id로 갱신(행 1개 유지) → `get_new_papers()` 50건에서 49건으로 줄어드는 것까지 확인하고
   테스트 데이터는 삭제했다. 임베딩 경로는 차원 문제 때문에 아직 미검증.
 - 아직 AI 파이프라인(분류·요약·실제 임베딩 생성)과 화면이 없다.
+- **논문 API 2개 구현·검증 완료** (2026-10-07, 실 DB 1,000편). `GET /papers`, `GET /papers/{paper_id}` +
+  조회 함수 `list_papers()` / `get_paper_detail()`. 목록 5건·다음 5건(겹침 없음)·상세·404·422 호출과
+  `/docs` 예시를 확인했고, 임시 요약 1건으로 요약이 붙어 나오는 것도 확인한 뒤 삭제했다.
 - **라벨링 후보 60편 적재 완료** (2026-10-03, 실 DB). `backend/app/db/seed/labeling_candidates.txt`의
   PMID 60건을 `python -m scripts.seed_labeling_papers`로 적재 → **신규 56건 + 기존 4건**(이미 있던
   논문은 `save_papers()`의 중복 스킵 동작대로 건너뜀).

@@ -22,7 +22,10 @@ from app.schemas import (
     AnalysisIn,
     EmbeddingIn,
     PaperDetail,
+    PaperDetailResponse,
     PaperIn,
+    PaperListItem,
+    PaperListResponse,
     PaperOut,
     SaveEmbeddingsResult,
     SavePapersResult,
@@ -200,6 +203,74 @@ def get_papers_by_ids(paper_ids: list[UUID]) -> list[PaperDetail]:
         logger.warning("get_papers_by_ids: papers에 없는 id %d개: %s", len(missing), ", ".join(missing))
 
     return [PaperDetail(**row) for row in rows]
+
+
+def list_papers(limit: int = 20, offset: int = 0) -> PaperListResponse:
+    """논문 목록을 최신 발행일 순으로 나눠서 반환한다. (GET /papers 용)
+
+    get_new_papers()는 '미분석 논문만' 돌려주고 offset·전체 개수가 없어서 목록 화면에
+    쓸 수 없다. 그래서 전체 논문을 대상으로 하는 조회를 따로 둔다.
+    초록은 빼고, 요약(paper_analysis)이 있으면 근거등급·요약 첫 칸만 붙인다 (없으면 null).
+
+    Args:
+        limit: 한 번에 받을 개수. 0 이하면 items는 빈 목록(total은 그대로 센다).
+        offset: 건너뛸 개수. 음수는 0으로 본다.
+
+    Returns:
+        PaperListResponse — total(전체 논문 수) + items.
+        정렬은 get_new_papers()와 같다 (published_date DESC NULLS LAST →
+        collected_at DESC → id). 마지막 id 키 덕분에 페이지 사이에 논문이 겹치거나 빠지지 않는다.
+    """
+    limit = max(limit, 0)
+    offset = max(offset, 0)
+
+    sql = """
+        SELECT p.id, p.title, p.published_date AS published_at, p.journal,
+               a.evidence_level, a.summary_finding
+          FROM papers AS p
+          LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+         ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
+         LIMIT %(limit)s OFFSET %(offset)s
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT count(*) AS total FROM papers")
+            total = cur.fetchone()["total"]
+            cur.execute(sql, {"limit": limit, "offset": offset})
+            rows = cur.fetchall()
+
+    return PaperListResponse(
+        total=total, limit=limit, offset=offset, items=[PaperListItem(**row) for row in rows]
+    )
+
+
+def get_paper_detail(paper_id: UUID) -> Optional[PaperDetailResponse]:
+    """논문 한 건의 상세 + 요약을 반환한다. (GET /papers/{paper_id} 용)
+
+    get_papers_by_ids()에는 url과 요약(paper_analysis)이 없다. 그 함수의 반환 형식은
+    AI 쪽이 쓰는 계약이라 건드리지 않고, 화면용 조회를 따로 둔다.
+
+    Returns:
+        PaperDetailResponse. 요약이 아직 없으면 study_type / evidence_level /
+        summary_* 가 모두 None. **papers에 없는 id면 None** (예외를 던지지 않는다).
+    """
+    sql = """
+        SELECT p.id, p.title, p.abstract, p.published_date AS published_at, p.journal,
+               p.url AS pubmed_url, p.doi, p.publication_types, p.mesh_terms,
+               a.study_type, a.evidence_level,
+               a.summary_finding, a.summary_comparison, a.summary_limitation
+          FROM papers AS p
+          LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+         WHERE p.id = %s
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (paper_id,))
+            row = cur.fetchone()
+
+    return PaperDetailResponse(**row) if row else None
 
 
 def get_papers_missing_metadata(

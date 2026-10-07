@@ -179,6 +179,96 @@ class EmbeddingIn(BaseModel):
         return value
 
 
+# ------------------------------------------------------------
+# 논문 API 응답 (GET /papers, GET /papers/{paper_id}) — 2026-10-07 추가
+# 필드 이름은 화면(frontend/src/types/index.ts)에 맞춘다:
+#   papers.id → id, published_date → published_at, url → pubmed_url
+# 요약(paper_analysis)이 아직 없는 논문은 요약 쪽 필드가 모두 null이다.
+# (예시에는 요약이 있는 경우를 적는다 — FastAPI가 Swagger 예시에서 null 값을 지우기 때문)
+# ------------------------------------------------------------
+
+
+class PaperListItem(BaseModel):
+    """list_papers()가 반환하는 목록 한 줄. 초록은 뺀 가벼운 형태."""
+
+    id: UUID = Field(description="papers.id")
+    title: str
+    published_at: Optional[date] = Field(default=None, description="발행일 (papers.published_date)")
+    journal: Optional[str] = None
+    evidence_level: Optional[str] = Field(default=None, description="근거 등급. 요약 전이면 null")
+    summary_finding: Optional[str] = Field(default=None, description="요약 첫 칸. 요약 전이면 null")
+
+
+class PaperListResponse(BaseModel):
+    """list_papers() / GET /papers 응답."""
+
+    total: int = Field(description="전체 논문 수 (limit/offset과 무관)")
+    limit: int
+    offset: int
+    items: list[PaperListItem]
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "total": 1000,
+                "limit": 20,
+                "offset": 0,
+                "items": [
+                    {
+                        "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                        "title": "Sleep disturbance and caregiver burden in dementia",
+                        "published_at": "2026-09-20",
+                        "journal": "Alzheimer's & Dementia",
+                        "evidence_level": "2",
+                        "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
+                    }
+                ],
+            }
+        }
+    )
+
+
+class PaperDetailResponse(BaseModel):
+    """get_paper_detail() / GET /papers/{paper_id} 응답. 논문 + 요약(없으면 null)."""
+
+    id: UUID = Field(description="papers.id")
+    title: str
+    abstract: Optional[str] = None
+    published_at: Optional[date] = Field(default=None, description="발행일 (papers.published_date)")
+    journal: Optional[str] = None
+    pubmed_url: Optional[str] = Field(default=None, description="원문 링크 (papers.url)")
+    doi: Optional[str] = None
+    publication_types: list[str] = Field(default_factory=list, description="PubMed PublicationType")
+    mesh_terms: list[str] = Field(default_factory=list)
+    # --- 아래는 paper_analysis. 요약이 아직 없으면 모두 null ---
+    study_type: Optional[str] = None
+    evidence_level: Optional[str] = None
+    summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
+    summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
+    summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+                "title": "Sleep disturbance and caregiver burden in dementia",
+                "abstract": "BACKGROUND: ...",
+                "published_at": "2026-09-20",
+                "journal": "Alzheimer's & Dementia",
+                "pubmed_url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
+                "doi": "10.1002/alz.12345",
+                "publication_types": ["Journal Article", "Randomized Controlled Trial"],
+                "mesh_terms": ["Dementia", "Caregivers"],
+                "study_type": "rct",
+                "evidence_level": "2",
+                "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
+                "summary_comparison": "기존 권고(수면 위생 교육)와 방향이 같다.",
+                "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
+            }
+        }
+    )
+
+
 class SaveEmbeddingsResult(BaseModel):
     """save_embeddings()가 반환하는 저장 결과 집계."""
 
