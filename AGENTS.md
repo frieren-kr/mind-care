@@ -137,6 +137,14 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | 논문·임베딩·요약·검색 | `papers`, `paper_embeddings`, `paper_analysis` | 박주현 |
 | 사용자·환자 관련 | `users`, `patient_profiles`, `caregiver_profiles`, `clinical_assessments`, `safety_events`, `medications`, `medical_visits` | 김한슬 |
 
+`paper_analysis`는 논문당 한 줄인데 **칸마다 채우는 사람이 다르다** (2026-10-09, 김현서 님과 합의).
+서로의 칸을 지우지 않도록 저장 함수도 나뉜다.
+
+| `paper_analysis` 칸 | 채우는 사람 | 저장 함수 | 대상 고르는 함수 |
+|---|---|---|---|
+| `study_type`, `evidence_level` | 김현서 (근거 등급) | `save_evidence()` | `get_papers_without_evidence()` |
+| `summary_finding` / `summary_comparison` / `summary_limitation`, `guideline_relation`, `tags` | 허웅 (요약) | `save_summary()` | `get_new_papers()` |
+
 **함수를 추가·변경한 사람이 위 "데이터 접근 계약" 표(와 `schemas.py`)도 같이 고친다.**
 (계약 표를 바꾸기 전에는 팀에 공지한다 — "담당 영역" 규칙과 동일.)
 
@@ -145,6 +153,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `save_papers(papers: list[PaperIn])` | `papers`: 수집기가 만든 `PaperIn` 목록 | `SavePapersResult` |
 | `get_new_papers(since=None, limit=100, source=None)` | `since`: ISO8601 날짜/시각(선택), `limit`: int, `source`: `'pubmed'` 등(선택) | `list[PaperOut]` |
 | `save_summary(analysis: AnalysisIn)` | `AnalysisIn` | 저장된 `paper_analysis` id (`UUID`) |
+| `save_evidence(items)` | `items`: `(paper_id, study_type, evidence_level)` 목록 (`EvidenceIn`도 가능). `evidence_level`은 1~6 또는 `None` | `SaveEvidenceResult` |
+| `get_papers_without_evidence(limit=100)` | `limit`: int | `list[PaperDetail]` |
 | `search_similar(embedding, top_k=5, model_name=None)` | `embedding`: `list[float]`(길이=`EMBEDDING_DIM`=**1024**), `top_k`: int, `model_name`: 임베딩 모델 필터(선택) | `list[SearchResult]` — `paper_id` + `score`만 |
 | `get_papers_by_ids(paper_ids: list[UUID])` | `paper_ids`: `papers.id` 목록 (`search_similar()`가 돌려주는 `paper_id`와 같은 종류) | `list[PaperDetail]` — **입력 순서 그대로** |
 | `update_paper_metadata(papers: list[PaperIn])` | `papers`: 수집기가 만든 `PaperIn` 목록 | `UpdateMetadataResult` |
@@ -159,6 +169,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **SavePapersResult**: `total, inserted, skipped, inserted_ids`
 - **PaperOut** (`papers`): `id, source, external_id, title, abstract?, published_date?, url?, collected_at`
 - **AnalysisIn** (`paper_analysis` + 선택적 `paper_embeddings`): `paper_id, study_type?, evidence_level?, guideline_relation?, summary_finding?, summary_comparison?, summary_limitation?, tags, model_name?, embedding?, embedding_model?`
+  - `study_type` / `evidence_level`은 **비워 보내면 기존 값을 유지한다** (등급 저장은 `save_evidence()`).
+- **EvidenceIn** (`save_evidence` 입력): `paper_id, study_type`(필수, 빈 값 불가), `evidence_level?`(int 1~6, 등급 없음은 `None`)
+- **SaveEvidenceResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
 - **SearchResult** (`search_similar` 반환): `paper_id, score` — ★2026-10-01 축소. 제목·요약 등은 `get_papers_by_ids()`로 붙인다.
 - **PaperDetail** (`get_papers_by_ids` 반환): `paper_id, external_id, title, abstract?, journal?, published_date?, publication_types, mesh_terms, doi?`
 - **UpdateMetadataResult**: `total, updated, not_found`(papers에 없던 `external_id` 목록)
@@ -173,11 +186,28 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 동작 메모:
 - `save_papers()`는 `(source, external_id)` UNIQUE + `ON CONFLICT DO NOTHING`으로 이미 있는 논문을
   건너뛴다(기존 행은 갱신하지 않는다). 배치 안의 중복도 먼저 제거해 집계를 맞춘다.
-- `get_new_papers()` = `papers` 중 `paper_analysis`가 없는 논문 (`paper_analysis`는 `paper_id` UNIQUE).
+- **★ 계약 변경 (2026-10-09)** `get_new_papers()` = `papers` 중 **`paper_analysis` 줄이 없거나
+  `summary_finding`이 비어 있는** 논문. (이전: "줄이 없는 논문". 근거 등급이 먼저 들어가 줄이 생기면
+  요약 대상에서 빠지던 문제 때문에 바꿨다.) 이제 "요약이 아직 없는 논문"이라는 뜻이고,
+  등급이 있는지는 보지 않는다.
   정렬은 `published_date DESC NULLS LAST` → `collected_at DESC` → `id`. 한 배치는 `collected_at`이
   모두 같아서, 마지막 `id` 키가 있어야 `limit`을 준 결과 순서가 호출마다 흔들리지 않는다.
   `since`/`source`는 `None`이면 해당 조건을 적용하지 않고, `limit <= 0`이면 빈 목록을 돌려준다.
 - `save_summary()`는 `paper_analysis`에 upsert 하고, `embedding`을 함께 주면 `paper_embeddings`에도 upsert 한다.
+  **(2026-10-09 변경)** `study_type` / `evidence_level`은 값을 보냈을 때만 바꾸고, 비워 보내면 기존 값을
+  유지한다(`COALESCE`). 요약 칸·`guideline_relation`·`tags`·`model_name`은 예전처럼 보낸 값으로 덮어쓴다.
+- **근거 등급 전용 함수 2개는 요약 칸을 전혀 건드리지 않는다.** 등급 배치와 요약 배치는 어느 쪽을
+  먼저 돌려도 서로의 값을 지우지 않는다.
+  - `save_evidence(items)`는 줄이 없으면 `study_type` / `evidence_level`만 채운 줄을 새로 만들고,
+    있으면 그 두 칸만 바꾼다(`generated_at`도 그대로). 한 번의 INSERT로 넣으므로 1,000편도 한 번에 된다.
+    `evidence_level`은 `evidence.py` 기준 숫자 **1~6을 문자열(`'1'`~`'6'`)로** 저장하고(칸이 `TEXT`),
+    등급 없음(동물 연구·프로토콜 등)은 `NULL`이다. 1~6 밖의 값이나 빈 `study_type`이 한 건이라도 있으면
+    **DB에 보내기 전에** `ValueError`를 던지고 아무것도 저장하지 않는다. 배치 내 중복 `paper_id`는 첫 건만 쓰고,
+    `papers`에 없는 `paper_id`는 건너뛰어 `not_found`로 보고한다(`save_embeddings()`와 같은 규칙).
+  - `get_papers_without_evidence(limit)` = **`study_type`이 비어 있는** 논문(줄이 없는 논문 포함).
+    `evidence_level`이 아니라 `study_type`을 기준으로 삼는 이유: 판단은 했지만 등급이 없는(`NULL`) 논문이
+    매번 다시 나오지 않게 하기 위해서다. 등급 판단에 쓸 `title` / `abstract` / `publication_types` /
+    `mesh_terms`가 든 `PaperDetail`을 돌려주고, 정렬은 `get_new_papers()`와 같으며 `limit <= 0`이면 빈 목록.
 - `search_similar()`는 `paper_embeddings`만 코사인 거리(`<=>`)로 검색해 **`paper_id`와 `score`만** 돌려준다
   (`score` = `1 - 코사인 거리`, 1에 가까울수록 유사. `score` 내림차순). 논문 본문·요약과 조인하지 않는다 —
   받은 순서 그대로 `get_papers_by_ids()`에 넣으면 유사도 순서가 보존된 상세가 나온다.
@@ -210,7 +240,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   PMID를 조용히 버리지 않는다. 저장은 `save_papers()`로 따로 한다.
 
 - `save_summary()`는 `paper_analysis`에 upsert 한다 (`paper_id` UNIQUE → 재분석하면 기존 행을 갱신하고
-  `generated_at`을 다시 찍는다. id는 그대로). 저장한 논문은 `get_new_papers()` 목록에서 빠진다.
+  `generated_at`을 다시 찍는다. id는 그대로). `summary_finding`을 채워 저장한 논문은 `get_new_papers()` 목록에서 빠진다.
   `embedding`을 함께 주면 `paper_embeddings`에도 같은 트랜잭션으로 upsert 하며, 이때 `embedding_model`이
   없으면 `ValueError`를 던진다(`paper_embeddings.model_name`이 NOT NULL).
   **`save_summary()`의 임베딩 저장 경로는 여전히 미검증이다** (차원은 1024로 정리됐지만 이 경로 자체는
@@ -239,7 +269,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `GET /papers/{paper_id}` | `api/papers.py` | 논문 상세 + 요약 3칸. 없는 id는 404, UUID 형식이 아니면 422 | `PaperDetailResponse` |
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
-- `evidence_level`은 DB에 저장된 값을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
+- `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
 
 ### 결정사항: 논문 관련성 판단 (2026-09-23)
 
@@ -299,6 +329,11 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `get_papers_without_embedding('bge-m3')` 0건, `search_similar()`가 질의 논문을 score 1.0 1위로 반환.
   **같은 덤프로 복원하면 팀원 모두 `paper_id`가 동일해진다.** 덤프는 레포에 없고 노션에서 받는다
   (복원 방법은 `README.md`의 "팀원 데이터 맞추기").
+- **근거 등급·요약 저장 경로 분리 완료** (2026-10-09, 실 DB). `save_evidence()` /
+  `get_papers_without_evidence()` 추가, `get_new_papers()` 기준 변경(**계약 변경**), `save_summary()`가
+  등급 칸을 비워 보내면 유지하도록 수정. 등급 먼저 → 요약, 요약 먼저 → 등급 두 순서 모두 서로의 칸이
+  남는 것, 등급만 넣은 논문이 `get_new_papers()`에 계속 나오는 것, "등급 없음" 논문이 등급 대상에서
+  빠지는 것, 1~6 밖의 값 거부를 논문 3편으로 확인하고 테스트 줄은 삭제했다.
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**

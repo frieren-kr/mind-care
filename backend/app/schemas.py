@@ -46,7 +46,10 @@ class AnalysisIn(BaseModel):
     study_type: Optional[str] = Field(
         default=None, description="RCT / 체계적 문헌고찰 / 관찰연구 / 사례보고 / 전문가의견"
     )
-    evidence_level: Optional[str] = Field(default=None, description="GRADE 유사 등급 (Level I ~ VII)")
+    evidence_level: Optional[str] = Field(
+        default=None,
+        description='근거 등급 "1"~"6" (evidence.py 기준). 비워 보내면 기존 값을 유지한다 — 등급 저장은 save_evidence()',
+    )
     guideline_relation: Optional[str] = Field(default=None, description="기존 가이드라인과 일치/보완/상충")
     summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
     summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
@@ -266,6 +269,37 @@ class PaperDetailResponse(BaseModel):
                 "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
             }
         }
+    )
+
+
+# ------------------------------------------------------------
+# 근거 등급 전용 (paper_analysis의 study_type / evidence_level) — 2026-10-09 추가
+# 등급(김현서)과 요약(허웅)이 같은 줄을 쓰기 때문에, 서로의 칸을 지우지 않게 경로를 나눴다.
+# ------------------------------------------------------------
+
+
+class EvidenceIn(BaseModel):
+    """save_evidence()가 받는 근거 등급 한 건. (paper_analysis의 두 칸만)"""
+
+    paper_id: UUID = Field(description="papers.id (external_id 아님)")
+    study_type: str = Field(
+        min_length=1,
+        description="연구 유형 (evidence.py의 LEVEL 키: rct, animal, other …). "
+        "'판단을 했다'는 표시라서 비울 수 없다",
+    )
+    evidence_level: Optional[int] = Field(
+        default=None, ge=1, le=6,
+        description="근거 등급 1(강함)~6(약함). 등급 없음(동물 연구 등)은 None. DB에는 문자열로 저장",
+    )
+
+
+class SaveEvidenceResult(BaseModel):
+    """save_evidence()가 반환하는 저장 결과 집계."""
+
+    total: int = Field(description="저장을 시도한 건수 (배치 내 중복 paper_id 제거 후)")
+    saved: int = Field(description="실제로 저장/갱신된 건수")
+    not_found: list[UUID] = Field(
+        default_factory=list, description="papers에 없어서 저장하지 못한 paper_id 목록"
     )
 
 

@@ -21,6 +21,7 @@ from app.schemas import (
     EMBEDDING_DIM,
     AnalysisIn,
     EmbeddingIn,
+    EvidenceIn,
     PaperDetail,
     PaperDetailResponse,
     PaperIn,
@@ -28,6 +29,7 @@ from app.schemas import (
     PaperListResponse,
     PaperOut,
     SaveEmbeddingsResult,
+    SaveEvidenceResult,
     SavePapersResult,
     SearchResult,
     UpdateMetadataResult,
@@ -117,10 +119,12 @@ def get_new_papers(
     limit: int = 100,
     source: Optional[str] = None,
 ) -> list[PaperOut]:
-    """아직 분석(paper_analysis)되지 않은 신규 논문을 반환한다.
+    """아직 요약되지 않은 논문을 반환한다. (요약 배치 대상 고르기)
 
-    papers LEFT JOIN paper_analysis 에서 분석 결과가 없는 행만 고른다.
-    (paper_analysis는 paper_id UNIQUE이므로 논문당 분석은 최대 1건)
+    ★ 2026-10-09 계약 변경: 기준이 "paper_analysis 줄이 없다"에서
+      "줄이 없거나 summary_finding이 비어 있다"로 바뀌었다.
+      근거 등급(save_evidence())이 먼저 들어가 줄이 생겨도 요약 대상에서 빠지지 않는다.
+      (등급 대상을 고르는 함수는 get_papers_without_evidence()다.)
 
     Args:
         since: ISO8601 날짜/시각 문자열. 이 시점 이후 collected_at 분만.
@@ -136,7 +140,8 @@ def get_new_papers(
     if limit <= 0:
         return []
 
-    # LEFT JOIN 후 a.paper_id IS NULL → 분석 결과가 아직 없는 논문만 남는다.
+    # LEFT JOIN이라 줄이 없는 논문도 a.summary_finding이 NULL로 나온다 →
+    # 조건 하나로 "줄 없음"과 "줄은 있는데 요약 없음(등급만 있음)"을 모두 잡는다.
     # since/source는 NULL이면 조건을 통째로 무시한다 (SQL 한 벌로 네 경우를 모두 처리).
     # 마지막 정렬 키 p.id는 필수다: save_papers()가 배치를 한 INSERT로 넣어서
     # 같은 배치의 collected_at이 전부 동일하고, published_date도 겹치는 논문이 많다.
@@ -146,7 +151,7 @@ def get_new_papers(
                p.abstract, p.published_date, p.url, p.collected_at
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
-         WHERE a.paper_id IS NULL
+         WHERE coalesce(a.summary_finding, '') = ''
            AND (%(since)s::timestamptz IS NULL OR p.collected_at >= %(since)s::timestamptz)
            AND (%(source)s::text IS NULL OR p.source = %(source)s::text)
          ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
@@ -374,7 +379,11 @@ def save_summary(analysis: AnalysisIn) -> UUID:
 
     paper_analysis에 upsert 한다 (paper_id UNIQUE → 재분석하면 기존 행을 갱신하고
     generated_at을 갱신 시각으로 다시 찍는다. 행이 새로 생기지 않으므로 id는 그대로다).
-    저장이 끝나면 그 논문은 get_new_papers()의 '미분석' 목록에서 빠진다.
+    summary_finding을 채워 저장하면 그 논문은 get_new_papers() 목록에서 빠진다.
+
+    ★ 2026-10-09: study_type / evidence_level은 값을 보냈을 때만 바꾼다. 비워 보내면
+      save_evidence()가 넣어 둔 기존 값을 유지한다. 요약 칸·guideline_relation·tags·
+      model_name은 예전처럼 보낸 값으로 덮어쓴다.
 
     analysis.embedding이 있으면 paper_embeddings에도 같은 트랜잭션으로 함께 upsert 한다
     (둘 다 성공하거나 둘 다 취소된다). embedding이 없으면 paper_embeddings는 건드리지 않는다.
@@ -399,7 +408,9 @@ def save_summary(analysis: AnalysisIn) -> UUID:
     if analysis.embedding is not None and not analysis.embedding_model:
         raise ValueError("embedding을 저장하려면 embedding_model도 함께 주어야 합니다.")
 
-    # EXCLUDED = INSERT 하려던 새 값. 충돌하면 기존 행을 새 값으로 덮어쓴다.
+    # EXCLUDED = INSERT 하려던 새 값. 충돌하면 요약 칸은 새 값으로 덮어쓴다.
+    # study_type / evidence_level은 등급 담당(save_evidence())의 칸이라, 값을 보냈을 때만
+    # 바꾸고 비워 보내면(NULL) 기존 값을 유지한다 (COALESCE).
     # generated_at도 now()로 다시 찍어 '언제 재분석했는지'가 남게 한다.
     analysis_sql = """
         INSERT INTO paper_analysis (
@@ -412,8 +423,8 @@ def save_summary(analysis: AnalysisIn) -> UUID:
             %(tags)s, %(model_name)s
         )
         ON CONFLICT (paper_id) DO UPDATE
-           SET study_type         = EXCLUDED.study_type,
-               evidence_level     = EXCLUDED.evidence_level,
+           SET study_type         = COALESCE(EXCLUDED.study_type, paper_analysis.study_type),
+               evidence_level     = COALESCE(EXCLUDED.evidence_level, paper_analysis.evidence_level),
                guideline_relation = EXCLUDED.guideline_relation,
                summary_finding    = EXCLUDED.summary_finding,
                summary_comparison = EXCLUDED.summary_comparison,
@@ -468,6 +479,112 @@ def save_summary(analysis: AnalysisIn) -> UUID:
         "있음" if analysis.embedding is not None else "없음",
     )
     return analysis_id
+
+
+def get_papers_without_evidence(limit: int = 100) -> list[PaperDetail]:
+    """근거 등급을 아직 판단하지 않은 논문을 반환한다. (등급 배치 대상 고르기)
+
+    기준은 evidence_level이 아니라 **study_type이 비어 있는지**다. 동물 연구처럼
+    판단은 했지만 등급이 없는(evidence_level NULL) 논문이 매번 다시 나오지 않게 하기 위함이다.
+    paper_analysis 줄이 아예 없는 논문과, 요약만 먼저 들어가 study_type이 빈 논문이 대상이다.
+
+    Returns:
+        PaperDetail 리스트 (등급 판단에 쓸 title / abstract / publication_types / mesh_terms 포함).
+        정렬은 get_new_papers()와 같다. limit <= 0이면 빈 목록.
+    """
+    if limit <= 0:
+        return []
+
+    sql = """
+        SELECT p.id AS paper_id, p.external_id, p.title, p.abstract, p.journal,
+               p.published_date, p.publication_types, p.mesh_terms, p.doi
+          FROM papers AS p
+          LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+         WHERE a.study_type IS NULL
+         ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
+         LIMIT %(limit)s
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, {"limit": limit})
+            rows = cur.fetchall()
+
+    return [PaperDetail(**row) for row in rows]
+
+
+def save_evidence(
+    items: list[tuple[UUID, str, Optional[int]]] | list[EvidenceIn],
+) -> SaveEvidenceResult:
+    """근거 등급(study_type, evidence_level)을 paper_analysis에 저장한다. (여러 건 한 번에)
+
+    ★ 요약 칸(summary_*, guideline_relation, tags, model_name, generated_at)은 절대 건드리지 않는다.
+      줄이 없으면 두 칸만 채운 줄을 새로 만들고, 있으면 두 칸만 바꾼다.
+      (요약 저장은 save_summary() — 그쪽도 등급을 비워 보내면 이 값을 지우지 않는다.)
+
+    Args:
+        items: (paper_id, study_type, evidence_level) 목록. schemas.EvidenceIn도 된다.
+            evidence_level은 1~6(evidence.py 기준) 또는 None(등급 없음). DB에는 문자열로 저장한다.
+            study_type은 비울 수 없다 — get_papers_without_evidence()가 이 칸으로
+            '판단 완료'를 구분한다. 같은 paper_id가 여러 번 있으면 첫 건만 쓴다.
+
+    Returns:
+        SaveEvidenceResult — 시도 건수 / 저장·갱신된 건수 / papers에 없던 paper_id 목록.
+
+    Raises:
+        ValueError: evidence_level이 1~6 밖이거나 study_type이 빈 경우.
+            한 건이라도 어긋나면 DB에 가기 전에 멈추고 아무것도 저장하지 않는다.
+    """
+    unique: dict[UUID, EvidenceIn] = {}
+    for item in items:
+        if not isinstance(item, EvidenceIn):
+            paper_id, study_type, evidence_level = item
+            try:
+                item = EvidenceIn(
+                    paper_id=paper_id, study_type=study_type, evidence_level=evidence_level
+                )
+            except ValueError as exc:  # pydantic ValidationError도 ValueError다
+                raise ValueError(
+                    f"paper_id={paper_id}: 근거 등급 입력이 잘못됐습니다 "
+                    f"(study_type={study_type!r}, evidence_level={evidence_level!r}). "
+                    "evidence_level은 1~6 또는 None이어야 합니다."
+                ) from exc
+        unique.setdefault(item.paper_id, item)
+    rows = list(unique.values())
+
+    if not rows:
+        return SaveEvidenceResult(total=0, saved=0, not_found=[])
+
+    # 한 번의 INSERT로 저장한다 (1,000편도 왕복 1회).
+    # WHERE EXISTS: papers에 없는 paper_id는 건너뛴다 (외래키 위반으로 배치가 통째로 실패하지 않게).
+    # ON CONFLICT에서는 두 칸만 바꾼다 — 요약 칸은 SET에 없으므로 그대로 남는다.
+    sql = """
+        INSERT INTO paper_analysis (paper_id, study_type, evidence_level)
+        SELECT x.paper_id, x.study_type, x.evidence_level
+          FROM jsonb_to_recordset(%s::jsonb)
+               AS x(paper_id uuid, study_type text, evidence_level text)
+         WHERE EXISTS (SELECT 1 FROM papers AS p WHERE p.id = x.paper_id)
+        ON CONFLICT (paper_id) DO UPDATE
+           SET study_type     = EXCLUDED.study_type,
+               evidence_level = EXCLUDED.evidence_level
+        RETURNING paper_id
+    """
+    payload = json.dumps([row.model_dump(mode="json") for row in rows])
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (payload,))
+            saved_ids = {r[0] for r in cur.fetchall()}
+
+    not_found = [row.paper_id for row in rows if row.paper_id not in saved_ids]
+    if not_found:
+        logger.warning(
+            "save_evidence: papers에 없는 paper_id %d개, 저장하지 않았습니다: %s",
+            len(not_found),
+            ", ".join(str(pid) for pid in not_found),
+        )
+    logger.info("save_evidence: %d건 저장/갱신 (건너뜀 %d건)", len(saved_ids), len(not_found))
+    return SaveEvidenceResult(total=len(rows), saved=len(saved_ids), not_found=not_found)
 
 
 def get_papers_without_embedding(
