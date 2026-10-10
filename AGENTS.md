@@ -163,6 +163,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `save_embeddings(items, model_name)` | `items`: `(paper_id, 벡터)` 쌍 목록 (`EmbeddingIn`도 가능), `model_name`: str(필수) | `SaveEmbeddingsResult` |
 | `list_papers(limit=20, offset=0)` | `limit`: int, `offset`: int | `PaperListResponse` — `total` + `items` |
 | `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
+| `get_paper_details_by_pmids(pmids: list[str])` | `pmids`: PubMed PMID 목록 (`papers.external_id`, `source='pubmed'`) | `dict[str, PaperDetailResponse]` — 키가 PMID |
 
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
@@ -181,6 +182,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
 - **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
   - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
+- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?, relevance_score, personal_reason?`(아직 항상 `None`) + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
+- **RecommendationResponse**: `user_id, patient_id, query`(이번에 쓴 검색어), `items`(`RecommendationItem` 목록, 관련도 높은 순)
 - **EMBEDDING_DIM** = `1024` (`schemas.py` 상수). DB의 `vector(1024)`와 같아야 한다 — 바꿀 때는 새 마이그레이션 + 이 상수 + `config.py`의 `embedding_dim`을 **함께** 고친다.
 
 동작 메모:
@@ -255,6 +258,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     (`published_date DESC NULLS LAST` → `collected_at DESC` → `id`), `total`은 `limit`/`offset`과 무관한 전체 개수다.
   - `get_paper_detail()`은 없는 id면 예외 없이 `None`을 돌려준다 (API가 404로 바꾼다).
     `get_papers_by_ids()`(AI용 계약, url·요약 없음)는 그대로 두고 따로 만든 함수다.
+- `get_paper_details_by_pmids()`는 `get_paper_detail()`과 같은 형식을 **PMID로 여러 건** 받는다
+  (`search()`의 Evidence Package에 `paper_id`가 없고 PMID만 있어서 둔 함수, `/recommendations`가 쓴다).
+  읽기만 하고, 요약이 없으면 요약 쪽 필드가 `None`이다. **`papers`에 없는 PMID는 예외 없이 결과에 키가 없다.**
+  순서는 보장하지 않으므로 호출한 쪽이 PMID로 찾아 쓴다.
 
 ## API 주소 목록
 
@@ -270,10 +277,18 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
 | `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
+| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | 환자 프로필에 맞는 논문 Top-k. `k` 1~20(기본 5), 범위를 벗어나면 422. 환자가 1명이면 `patient_id` 생략 가능, 2명 이상인데 생략하면 400. 없는 사용자·이 사용자의 환자가 아니면 404 | `RecommendationResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 **간병인·환자 정보 조회(피드·챗봇 개인화 입력용)**다. 이름은 feed지만
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
 - 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
+- `/recommendations`(담당: 박주현)는 첫 버전이다. 흐름: `user_functions`로 프로필 읽기 → `build_query()`로
+  검색어 한 줄 → `search(검색어, k)` → `get_paper_details_by_pmids()`로 `paper_id`·저장된 요약 붙이기.
+  - `build_query()`(`api/recommendations.py`)는 환자 단계·증상·관심사를 문장에 끼워 넣는 **임시 함수**다
+    (허웅 님 피드 흐름으로 교체 예정). 응답의 `query`에 이번에 쓴 검색어가 그대로 나온다(데모·디버깅용).
+  - 항목 이름은 `/papers`와 같다(`id`, `published_at`, `pubmed_url`, `summary_*` …) + `relevance_score`,
+    `personal_reason`. **`personal_reason`은 아직 항상 `null`** (피드 흐름 연결 후 채운다).
+  - 서버를 띄운 뒤 **첫 요청은 bge-m3 모델을 불러오느라 오래 걸린다** (그 뒤로는 메모리에 남는다).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
@@ -341,6 +356,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   등급 칸을 비워 보내면 유지하도록 수정. 등급 먼저 → 요약, 요약 먼저 → 등급 두 순서 모두 서로의 칸이
   남는 것, 등급만 넣은 논문이 `get_new_papers()`에 계속 나오는 것, "등급 없음" 논문이 등급 대상에서
   빠지는 것, 1~6 밖의 값 거부를 논문 3편으로 확인하고 테스트 줄은 삭제했다.
+- **논문 추천 API 첫 버전 구현·검증 완료** (2026-10-10, 실 DB). `GET /recommendations/{user_id}` +
+  `get_paper_details_by_pmids()`. 샘플 간병인 4명(환자 5명) 전부 Top-5 반환, 400·404·422,
+  임시 요약 1건이 붙어 나오는 것까지 확인하고 테스트 줄은 삭제했다. 서버를 띄운 뒤 첫 요청은 약 11초
+  (bge-m3 로드, CPU), 그 뒤로는 약 0.4초. 검색어는 임시 `build_query()`이고 `personal_reason`은 아직 `null`.
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**

@@ -278,6 +278,42 @@ def get_paper_detail(paper_id: UUID) -> Optional[PaperDetailResponse]:
     return PaperDetailResponse(**row) if row else None
 
 
+def get_paper_details_by_pmids(pmids: list[str]) -> dict[str, PaperDetailResponse]:
+    """PMID 목록으로 논문 상세 + 저장된 요약을 받아온다. (GET /recommendations 용)
+
+    search()의 Evidence Package에는 paper_id가 없고 PMID만 있다. 그 PMID로 papers.id와
+    paper_analysis(요약 3칸, study_type, evidence_level)를 붙일 때 쓴다.
+    get_paper_detail()과 같은 형식을 PMID로 여러 건 받는 함수다.
+
+    Args:
+        pmids: PubMed PMID 목록 (papers.external_id, source='pubmed'). 빈 목록이면 빈 결과.
+
+    Returns:
+        {PMID: PaperDetailResponse}. 요약이 아직 없으면 요약 쪽 필드는 모두 None.
+        **papers에 없는 PMID는 결과에 키가 없다** (예외를 던지지 않는다).
+    """
+    if not pmids:
+        return {}
+
+    sql = """
+        SELECT p.external_id AS pmid,
+               p.id, p.title, p.abstract, p.published_date AS published_at, p.journal,
+               p.url AS pubmed_url, p.doi, p.publication_types, p.mesh_terms,
+               a.study_type, a.evidence_level,
+               a.summary_finding, a.summary_comparison, a.summary_limitation
+          FROM papers AS p
+          LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+         WHERE p.source = 'pubmed' AND p.external_id = ANY(%s::text[])
+    """
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (list(pmids),))
+            rows = cur.fetchall()
+
+    return {row.pop("pmid"): PaperDetailResponse(**row) for row in rows}
+
+
 def get_papers_missing_metadata(
     limit: int = 500,
     source: Optional[str] = None,

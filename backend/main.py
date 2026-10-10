@@ -5,7 +5,7 @@ FastAPI 앱을 생성하고 라우터를 등록한다.
 """
 from fastapi import FastAPI
 
-from app.api import papers, users
+from app.api import papers, recommendations, users
 from app.config import settings
 
 app = FastAPI(
@@ -25,3 +25,4 @@ def health() -> dict:
 # (예: from app.api import users → app.include_router(users.router))
 app.include_router(papers.router)
 app.include_router(users.router)
+app.include_router(recommendations.router)
