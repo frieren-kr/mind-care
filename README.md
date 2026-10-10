@@ -114,6 +114,35 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "\d clinical_assessments
 `users`의 `phone_number` 컬럼이 보이면 완료입니다.
 (논문 `papers`·임베딩 `paper_embeddings` 데이터는 건드리지 않습니다.)
 
+### ⚠️ 이미 DB를 띄워 둔 사람은 005도 직접 적용해야 합니다
+
+위와 같은 이유로 `005_medical_visits_detail.sql`도 자동 반영되지 않습니다.
+병원 방문 기록 `medical_visits`에 진료 내용 컬럼 7개
+(`visit_reason` / `diagnosis` / `treatment_content` / `test_summary` / `medication_change` /
+`doctor_note` / `follow_up_plan`)를 추가하고, 조회용 인덱스 2개
+(`idx_patient_profiles_caregiver` / `idx_care_logs_patient_time`)를 만드는 마이그레이션입니다.
+**004를 먼저 적용한 뒤** `backend/` 에서 아래 명령으로 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\005_medical_visits_detail.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/005_medical_visits_detail.sql
+```
+
+`ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`라서
+**여러 번 실행해도 안전합니다** (이미 있으면 NOTICE만 남기고 건너뜁니다). 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d medical_visits"
+```
+
+`visit_reason`부터 `follow_up_plan`까지 일곱 컬럼이 보이면 완료입니다.
+(논문 `papers`·임베딩 `paper_embeddings` 데이터는 건드리지 않습니다.)
+
 ### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
 
 팀은 **같은 논문 1,000편 + bge-m3 임베딩 1,000개**를 기준 데이터로 공유합니다.
@@ -144,6 +173,19 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 
 `papers 1000 / embeddings 1000`이면 완료입니다.
 (덤프 파일은 `.env`처럼 **레포에 커밋하지 않습니다.**)
+
+### 개발용 샘플 사용자 넣기
+
+피드·추천·챗봇을 개발할 때 쓸 예시 간병인 4명(환자 5명)을 넣습니다. 실제 사람 정보가 아닙니다.
+005까지 적용한 DB가 떠 있는 상태로, 가상환경을 켜고 `backend/` 에서 실행하세요.
+
+```bash
+python -m scripts.seed_dev_profiles   # 예시 프로필 적재 (이미 있으면 건너뜀 — 여러 번 실행해도 안전)
+python -m scripts.list_users          # user_id / patient_id 확인
+```
+
+`list_users`가 보여 주는 `user_id`로 `/feed/{user_id}` 같은 주소를 호출해 볼 수 있습니다.
+(`user_id`는 넣을 때마다 새로 만들어져서 **팀원마다 다릅니다.** 다시 넣으려면 `--reset`.)
 
 백엔드 실행:
 

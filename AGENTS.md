@@ -267,6 +267,13 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `GET /health` | `main.py` | 헬스 체크 | `{status, env}` |
 | `GET /papers?limit=20&offset=0` | `api/papers.py` | 논문 목록, 최신 발행일 순. `limit` 1~100(기본 20), `offset` 0 이상. 범위를 벗어나면 422 | `PaperListResponse` |
 | `GET /papers/{paper_id}` | `api/papers.py` | 논문 상세 + 요약 3칸. 없는 id는 404, UUID 형식이 아니면 422 | `PaperDetailResponse` |
+| `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
+| `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
+| `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
+
+- `/feed…` 주소 3개(담당: 김한슬)는 **간병인·환자 정보 조회(피드·챗봇 개인화 입력용)**다. 이름은 feed지만
+  논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
+- 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
