@@ -1,0 +1,171 @@
+{
+  "description": "개발용 예시 간병인·환자 프로필 4명. 실제 사람 정보가 아니다. scripts/seed_dev_profiles.py로 적재한다. 날짜는 실행일 기준 상대값(days_ago = 며칠 전, in_days = 며칠 뒤)으로 적는다.",
+  "profiles": [
+    {
+      "type": "경도인지장애 + 수면 문제",
+      "user": {"name": "예시 간병인1", "email": "dev-seed-1@example.com"},
+      "caregiver_profile": {"relationship": "자녀", "burden_score": 24, "mood_score": 6, "lifestyle_tags": ["직장병행"]},
+      "patients": [
+        {
+          "name": "어머니",
+          "dementia_stage": "경도인지장애",
+          "diagnosis_days_ago": 240,
+          "symptoms": ["수면장애", "기억력 저하", "낮잠 증가"],
+          "interests": ["수면 위생", "운동", "인지 훈련"],
+          "assessments": [
+            {"assessment_type": "K-MMSE", "score": 27, "days_ago": 240, "assessed_by": "OO대학병원 신경과"},
+            {"assessment_type": "CDR", "score": 0.5, "days_ago": 240, "assessed_by": "OO대학병원 신경과"},
+            {"assessment_type": "K-MMSE", "score": 26, "days_ago": 30, "assessed_by": "OO대학병원 신경과"},
+            {"assessment_type": "CIST", "score": 22, "days_ago": 30, "assessed_by": "치매안심센터"}
+          ],
+          "safety_events": [
+            {"days_ago": 5, "note": "밤에 3번 깨서 거실을 서성임"},
+            {"days_ago": 1}
+          ],
+          "medications": [
+            {"drug_name": "콜린알포세레이트 400mg", "dosage": "1캡슐", "frequency": "1일 2회 식후", "start_days_ago": 240}
+          ],
+          "medical_visits": [
+            {
+              "in_days": -30, "is_visited": true, "hospital_name": "OO대학병원", "department": "신경과",
+              "visit_reason": "정기 진료", "diagnosis": "경도인지장애 유지",
+              "test_summary": "K-MMSE 26점, CIST 22점", "doctor_note": "낮잠은 30분 이내로, 기상 시간을 일정하게 유지",
+              "follow_up_plan": "3개월 후 재방문"
+            },
+            {"in_days": 60, "hospital_name": "OO대학병원", "department": "신경과", "visit_reason": "정기 진료"}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "중등도 + 배회·낙상",
+      "user": {"name": "예시 간병인2", "email": "dev-seed-2@example.com"},
+      "caregiver_profile": {"relationship": "자녀", "burden_score": 48, "mood_score": 11, "lifestyle_tags": ["직장병행", "야간 돌봄"]},
+      "patients": [
+        {
+          "name": "아버지",
+          "dementia_stage": "중등도",
+          "diagnosis_days_ago": 1100,
+          "symptoms": ["배회", "낙상 위험", "야간 불안", "길 찾기 어려움"],
+          "interests": ["배회 대응", "낙상 예방", "주간보호센터"],
+          "assessments": [
+            {"assessment_type": "K-MMSE", "score": 19, "days_ago": 400},
+            {"assessment_type": "CDR", "score": 1, "days_ago": 400},
+            {"assessment_type": "K-MMSE", "score": 16, "days_ago": 20},
+            {"assessment_type": "CDR", "score": 2, "days_ago": 20},
+            {"assessment_type": "K-NPI", "score": 26, "days_ago": 20, "result_detail": "배회·야간행동·불안 영역 높음"}
+          ],
+          "safety_events": [
+            {"days_ago": 25, "has_wandering": true, "note": "오후 5시경 아파트 단지 밖으로 나감"},
+            {"days_ago": 18, "has_fall": true, "note": "화장실 가다 미끄러짐, 외상 없음"},
+            {"days_ago": 12, "has_wandering": true},
+            {"days_ago": 6, "has_wandering": true, "has_missing": true, "note": "2시간 뒤 파출소에서 연락받음"},
+            {"days_ago": 2, "has_fall": true}
+          ],
+          "medications": [
+            {"drug_name": "도네페질 5mg", "dosage": "1정", "frequency": "1일 1회 취침 전", "is_taking": false,
+             "start_days_ago": 1100, "end_days_ago": 700, "note": "10mg으로 증량"},
+            {"drug_name": "도네페질 10mg", "dosage": "1정", "frequency": "1일 1회 취침 전", "start_days_ago": 700},
+            {"drug_name": "메만틴 10mg", "dosage": "1정", "frequency": "1일 2회", "start_days_ago": 20}
+          ],
+          "medical_visits": [
+            {
+              "in_days": -20, "is_visited": true, "hospital_name": "OO병원", "department": "신경과",
+              "visit_reason": "배회·낙상 증가 상담", "diagnosis": "중등도로 진행",
+              "medication_change": "메만틴 10mg 추가", "doctor_note": "배회에 대비해 인식표·GPS 기기 사용 권장",
+              "follow_up_plan": "3개월 후 재방문"
+            },
+            {"in_days": 70, "hospital_name": "OO병원", "department": "신경과", "visit_reason": "약 반응 확인"}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "간병 부담이 높은 배우자 간병인",
+      "user": {"name": "예시 간병인3", "email": "dev-seed-3@example.com"},
+      "caregiver_profile": {"relationship": "배우자", "burden_score": 62, "mood_score": 18, "lifestyle_tags": ["수면부족", "사회적 고립", "본인 만성질환"]},
+      "patients": [
+        {
+          "name": "남편",
+          "dementia_stage": "경도",
+          "diagnosis_days_ago": 500,
+          "symptoms": ["우울", "무기력", "반복 질문"],
+          "interests": ["우울 관리", "보호자 지원 프로그램", "인지 활동"],
+          "assessments": [
+            {"assessment_type": "K-MMSE", "score": 22, "days_ago": 500},
+            {"assessment_type": "K-MMSE", "score": 21, "days_ago": 45},
+            {"assessment_type": "SGDS-K", "score": 9, "days_ago": 45},
+            {"assessment_type": "K-IADL", "score": 1.2, "days_ago": 45}
+          ],
+          "safety_events": [
+            {"days_ago": 10, "note": "하루 종일 누워 지냄"}
+          ],
+          "medications": [
+            {"drug_name": "도네페질 5mg", "dosage": "1정", "frequency": "1일 1회", "start_days_ago": 500},
+            {"drug_name": "에스시탈로프람 10mg", "dosage": "1정", "frequency": "1일 1회 아침", "start_days_ago": 45, "note": "우울 증상으로 추가"}
+          ],
+          "medical_visits": [
+            {
+              "in_days": -45, "is_visited": true, "hospital_name": "OO의원", "department": "정신건강의학과",
+              "visit_reason": "우울 증상 상담", "diagnosis": "치매 동반 우울",
+              "medication_change": "에스시탈로프람 10mg 시작",
+              "doctor_note": "보호자도 상담을 받아 보도록 권유 (치매안심센터 가족 지원 프로그램)"
+            },
+            {"in_days": 7, "hospital_name": "OO병원", "department": "신경과", "visit_reason": "정기 진료"}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "환자 2명을 돌보는 간병인",
+      "user": {"name": "예시 간병인4", "email": "dev-seed-4@example.com"},
+      "caregiver_profile": {"relationship": "며느리", "burden_score": 40, "mood_score": 9, "lifestyle_tags": ["다중 돌봄", "육아병행"]},
+      "patients": [
+        {
+          "name": "시어머니",
+          "dementia_stage": "경도",
+          "diagnosis_days_ago": 300,
+          "symptoms": ["기억력 저하", "약 복용 잊음"],
+          "interests": ["복약 관리", "인지 훈련"],
+          "assessments": [
+            {"assessment_type": "K-MMSE", "score": 23, "days_ago": 60},
+            {"assessment_type": "CDR", "score": 1, "days_ago": 60}
+          ],
+          "safety_events": [
+            {"days_ago": 15, "note": "약 먹은 것을 잊고 다시 먹으려 함"}
+          ],
+          "medications": [
+            {"drug_name": "리바스티그민 패치 9.5mg/24h", "dosage": "1매", "frequency": "1일 1회 교체", "start_days_ago": 300}
+          ],
+          "medical_visits": [
+            {"in_days": 21, "hospital_name": "OO병원", "department": "신경과", "visit_reason": "정기 진료"}
+          ]
+        },
+        {
+          "name": "시아버지",
+          "dementia_stage": "중증",
+          "diagnosis_days_ago": 2200,
+          "symptoms": ["거동 불편", "삼킴 곤란", "낙상 위험", "공격성"],
+          "interests": ["욕창 예방", "식사 보조", "요양시설"],
+          "assessments": [
+            {"assessment_type": "CDR", "score": 3, "days_ago": 90},
+            {"assessment_type": "GDS", "score": 6, "days_ago": 90}
+          ],
+          "safety_events": [
+            {"days_ago": 9, "has_fall": true, "note": "침대에서 내려오다 낙상"}
+          ],
+          "medications": [
+            {"drug_name": "메만틴 20mg", "dosage": "1정", "frequency": "1일 1회", "start_days_ago": 1500}
+          ],
+          "medical_visits": [
+            {
+              "in_days": -90, "is_visited": true, "hospital_name": "OO병원", "department": "신경과",
+              "visit_reason": "정기 진료", "diagnosis": "중증 단계",
+              "follow_up_plan": "장기요양등급 재신청 안내"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

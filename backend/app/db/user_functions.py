@@ -27,7 +27,7 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 + 005_medical_visits_detail.sql(medical_visits 진료 항목 컬럼, 인덱스)이 정본이다.
 """
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Optional, TypeVar
 from uuid import UUID
 
@@ -38,11 +38,15 @@ from pydantic import BaseModel, ValidationError
 
 from app.db.connection import get_connection
 from app.user_schemas import (
+    APP_TIMEZONE,
     ASSESSMENT_TYPES,
+    PROFILE_RECENT_VISITS,
+    PROFILE_SAFETY_DAYS,
     AssessmentIn,
     AssessmentOut,
     AssessmentTypeInfo,
     AssessmentUpdate,
+    CaregiverContext,
     CaregiverProfileIn,
     CaregiverProfileOut,
     MedicalVisitIn,
@@ -51,6 +55,7 @@ from app.user_schemas import (
     MedicationIn,
     MedicationOut,
     MedicationUpdate,
+    PatientContext,
     PatientIn,
     PatientOut,
     PatientUpdate,
@@ -58,12 +63,15 @@ from app.user_schemas import (
     SafetyEventOut,
     UserIn,
     UserOut,
+    UserProfileContext,
+    UserSummary,
     UserUpdate,
     check_assessment_score,
     check_date_order,
     check_visit_state,
     normalize_assessment_type,
     parse_optional_date,
+    today,
 )
 
 logger = logging.getLogger(__name__)
@@ -400,6 +408,40 @@ def update_user(user_id: UUID | str, data: dict[str, Any] | UserUpdate) -> Optio
     logger.info("update_user: user_id=%s 수정 (%s)", key, ", ".join(fields))
     # patient_ids까지 담아 get_user()와 같은 형태로 돌려준다.
     return get_user(key)
+
+
+def list_users(limit: int = 100, offset: int = 0) -> list[UserSummary]:
+    """사용자 목록을 가입 순서대로 돌려준다. (개발·관리·배치용)
+
+    테스트할 user_id 찾기, 전체 사용자를 도는 배치(예: 피드 일괄 생성)에 쓴다.
+    ★ 전체 회원의 이름·이메일이 나오므로 API로 공개하지 않는다.
+
+    Args:
+        limit: 최대 반환 개수. 0 이하면 빈 목록.
+        offset: 건너뛸 개수 (다음 페이지는 offset += limit).
+
+    Returns:
+        UserSummary 리스트, created_at → id 순 (같은 시각에 가입해도 순서가 고정된다).
+
+    Raises:
+        ValueError: offset이 음수인 경우.
+    """
+    if offset < 0:
+        raise ValueError("offset은 0 이상이어야 합니다.")
+    if limit <= 0:
+        return []
+
+    rows = _fetch_all(
+        """
+        SELECT u.id, u.name, u.email, u.created_at,
+               (SELECT count(*) FROM patient_profiles AS p WHERE p.caregiver_id = u.id) AS patient_count
+          FROM users AS u
+         ORDER BY u.created_at, u.id
+         LIMIT %(limit)s OFFSET %(offset)s
+        """,
+        {"limit": limit, "offset": offset},
+    )
+    return [UserSummary.model_validate(row) for row in rows]
 
 
 # ============================================================
@@ -1135,3 +1177,92 @@ def update_medical_visit(
 
     logger.info("update_medical_visit: visit_id=%s 수정 (%s)", key, ", ".join(fields))
     return MedicalVisitOut.model_validate(row)
+
+
+# ============================================================
+# 프로필 묶음 (AI 피드·챗봇 입력용)
+# ============================================================
+
+
+def _patient_context(patient: PatientOut, now: date) -> PatientContext:
+    """환자 한 명의 현재 상태를 위의 조회 함수들로 모은다."""
+    events = list_safety_events(patient.id, start_date=now - timedelta(days=PROFILE_SAFETY_DAYS - 1), end_date=now)
+    # list_medical_visits는 최근 날짜부터 주므로, 예약은 뒤집어 가까운 날짜부터 보여준다.
+    upcoming = list_medical_visits(patient.id, is_visited=False, start_date=now)
+    return PatientContext(
+        patient=patient,
+        latest_assessments=get_latest_assessments(patient.id),
+        current_medications=list_medications(patient.id, is_taking=True),
+        recent_safety_events=[e for e in events if e.has_fall or e.has_wandering or e.has_missing],
+        recent_visits=list_medical_visits(patient.id, is_visited=True, limit=PROFILE_RECENT_VISITS),
+        upcoming_visits=upcoming[::-1],
+    )
+
+
+def get_caregiver_context(user_id: UUID | str) -> Optional[CaregiverContext]:
+    """간병인 정보만 돌려준다 — 이름 + 자가점검 + 담당 환자 id 목록 (환자 상세 없음).
+
+    환자 상세는 patient_ids로 get_patient_context()를 부른다. email / phone_number는 담지 않는다.
+
+    Returns:
+        CaregiverContext. 해당 user_id가 없거나 id 형식이 틀리면 None.
+    """
+    user = get_user(user_id)
+    if user is None:
+        return None
+    return CaregiverContext(
+        user_id=user.id,
+        name=user.name,
+        caregiver_profile=get_caregiver_profile(user.id),
+        patient_ids=user.patient_ids,
+        generated_at=datetime.now(APP_TIMEZONE),
+    )
+
+
+def get_patient_context(patient_id: UUID | str) -> Optional[PatientContext]:
+    """환자 한 명의 현재 상태 묶음을 돌려준다. get_user_profile_context()의 patients 한 항목과 같은 형식.
+
+    권한은 보지 않는다 (AI 배치처럼 사용자 맥락이 없는 호출자도 쓴다).
+    앱 API는 is_caregiver_of()로 이 사용자의 환자인지 먼저 확인한다.
+
+    Returns:
+        PatientContext. 해당 환자가 없거나 id 형식이 틀리면 None.
+    """
+    patient = get_patient(patient_id)
+    if patient is None:
+        return None
+    return _patient_context(patient, today())
+
+
+def get_user_profile_context(user_id: UUID | str) -> Optional[UserProfileContext]:
+    """사용자 한 명의 프로필 전체(간병인 + 담당 환자들의 현재 상태)를 한 번에 돌려준다.
+
+    AI 피드·챗봇이 개인화 입력으로 쓰는 형식이다. AI 쪽은 이 함수 결과만 받으면 되고,
+    아래 조회 함수들을 직접 조합할 필요가 없다. JSON 텍스트는 `.model_dump_json()`.
+
+    담는 내용 (기간·개수 기준은 user_schemas의 PROFILE_* 상수, 날짜는 한국 시간 기준):
+        - 사용자 이름 + 간병인 자가점검 (email / phone_number는 담지 않는다)
+        - 환자마다: 기본 정보, 검사별 최신 평가, 복용 중인 약,
+          최근 PROFILE_SAFETY_DAYS일 중 낙상·배회·실종이 있던 날, 다녀온 진료 최근 PROFILE_RECENT_VISITS건,
+          오늘 이후 진료 예약
+
+    권한은 보지 않는다 (다른 함수와 같음). 사용자 본인 요청인지는 API가 확인한다.
+
+    Args:
+        user_id: 조회할 사용자 (users.id). UUID 또는 UUID 문자열.
+
+    Returns:
+        UserProfileContext. 해당 user_id가 없거나 id 형식이 틀리면 None.
+    """
+    user = get_user(user_id)
+    if user is None:
+        return None
+
+    now = today()
+    return UserProfileContext(
+        user_id=user.id,
+        name=user.name,
+        caregiver_profile=get_caregiver_profile(user.id),
+        patients=[_patient_context(patient, now) for patient in list_patients(user.id)],
+        generated_at=datetime.now(APP_TIMEZONE),
+    )

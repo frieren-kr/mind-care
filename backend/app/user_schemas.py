@@ -101,6 +101,13 @@ ASSESSMENT_ALIASES = {
     "QDRS": "K-QDRS",
 }
 
+# 프로필 묶음 조회(get_user_profile_context)에 담는 기록의 범위.
+# AI 피드·챗봇이 "지금 상태"로 읽는 값이라, 바꾸면 AI 쪽 결과도 달라지므로 팀에 공지한다.
+#   PROFILE_SAFETY_DAYS   — 오늘 포함 최근 며칠의 안전·행동 기록을 담을지 (이벤트가 있는 날만)
+#   PROFILE_RECENT_VISITS — 다녀온 진료를 최근 몇 건까지 담을지
+PROFILE_SAFETY_DAYS = 30
+PROFILE_RECENT_VISITS = 3
+
 
 # ------------------------------------------------------------
 # 값 정리·검사 함수 — 모델의 validator가 쓴다.
@@ -464,6 +471,19 @@ class UserOut(BaseModel):
         default_factory=list,
         description="담당 환자 id 목록 (patient_profiles.id, 등록 순). users 컬럼이 아니라 조회 시 붙인다",
     )
+
+
+class UserSummary(BaseModel):
+    """list_users()가 돌려주는 사용자 목록 한 줄. (개발·관리·배치용 — API로 공개하지 않는다)
+
+    이름은 중복될 수 있으므로 사람을 구분할 때는 email(중복 불가)이나 id를 본다.
+    """
+
+    id: UUID = Field(description="사용자 고유 id (users.id)")
+    name: str
+    email: str = Field(description="로그인 이메일 (중복 불가)")
+    patient_count: int = Field(description="담당 환자 수")
+    created_at: datetime = Field(description="가입 시각")
 
 
 # ============================================================
@@ -1026,3 +1046,64 @@ class MedicalVisitOut(BaseModel):
     visit_content: Optional[str] = None
     created_at: datetime = Field(description="기록 입력 시각")
     updated_at: datetime = Field(description="마지막 수정 시각")
+
+
+# ============================================================
+# 프로필 묶음 (get_user_profile_context) — AI 피드·챗봇 입력용
+# ============================================================
+# 테이블이 아니라 위의 XxxOut을 한 사용자 기준으로 묶은 것이다.
+# AI 팀이 이 형식을 그대로 받아 쓰므로, 필드를 바꾸면 팀에 공지하고 AGENTS.md도 같이 고친다.
+# JSON 텍스트가 필요하면 `.model_dump_json()`, dict가 필요하면 `.model_dump(mode="json")`.
+
+
+class PatientContext(BaseModel):
+    """환자 한 명의 현재 상태 묶음. UserProfileContext.patients의 한 항목."""
+
+    patient: PatientOut = Field(description="환자 기본 정보 (단계·진단일·증상·관심 분야)")
+    latest_assessments: list[AssessmentOut] = Field(
+        default_factory=list, description="검사별 가장 최근 평가 1건씩 (assessment_type 이름순)",
+    )
+    current_medications: list[MedicationOut] = Field(
+        default_factory=list, description="현재 복용 중인 약만 (is_taking = true)",
+    )
+    recent_safety_events: list[SafetyEventOut] = Field(
+        default_factory=list,
+        description=f"최근 {PROFILE_SAFETY_DAYS}일 안전·행동 기록 중 낙상·배회·실종이 하나라도 있는 날만 (최근 날짜부터)",
+    )
+    recent_visits: list[MedicalVisitOut] = Field(
+        default_factory=list, description=f"다녀온 진료 최근 {PROFILE_RECENT_VISITS}건 (최근 날짜부터)",
+    )
+    upcoming_visits: list[MedicalVisitOut] = Field(
+        default_factory=list, description="오늘 이후 진료 예약 (가까운 날짜부터)",
+    )
+
+
+class CaregiverContext(BaseModel):
+    """get_caregiver_context()가 돌려주는 간병인 정보 (환자 상세 없이).
+
+    환자 상세는 patient_ids의 id로 get_patient_context()를 부른다.
+    email / phone_number는 담지 않는다 (UserProfileContext와 같은 기준).
+    """
+
+    user_id: UUID = Field(description="사용자 고유 id (users.id)")
+    name: str = Field(description="사용자(간병인) 이름")
+    caregiver_profile: Optional[CaregiverProfileOut] = Field(
+        default=None, description="간병인 자가점검. 아직 저장한 적이 없으면 null",
+    )
+    patient_ids: list[UUID] = Field(default_factory=list, description="담당 환자 id 목록 (등록 순)")
+    generated_at: datetime = Field(description="조회 시각 (한국 시간)")
+
+
+class UserProfileContext(BaseModel):
+    """get_user_profile_context()가 돌려주는 사용자 한 명의 프로필 묶음.
+
+    개인정보 최소화를 위해 email / phone_number는 담지 않는다 (AI·LLM에 넘길 필요가 없다).
+    """
+
+    user_id: UUID = Field(description="사용자 고유 id (users.id)")
+    name: str = Field(description="사용자(간병인) 이름")
+    caregiver_profile: Optional[CaregiverProfileOut] = Field(
+        default=None, description="간병인 자가점검. 아직 저장한 적이 없으면 null",
+    )
+    patients: list[PatientContext] = Field(default_factory=list, description="담당 환자들 (등록 순)")
+    generated_at: datetime = Field(description="이 묶음을 조회한 시각 (한국 시간)")
