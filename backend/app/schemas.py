@@ -5,7 +5,7 @@
 스키마가 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약" 섹션도 갱신한다.
 """
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -280,17 +280,24 @@ class PaperDetailResponse(BaseModel):
 
 
 class RecommendationItem(BaseModel):
-    """추천 논문 한 편. 요약(paper_analysis)이 아직 없으면 요약 쪽 필드는 모두 null."""
+    """추천 논문 한 편. 요약(paper_analysis)이 아직 없으면 요약 쪽 필드는 모두 null.
+
+    논문 정보(id, title, … 요약 3칸)는 두 mode 모두 DB에서 온다.
+    """
 
     id: UUID = Field(description="papers.id — GET /papers/{id}로 상세를 받을 수 있다")
     title: str
     published_at: Optional[date] = Field(default=None, description="발행일 (papers.published_date)")
     journal: Optional[str] = None
     pubmed_url: Optional[str] = Field(default=None, description="원문 링크 (papers.url)")
-    relevance_score: float = Field(description="검색어와의 코사인 유사도 (0~1, 클수록 관련)")
-    personal_reason: Optional[str] = Field(
-        default=None, description="왜 이 사용자에게 관련 있는지 한 줄. 피드 흐름 연결 전이라 항상 null"
+    relevance_score: Optional[float] = Field(
+        default=None, description="검색어와의 코사인 유사도 (0~1, 클수록 관련). mode='ai'면 null"
     )
+    # --- 아래 4개는 AI(FeedWorkflow) 결과. mode='search'면 모두 null ---
+    headline: Optional[str] = Field(default=None, description="카드 제목 한 줄")
+    summary_bullets: Optional[list[str]] = Field(default=None, description="핵심 요약 1~5줄")
+    personal_reason: Optional[str] = Field(default=None, description="왜 이 사용자에게 관련 있는지")
+    category: Optional[Literal["treatment", "care", "prevention", "diagnosis"]] = None
     # --- 아래는 paper_analysis. 요약이 아직 없으면 모두 null ---
     study_type: Optional[str] = None
     evidence_level: Optional[str] = None
@@ -304,14 +311,20 @@ class RecommendationResponse(BaseModel):
 
     user_id: UUID
     patient_id: UUID = Field(description="추천 기준이 된 환자 (patient_profiles.id)")
-    query: str = Field(description="이번 추천에 쓴 검색어 (데모·디버깅용)")
-    items: list[RecommendationItem] = Field(description="관련도 높은 순")
+    mode: Literal["ai", "search"] = Field(
+        description="어느 방식으로 만들었는지. ai = FeedWorkflow, search = 검색 방식(폴백)"
+    )
+    query: Optional[str] = Field(
+        default=None, description="이번 추천에 쓴 검색어 (데모·디버깅용). mode='search'일 때만, ai면 null"
+    )
+    items: list[RecommendationItem] = Field(description="search면 관련도 높은 순, ai면 AI가 정한 순")
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "user_id": "593bb66f-148d-481e-9537-00473b147d26",
                 "patient_id": "1e89c282-59a8-4036-a006-803e4644dc7a",
+                "mode": "search",
                 "query": "치매 환자(경도인지장애)의 수면장애, 기억력 저하 증상과 수면 위생, 운동에 도움이 되는 연구",
                 "items": [
                     {
@@ -321,7 +334,10 @@ class RecommendationResponse(BaseModel):
                         "journal": "Alzheimer's & Dementia",
                         "pubmed_url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
                         "relevance_score": 0.6123,
+                        "headline": None,
+                        "summary_bullets": None,
                         "personal_reason": None,
+                        "category": None,
                         "study_type": "rct",
                         "evidence_level": "2",
                         "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",

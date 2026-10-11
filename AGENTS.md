@@ -182,8 +182,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
 - **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
   - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
-- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?, relevance_score, personal_reason?`(아직 항상 `None`) + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
-- **RecommendationResponse**: `user_id, patient_id, query`(이번에 쓴 검색어), `items`(`RecommendationItem` 목록, 관련도 높은 순)
+- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
+  - `relevance_score?`(float) — `mode="search"`일 때만. **`ai`면 `None`** (AI 결과에는 점수가 없다).
+  - `headline?, summary_bullets?`(`list[str]`), `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — `mode="ai"`일 때만. `search`면 모두 `None`.
+- **RecommendationResponse**: `user_id, patient_id, mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지), `query?`(이번에 쓴 검색어. `search`일 때만, `ai`면 `None`), `items`(`RecommendationItem` 목록, 최대 5개. `search`면 관련도 높은 순, `ai`면 AI가 정한 순)
 - **EMBEDDING_DIM** = `1024` (`schemas.py` 상수). DB의 `vector(1024)`와 같아야 한다 — 바꿀 때는 새 마이그레이션 + 이 상수 + `config.py`의 `embedding_dim`을 **함께** 고친다.
 
 동작 메모:
@@ -259,7 +261,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   - `get_paper_detail()`은 없는 id면 예외 없이 `None`을 돌려준다 (API가 404로 바꾼다).
     `get_papers_by_ids()`(AI용 계약, url·요약 없음)는 그대로 두고 따로 만든 함수다.
 - `get_paper_details_by_pmids()`는 `get_paper_detail()`과 같은 형식을 **PMID로 여러 건** 받는다
-  (`search()`의 Evidence Package에 `paper_id`가 없고 PMID만 있어서 둔 함수, `/recommendations`가 쓴다).
+  (`search()`의 Evidence Package에 `paper_id`가 없고 PMID만 있어서 둔 함수, `/recommendations`가
+  검색 방식과 AI 방식의 `backend_handoff()` 양쪽에서 쓴다).
   읽기만 하고, 요약이 없으면 요약 쪽 필드가 `None`이다. **`papers`에 없는 PMID는 예외 없이 결과에 키가 없다.**
   순서는 보장하지 않으므로 호출한 쪽이 PMID로 찾아 쓴다.
 
@@ -277,18 +280,34 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
 | `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
-| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | 환자 프로필에 맞는 논문 Top-k. `k` 1~20(기본 5), 범위를 벗어나면 422. 환자가 1명이면 `patient_id` 생략 가능, 2명 이상인데 생략하면 400. 없는 사용자·이 사용자의 환자가 아니면 404 | `RecommendationResponse` |
+| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | 환자 프로필에 맞는 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). `k` 1~5(기본 5), 범위를 벗어나면 422. 환자가 1명이면 `patient_id` 생략 가능, 2명 이상인데 생략하면 400. 없는 사용자·이 사용자의 환자가 아니면 404 | `RecommendationResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 **간병인·환자 정보 조회(피드·챗봇 개인화 입력용)**다. 이름은 feed지만
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
 - 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
-- `/recommendations`(담당: 박주현)는 첫 버전이다. 흐름: `user_functions`로 프로필 읽기 → `build_query()`로
-  검색어 한 줄 → `search(검색어, k)` → `get_paper_details_by_pmids()`로 `paper_id`·저장된 요약 붙이기.
-  - `build_query()`(`api/recommendations.py`)는 환자 단계·증상·관심사를 문장에 끼워 넣는 **임시 함수**다
-    (허웅 님 피드 흐름으로 교체 예정). 응답의 `query`에 이번에 쓴 검색어가 그대로 나온다(데모·디버깅용).
-  - 항목 이름은 `/papers`와 같다(`id`, `published_at`, `pubmed_url`, `summary_*` …) + `relevance_score`,
-    `personal_reason`. **`personal_reason`은 아직 항상 `null`** (피드 흐름 연결 후 채운다).
+- `/recommendations`(담당: 박주현)는 **두 방식**으로 응답하고, 어느 쪽인지 응답의 `mode`에 적는다.
+  프로필은 두 방식 모두 `user_functions.get_user_profile_context(user_id)` 한 번으로 읽는다.
+  - **`mode="ai"`** — 허웅 님 `FeedWorkflow` 3단계. `AgentContext(request_id=uuid4, user_id, patient_id)`를 만들어
+    `context_prepare()`(`prepare_demo_feed_input()`을 감싼 함수, 시간대는 `user_schemas.APP_TIMEZONE`)
+    → `feed_execution`(LLM + 검색) → `backend_handoff()` 순서로 돈다.
+    - `backend_handoff(result)`는 순수 함수다. `result.output.items`와 `result.sources`를 짝지어
+      `sources[].pmid`로 `get_paper_details_by_pmids()`를 한 번 부르고, `headline` / `summary_bullets` /
+      `personal_reason` / `category`는 AI 결과에서, 나머지(`id`, `title`, … 요약 3칸)는 DB에서 채운다.
+      **`pmid`가 없거나 DB에 없는 항목은 뺀다.** `relevance_score`는 `null`.
+  - **`mode="search"`** — `search_recommendations()`. `build_query()`로 검색어 한 줄 → `search(검색어, k)` →
+    `get_paper_details_by_pmids()`. `relevance_score`와 응답의 `query`(이번에 쓴 검색어, 데모·디버깅용)가 채워지고
+    AI 쪽 4칸은 `null`이다. `build_query()`는 환자 단계·증상·관심사를 문장에 끼워 넣는 검색 방식 전용 함수다.
+  - **폴백 규칙** — 아래 경우에는 `search` 방식으로 대신 응답한다(항상 200).
+    - `get_feed_execution()`이 `None`일 때
+    - `FeedWorkflowError`나 다른 예외가 났을 때 (`stage`와 예외 종류를 warning 로그로 남긴다. 메시지는 남기지 않는다)
+    - AI 결과를 걸러낸 뒤 남은 항목이 0개일 때
+  - **★ 교체 지점: `get_feed_execution()`** (`api/recommendations.py`의 FastAPI 의존성). **지금은 `None`을 돌려줘서
+    실제 응답은 항상 `mode="search"`이고 `personal_reason` 등 AI 쪽 칸은 `null`이다.** 허웅 님 `search_evidence`
+    핸들러·레지스트리·LLM 클라이언트가 나오면 이 함수만 `(AgentContext, str) -> StructuredAgentResult`를
+    돌려주도록 바꾼다. 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
+  - `k`는 1~5 (AI 결과가 최대 5개). 404/400 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
   - 서버를 띄운 뒤 **첫 요청은 bge-m3 모델을 불러오느라 오래 걸린다** (그 뒤로는 메모리에 남는다).
+  - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보낸다. 화면의 `'A'~'D' | 'guideline'` 등급으로 바꾸는 규칙은 **아직 미정**이다.
@@ -359,7 +378,12 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **논문 추천 API 첫 버전 구현·검증 완료** (2026-10-10, 실 DB). `GET /recommendations/{user_id}` +
   `get_paper_details_by_pmids()`. 샘플 간병인 4명(환자 5명) 전부 Top-5 반환, 400·404·422,
   임시 요약 1건이 붙어 나오는 것까지 확인하고 테스트 줄은 삭제했다. 서버를 띄운 뒤 첫 요청은 약 11초
-  (bge-m3 로드, CPU), 그 뒤로는 약 0.4초. 검색어는 임시 `build_query()`이고 `personal_reason`은 아직 `null`.
+  (bge-m3 로드, CPU), 그 뒤로는 약 0.4초.
+- **`/recommendations` ↔ FeedWorkflow 연결(백엔드 쪽) 구현·검증 완료** (2026-10-11, 실 DB). **응답 계약 변경**:
+  `mode` 추가, `query`·`relevance_score` null 가능, `headline`/`summary_bullets`/`category` 추가, `k` 최대 20 → 5.
+  가짜 `feed_execution`으로 `mode="ai"`(AI 칸 + DB 칸), 예외·0건일 때 `search` 폴백, 400·404·422를
+  `tests/test_recommendations.py`(7건)로 확인했다. **실제 `feed_execution`은 아직 없어서(`get_feed_execution()`이
+  `None`) 지금 응답은 항상 `mode="search"`다.**
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**
