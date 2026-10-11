@@ -10,6 +10,86 @@ Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence �
 
 이번 단계는 계약/Fake 검증이며 DB/RAG 연결, 의료 규칙, 챗봇 API 완성은 포함하지 않는다.
 
+## ChatWorkflow: 세 단계 Skeleton
+
+`workflows/chat.py`는 Feed를 상속하지 않고 다음 세 단계만 실행한다.
+
+```text
+Stage 1 context_prepare:
+  trusted AgentContext + 현재 사용자 질문 → 검증된 최소 JSON 문자열
+Stage 2 chat_execution:
+  요청별 Registry snapshot + ChatPromptBuilder + 기존 AgentLoopRunner
+  → run_structured(output_model=ChatAnswerV1) 1회
+  → Tool 0개 / 동일 Turn 복수 조회 / 결과를 본 후속 조회 → StructuredAgentResult
+Stage 3 backend_handoff:
+  기존 wrapper 중첩 재검증 → completed Chat + 현재 request 확인 → 필수 Backend callable
+```
+
+**Context Prepare.** `prepare_chat_input(context, user_message)`는 기존 AgentContext를
+재검증하고 strict/nonblank 질문 및 4,000자 상한을 검사한다. 공통 ContentText의 공백·제어·서식
+문자만 있는 입력 거부를 재사용하며 허용한 원문을 strip/요약/재작성하지 않는다.
+공개 JSON 필드는 `user_message`, 서버 계산 `patient_scope_available` 두 개뿐이다.
+user/patient/request UUID·ID는 자동 공개하지 않고 환자 전체 정보·CareLog·RAG·대화 이력도
+사전 조회하지 않는다. 환자 선택 None은 일반 질문/검색 가능한 정상 요청이다.
+Scope flag나 UUID 타입은 인증·환자 소속 검증의 증거가 아니며 trusted Backend가 이를 보장해야 한다.
+Workflow의 JSON object 검사는 형식 guard이며 계약 검증은 주입한 신뢰된 Stage 1 책임이다.
+임의 Raw JSON 주입은 지원 입력 경로가 아니다. 사용자 문장 속 개인정보를 비식별화하지 않는다.
+
+**Chat 실행과 Registry.** `ChatExecutionV1(client, registry_factory, ...)`는 요청마다
+`registry_factory(context)`를 호출하고 기존 canonical ToolRegistry 검증으로 별도 mapping을
+조립한다. Wrapper에는 Runner/Registry 요청 상태를 보관하지 않으며 공용 Runner/Executor는
+동일한 요청별 Registry를 사용한다. Factory는 허용 Tool과 실제 권한을 결정하고 patient=None이면
+get_patient_profile/get_recent_care_logs를 노출하지 않아야 한다. 잘못된 Scope 조립은 Provider 호출
+전에 거부한다. 기존 Executor의 None Scope 사전 차단은 그대로 남는다.
+Tool DTO에 ownership ID가 없으면 유효한 모양의 다른 환자 정보를 Executor가 식별할 수 없으므로
+실제 Handler에서 authorization/ownership을 반드시 확인해야 한다. Fake는 이를 보장하지 않는다.
+향후 환자 전용 Tool은 Factory/Chat의 Scope 정책과 Executor guard에 함께 등록한다.
+현재 Tool 전체 목록을 Workflow에 선언하거나 Registry V2/미래 Tool을 미리 구현하지 않는다.
+Factory/Handler의 공유 서비스나 Client는 서버 조립부 책임이며 요청별 변경 상태를 보관하면 안 된다.
+
+Chat은 공용 기본 예산 5 rounds / 10 calls를 사용한다. 동일 Turn의 독립 Tool들은 기존 Runner가
+순차 실행해 결과를 모은 뒤 다음 LLM 호출로 전달한다. 세 Tool은 1 round / 3 calls이며 중간 LLM
+재호출은 없다. 앞선 결과가 필요한 검색은 후속 Turn에서 LLM이 판단한다. Intent classifier,
+별도 Planner/Tool loop/ParallelToolExecutor는 없다. Feed의 3/3 설정·검색 전용 Registry는 변경하지 않는다.
+ChatPromptBuilder는 DefaultPromptBuilder의 Tool followup을 재사용하고 raw AgentContext 초기 메시지만
+제외한다. 공용 Runner가 기존 Chat structured policy를 삽입한다. Tool/질문/Evidence는 비신뢰 데이터다.
+최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
+응답의 임상적 정확성을 강제하는 검증은 아니다. 실제 Provider 의미적 동작은 아직 검증하지 않았다.
+
+**Handoff와 오류.** 필수 `backend_handoff(context, StructuredAgentResult)`에 검증된 별도 객체를
+전달하고 Backend 소유 Receipt를 그대로 반환한다. 완료 상태, ChatAnswerV1, request_id,
+legacy final_answer 일치, citation_refs/sources 순서 및 중첩 유효성을 기존 wrapper로 재검증한다.
+검색 참조의 성공 여부/범위와 metadata는 기존 Runner/Evidence Resolver가 검증한다.
+Tool 없는 직접 답변은 citation_refs=[] / sources=[]가 정상이다. 실패 status·잘못된 출처·변조
+결과·Feed 출력은 Handoff에 전달하지 않는다. Recoverable Tool error 후 검증된 completed 답변은
+errors를 보존해 전달하며 Tool timeout 등의 failed 결과는 차단한다. Backend가 객체를 수정해도
+Runner 원본 결과는 바뀌지 않는다. 미구현 저장이 성공을 반환하는 default는 없다.
+각 단계 exception은 고정 ChatWorkflowError.stage로 전환하며 원문/내부 exception 메시지는 숨긴다.
+자동 retry/repair가 없으며 suppressed chaining은 APM traceback locals 제거까지 보장하지 않는다.
+
+조립 인터페이스:
+
+```python
+execution = ChatExecutionV1(client, registry_factory)
+workflow = ChatWorkflow(context_prepare=prepare_chat_input,
+                        chat_execution=execution, backend_handoff=backend_handoff)
+receipt = workflow.run(trusted_context, user_message)
+```
+
+`testing/chat_workflow_fakes.py`는 기존 Fake LLM/Tool과 실제 Chat 단계/Runner를 연결한다.
+실제 Chat API, authorization, history, Patient/Medication/Visit Handler, RAG 연결, OpenAI Provider
+통합 검증, Chat persistence 및 citation paper ID mapping은 후속이다. 기존 OpenAI client 구현과
+recommendations의 PMID mapping은 존재하지만 ChatWorkflow와 연결하지 않았다.
+향후 권한 검증된 history는 Stage 1의 데이터로 추가하며 과거 발화/Assistant 응답을 System 정책으로
+승격하지 않는다. History selection, access/budget 정책, citation/persistence 책임을 장래 세분화할 수
+있지만 현재 Stage는 세 개이고 Memory Manager/새 실행 프레임워크는 도입하지 않았다.
+
+오프라인 검증 (`backend/`, 실제 Provider/DB 사용 없음):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_chat_workflow app.ai.agent.tests.test_chat_execution app.ai.agent.tests.test_workflows app.ai.agent.tests.test_outputs
+```
+
 ## FeedWorkflow: Demo/Production 공통 세 단계
 
 Feed ownership은 간병인/user다. Demo는 선택된 환자 0~1명의 배경을 사용하고,
