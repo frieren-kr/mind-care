@@ -10,83 +10,62 @@ Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence �
 
 이번 단계는 계약/Fake 검증이며 DB/RAG 연결, 의료 규칙, 챗봇 API 완성은 포함하지 않는다.
 
-## FeedWorkflow execution skeleton
+## Demo FeedWorkflow: 세 단계 실행
 
-FeedWorkflow는 **caregiver/user-scoped personalized research news feed**를 위한 골격이다.
-Feed의 ownership과 personalization scope는 간병인/user다. 관리 환자들의 정보는 간병인의
-돌봄 상황을 이해하기 위한 Context이며 특정 환자 전용 Feed나 환자별 partition을 의미하지 않는다.
-
-`workflows/feed.py`의 `FeedWorkflow`는 다음 순서로 주입된 dependency를 호출한다.
+Feed ownership과 personalization scope는 간병인/user다. 복수 관리 환자는 서로 구분된 돌봄
+배경이며 특정 환자 전용 Feed나 한 명으로 합성한 환자 상태를 의미하지 않는다.
+`workflows/feed.py`의 `FeedWorkflow`는 다음 세 단계만 실행한다.
 
 ```text
-Context Load → Pre-Guardrail → Retrieval Planning → Agent Loop
-→ Output Validation → Post-Guardrail → Source Resolution → Persistence / Return
+Stage 1 context_prepare:
+  trusted Backend UserProfileContext read → FeedUserProfileSourceMappingV1
+  → FeedProfilePlanningInputV1 → build_feed_provider_input → 준비된 문자열
+Stage 2 feed_execution:
+  FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV1)
+  → LLM query → search_evidence → Evidence 관찰 → 필요할 때 반복 → StructuredAgentResult
+Stage 3 backend_handoff:
+  completed + FeedAnswerV1 + 현재 request 확인 → 기존 wrapper 계약 재검증
+  → Backend Handoff(context, StructuredAgentResult) → Backend receipt
 ```
 
-Context Loader는 trusted `AgentContext`와 `recent_days=30`을 받는다. Backend의
-authorization/ownership 검증 후 다음 개인화 맥락을 제공하는 것이 후속 책임이다.
+**Context 준비.** `context_loader(context)`는 trusted Backend read와 기존 Mapper를 연결하여
+Demo `FeedProfilePlanningInputV1`을 반환하는 callable이다. Caller가 authorization, read success,
+aware `reference_time`과 `service_timezone`을 제공한다. Mapper는 caregiver/child ownership과
+명시 필드, 시간 의미를 검사하고 UUID byte 순서에 따른 request-local patient_ref를 보존한다.
+같은 파일의 `build_feed_provider_input()`이 유일한 외부 공개 allowlist를 소유한다.
+내부 DTO의 medication/visit/note/score/date는 서버에 남고 전체 DTO를 Provider에 dump하지 않는다.
+실행 계층은 이 문자열을 그대로 사용하며 다시 Context를 선별·조립하지 않는다.
 
-- Caregiver Profile: 간병인의 돌봄 관계/부담/생활·관심 맥락
-- Managed Patient Profiles: 관리하는 여러 환자의 저장된 기본 돌봄 배경
-- Recent Care Context: 최근 30×24시간의 돌봄 관찰/상황. 여러 관리 환자와 관련될 수 있으며
-  실제 Backend 조회/aggregation 방식은 미정
-- Long-term Personalization Summary: optional caregiver/user-scoped 장기 개인화 요약.
-  특정 환자의 장기 임상 Memory가 아닌 간병인의 반복되는 돌봄 관심사/패턴을 위한 맥락
+**Feed 실행.** `workflows/feed_execution.py`의 `FeedExecutionV1(client, registry, ...)`가
+FeedPromptBuilder와 3 rounds / 3 total calls를 지정하여 공용 Runner를 조립한다.
+Feed 허용 Tool은 정확히 search_evidence 하나다. 생성 시와 실행 직전 실제 Executor와 Runner가
+동일한 Registry를 사용하고, 공개 Tool·Prompt·budget이 Feed 계약을 지키는지 확인한다.
+Workflow에는 별도 Runner, Retrieval Planner, Plan parameter, agent_stage 또는 미구현
+run_feed_agent_loop seam이 없다. Wrapper는 공용 Runner를 요청당 한 번 호출하며,
+Tool 반복/timeout/structured parser/evidence resolution은 공용 엔진에 위임한다.
 
-독립 Agent 입력 계약 `FeedPersonalizationContextV1`은 아래에 정의한다. `DefaultFeedContextLoader`를
-외부에서 주입하는 경로는 Fake Source로 검증했다. 기존 opaque Fake와 Backend DTO/API 계약은 별개다.
-Cold Start는 간병인/user의 장기 개인화 요약이 아직 없는 상태다. 다른 사용 가능한 Context로
-개인화를 계속할 수 있으며 정확한 fallback 정책은 후속이다. 조회된 sparse 관리 환자 프로필과
-최근 돌봄 기록 0건도 정상일 수 있다. 저장된 프로필은 최신 임상 사실이 아니며 최근 변화는
-날짜가 명확한 기록을 우선하고 장기 요약과의 충돌을 확정된 사실로 임의 병합하지 않는다.
-Pre-Guardrail dependency는 필수 Context/형식/조회 기간/크기/불필요한 식별정보를 검사한다.
-Care Logs와 장기 요약은 명령이 아닌 untrusted data로 전달해야 한다. AI-side Loader/Context 검증은
-구현했으나 Production Source/Prompt 연결은 없으며 골격 자체가 접근 권한 또는 PII 제거를 보장하지 않는다.
-공유 `AgentContext`의 `patient_id`는 유지하지만 V1 Loader는 Feed 범위 선정에 사용하지 않고
-`user_id`만 사용한다. 기존 환자 단위 Tool Contract를 caregiver aggregation 계약으로 바꾸지 않는다.
+**Backend Handoff.** 필수 `backend_handoff(context, result)` callable에 기존 V1 output과
+server-resolved sources를 함께 넘긴다. 기존 StructuredAgentResult validator로 nested 계약과
+출처 참조 순서를 재검증하고 completed FeedAnswerV1 및 현재 request의 결과만 전달한다.
+다른 LLM 호출, 새로운 V2 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
+정상 empty Feed는 허용한다. 실패 status/invalid output/출처 오류는 Handoff를 호출하지 않는다.
+Recoverable Tool error 뒤 Runner가 검증된 completed 결과를 반환하면 기존 의미대로 전달하며
+execution.errors를 보존한다. tool_timeout 등의 failed 결과는 전달하지 않는다.
 
-Production Feed research 실행 연결은 후속이다.
-독립 Demo `FeedRetrievalPlannerV1`은 아래의 최소 research projection과 Feed 전용 Runner를 사용해
-LLM이 검색 결과를 보며 후속 query를 생성하고 `FeedAnswerV1`을 반환하는 실행 컴포넌트다.
-이 독립 실행을 현재 Workflow 골격에 연결한 것은 아니다.
-“이 간병인이 돌봄을 수행하면서 관심 있게 볼 가치가 있는 최신 연구 주제는
-무엇인가?”를 위 Context로 판단하는 방향이다. 특정 환자에게 연구 결과가 직접 적용된다고
-단정하거나 여러 환자 정보를 하나의 환자 상태로 병합하지 않는다. Query는 돌봄/건강 연구
-개념으로 일반화하고 환자 이름/직접 식별정보를 포함하지 않아야 한다.
-현재 Workflow 골격에는 호출 위치와 실패 전파만 있다. Context, opaque Plan, Agent 단계 결과,
-검증·승인·출처 조립 값과 persistence receipt는 opaque 내부 값이며 최종 DTO/API 계약이 아니다.
-Post-Guardrail에는 검증된 값과 Agent 단계 결과를 함께 전달하여 향후 선택 Evidence의
-내부 projection을 받을 경계를 남겼다. 실제 metadata는 Source Resolver가 원본에서 복사하며
-LLM 생성값으로 대체하지 않아야 한다. 이 기능들은 이번 골격에서 구현하지 않았다.
+각 단계의 exception은 `FeedWorkflowError.stage`(context_prepare/feed_execution/backend_handoff)로
+감싸며 원문 메시지는 숨긴다. 이후 단계는 호출하지 않고 자동 retry/repair는 없다.
+Handoff는 필수 주입이므로 미구현 Backend 저장을 성공으로 가장하는 default는 없다.
+DB receipt/API DTO/실제 저장·권한·idempotency·추가 임상 filtering 정책은 Backend 연결 계약이 필요하다.
+`testing/feed_workflow_fakes.py`는 실제 Mapper/Execution/Runner를 합성 Backend read/LLM/검색/Handoff와
+연결하며 success receipt는 test-only다. 가짜 Plan, legacy text → 합성 Feed item 변환은 제거했다.
 
-`AgentLoopRunner`는 Workflow **바깥에서** 조립하여 `agent_loop_runner`로 주입한다.
-Workflow는 `search_evidence`만 노출하고 `max_tool_rounds=3`, `max_total_tool_calls=3`인
-구성을 확인한다. 한 turn에 여러 call이 가능하므로 검색 실행 상한은 총 call 제한이 담당한다.
-모든 검색의 deterministic query validation은 외부 search Handler/Adapter에서 RAG 호출
-직전에 적용해야 한다. 계획 단계의 검사나 prompt만으로 refinement query를 보호할 수 없다.
-`testing/feed_workflow_fakes.py`의 test-only registry 조립 예시는 매 call의 validator → Handler
-순서를 검증한다. 실제 PII detector와 production wiring은 없다.
+**별도 Production 경로.** `DefaultFeedContextLoader → FeedPersonalizationContextV1`은
+CareLog/장기 요약/Source Snapshot/Coverage가 있는 V1.1 계약이다. Demo의 UserProfileContext 기반
+입력과 같은 타입이 아니며 현재 Demo Workflow에 주입하면 context_prepare에서 거부한다.
+Production Source/complete read/Query Guard/RAG/Backend persistence 연결은 완료하지 않았다.
+실환자 외부 Provider 전송은 privacy/provider review 전까지 production NO-GO다.
 
-현재 Runner의 structured 계약은 Chat/Feed **V1**뿐이다. 기본 `run_feed_agent_loop` seam은
-`NotImplementedError`로 미연결을 명시하고 Workflow는 `agent_loop` 실패로 중단한다.
-Fake seam만 주입된 공용 Runner의 legacy 실행/오류/상한을 검증하며 그 text를 Feed로 사용하지
-않는다. 합성 item fixture가 후속 단계를 통과해도 production Feed 생성 성공을 의미하지 않는다.
-FeedAnswerV2와 선택 Evidence projection이 확정되면 같은 Runner 실행에서 검색과 최종 생성을
-연결한다. 별도 Feed Loop, Runner subclass, Workflow 내부 Runner 생성은 없다.
-
-Dependency는 실패/거부 시 예외를 발생시키며 `FeedWorkflowError.stage`가 실패 단계만 전한다.
-이후 단계는 호출하지 않고 자동 repair/retry는 없다. Persistence가 성공한 뒤에만 receipt를
-반환한다. 부분/전체 item 제외는 Fake의 주입 정책으로만 검증하며 운영 filtering/no-feed 결과
-계약을 확정하지 않았다. DB 저장/중복 방지/idempotency도 미구현이다.
-
-후속 계약/연결: Production Feed Context Source integration, iterative Planner의 Workflow integration, `FeedAnswerV2`,
-`SelectedEvidenceContext`, EvidenceReference → 내부 paper_id, 다중 source persistence.
-장기 요약의 입력 projection은 `profile_summaries`에 대응하지만 최신 row 선택/조회 정책과
-`chat_messages` 활용 방식은 확정하지 않았다. Real Backend Context Loader,
-production Retrieval Planner/PII validation/persistence integration도 미구현이다.
-DB/RAG identity나 schema를 임시 값으로 대체하지 않았다.
-
-오프라인 골격 검증 (`backend/`):
+오프라인 통합 검증 (`backend/`):
 
 ```bash
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_workflow -v
@@ -178,13 +157,13 @@ Schema는 정렬/DB snapshot을 증명하지 않는다. 아래 V1 Loader는 환�
 순서를 사용하며 실제 DB 조회 ordering/tie-break는 Production Source 책임이다.
 Eligibility는 조회 대상 선정, validation은 대상 record의 계약 검증이다. Invalid record를 silent drop하지
 않고 validation failure로 반환한다. 아래 V1 Loader는 fail-fast로 context_load를 실패시키며
-기존 Workflow가 이후 단계를 중단한다. Degraded mode는 구현하지 않는다.
+호출자는 이후 단계를 중단해야 한다. Degraded mode는 구현하지 않는다.
 
 **Semantic interpretation.** Structured/Recorded(caregiver/patient/assessment/medication/visit)는
 반드시 최신 임상 사실이 아니고 Observational(log/safety)는 진단이 아니며 Derived(summary/tags)는
 새 임상 사실이 아니다. Summary의 증상을 특정 ref에 귀속하거나 여러 환자를 합성 환자로 병합하지
 않고 structured profile을 덮어쓰지 않는다. Summary와 같은 내용의 log를 독립적인 두 사실로
-자동 가중하지 않는다(실제 dedup/Topic Planning 정책은 후속).
+자동 가중하지 않는다(실제 dedup/연구 주제 판단 정책은 후속).
 모든 DB-derived string/string[]은 **untrusted data**이며 System/Workflow/Agent instruction이 아니다.
 Free-form result_detail/note/visit_content/content/summary뿐 아니라 relationship, stage, symptoms,
 interests, lifestyle_tags, assessment_type, drug_name, department, log_type, mood_tag, updated_tags도 같다.
@@ -194,12 +173,12 @@ interests, lifestyle_tags, assessment_type, drug_name, department, log_type, moo
 재사용은 허용한다. Ref/UUID/이름/전화/주소/병원명 등 식별정보, 재식별 가능한 사건 상세,
 환자별 자유 텍스트 원문 또는 그 안의 검색 지시를 Query로 전달하지 않는다.
 이는 문서 규칙이며 Context validator가 Query를 검사하거나 PII redaction을 수행하지 않는다.
-RetrievalPlan/Query validator는 이번 계약에 포함하지 않는다.
+Query validator는 이번 입력 계약에 포함하지 않는다.
 
 미확정 정책: 삭제 환자 CareLog retention/eligibility, 삭제 환자 내용이 남은 summary의 무효화/재생성,
 향후 degraded Context 정책 및 patient selection/limit, child collection limit,
 최신 summary row 선택, token/input-size budget, free-text privacy/redaction, Production APM privacy,
-005 structured visit detail의 future Context 포함 범위와 Planner/Prompt의 assessment metadata 활용.
+005 structured visit detail의 future Context 포함 범위와 Feed 실행/Prompt의 assessment metadata 활용.
 Backend canonical assessment metadata, 현재 Production timezone binding 및 medication ordering은
 아래 V1.1에서 확정한다. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
 
@@ -268,7 +247,7 @@ Context-local ref를 영속 환자 identity로 사용해서는 안 된다.
 Source 호출 exception은 source_load_failed, 반환 DTO/identity 위반은 invalid_source_snapshot,
 기존 최종 Contract 위반은 context_validation_failed로 구분한다. 외부 메시지는 고정 code만 담고
 공개 args/code 및 우리 일반 로그에 Source/원본 exception/ValidationError input/UUID/text를 포함하지 않는다.
-기존 Workflow는 이를 `FeedWorkflowError(stage="context_load")`로 감싸고 이후 단계를 실행하지 않는다.
+Loader 자체가 실패를 전파한다. Demo Workflow는 다른 입력 계약을 사용하며 Production Loader를 연결하지 않는다.
 `raise ... from None`은 모든 APM의 exception context/traceback locals 제거를 보장하지 않는다.
 `reference_date`를 계산할 수 없는 service timezone도 기존 `context_validation_failed` 분류를
 유지하며 잘못된 기준 날짜로 Source를 호출하지 않는다. Clock 오류를 이 분류와 혼합하지 않는다.
@@ -414,7 +393,7 @@ defensive raw-value 경계는 그대로다.
 Assessment metadata 정본은 `app.user_schemas.ASSESSMENT_TYPES` / `list_assessment_types()`이며
 canonical type, min/max/step/allowed/higher_is_worse를 제공한다. 이를 각 사용자 Context에 복제하거나
 새 필드로 넣지 않고 unknown/legacy assessment type도 새 validator로 거부하지 않는다.
-Retrieval Planner의 활용 방식은 후속 Planner/Prompt Policy다.
+Feed 실행에서의 활용 방식은 후속 Prompt Policy다.
 
 책임 흐름은 `Trusted AgentContext.user_id → ProductionFeedContextSource → Backend internal Feed
 Read Contract → DB access layer`다. 데모 `/feed*` HTTP API를 AI에서 다시 호출하는 구조를 기본으로
@@ -442,7 +421,7 @@ Medication stable ordering, aggregate와 Source 구분, empty와 read failure �
 | `FeedPersonalizationContextV1` | AI가 받을 수 있는 구조·데이터 의미·무결성 |
 | `FeedUserProfileSourceMappingV1` | Backend UserProfileContext의 scope consistency/명시 필드 검사, caregiver allowlist, patient projection 및 Demo 입력 조립 |
 | Feed Context Loader Policy | scope, eligibility E, inclusion I, count, 시간, snapshot, fail-fast |
-| Feed research execution | 독립 Demo V1 LLM iterative retrieval + FeedAnswerV1. Production query admission/RAG 및 Workflow 연결은 후속 |
+| Feed research execution | FeedExecutionV1의 LLM iterative retrieval + FeedAnswerV1, Demo Workflow/Handoff 연결. Production query admission/RAG/DB 저장은 후속 |
 
 **실제 Backend PatientContext 계약.** `app.user_schemas.PatientContext`는 structured patient profile과
 selected current-state-oriented signal source다. `FeedContextSourceSnapshot`이나 full V1 Context와
@@ -487,10 +466,10 @@ Inclusion은 LIMIT뿐 아니라 latest-N/latest-per-type/token budget/representa
 | latest-per-type을 Eligibility E로 선언 | 3 | 3 | false |
 | history가 E이고 latest-per-type을 Inclusion I로 선언 | 10 | 3 | true |
 
-이름 자체가 어느 policy인지 결정하지 않는다. Source/Loader/Planner는 동일한 trusted static
+이름 자체가 어느 policy인지 결정하지 않는다. Source/Loader/Feed 실행은 동일한 trusted static
 collection policy를 공유해야 한다. Assessment history, safety 전체/positive subset, medication history,
 visit history의 production E/I 범위는 **unresolved**이며 code default를 추가하지 않는다.
-Planner는 count 3/3에서 “현재 policy의 eligible 3건이 모두 포함됨”만 판단할 수 있다.
+Feed 실행은 count 3/3에서 “현재 policy의 eligible 3건이 모두 포함됨”만 판단할 수 있다.
 DB 전체 history가 3건뿐이라고 해석하거나 aggregate에 없는 history 때문에 truncated를 추정하지
 않는다. Returned length → total fallback은 없다. Actual eligible count를 모르면 정식 V1 Coverage를
 완성했다고 선언할 수 없다. Managed patients는 기존 eligible 전체 포함 조건을 유지한다.
@@ -547,35 +526,18 @@ Backend today와 AI reference의 자정 경계 불일치는 날짜 보정/row �
 Backend read까지 전달하는 Production 시간 계약은 후속이다.
 
 `PROFILE_PLANNING_AVAILABLE_SOURCES`는 기존 sources에 `caregiver_profile`을 추가한 immutable
-server-side 설정이며 payload에 직렬화하지 않는다. Demo Planner는 unavailable source를 successful absence로
-해석하지 않는다. 실제 RAG/Workflow Feed 생성 및 Production Source wiring은 아직 없다.
+server-side 설정이며 payload에 직렬화하지 않는다. Demo 입력은 unavailable source를 successful absence로
+해석하지 않는다. 실제 RAG/DB 저장 및 Production Source wiring은 아직 없다.
 이 Mapping은 합성/개발용 Demo 경계다. Relationship/lifestyle_tags/symptoms/interests/note/visit_content의
 free-text PII를 sanitize하지 않으며 실환자 데이터를 외부 LLM Provider에 전송할 수 있다는 승인으로 보지 않는다.
-독립 `FeedRetrievalPlannerV1`은 아래와 같이 공용 Agent Loop를 재사용하며 actual RAG/Workflow/recommendations 연결은 구현하지 않았다.
+아래의 FeedExecutionV1이 공용 Agent Loop를 재사용하며 Demo Workflow의 Handoff까지 연결한다. actual RAG/recommendations/DB 저장은 미구현이다.
 
-### FeedRetrievalPlannerV1 — LLM-driven iterative research Demo
+### FeedExecutionV1 — 준비된 입력으로 LLM 반복 검색
 
-`workflows/feed_retrieval_planning.py`의 `FeedRetrievalPlannerV1(runner)`는 trusted
-`FeedProfilePlanningInputV1`을 Provider-visible 최소 research input으로 projection하고
-Feed 전용 `AgentLoopRunner.run_structured(..., output_model=FeedAnswerV1)`에 전달한다.
-Runner가 반환한 `StructuredAgentResult`를 변환 없이 그대로 반환한다.
-
-```text
-Trusted Backend read → auth/scope/time 검증 + UserProfile Mapping(service_timezone)
-→ FeedProfilePlanningInputV1 → Provider-visible research projection
-→ Feed 전용 AgentLoopRunner → LLM generalized query → search_evidence
-→ EvidencePackage → LLM 재판단 → 필요할 때 후속 검색
-→ FeedAnswerV1 → StructuredAgentResult
-```
-
-정적 Topic Catalog, fixed query, alias matching/normalization, priority/greedy selection,
-정적 Plan/Task/SignalRef DTO와 expected-plan 재계산은 제거했다. 별도 RetrievalExecutor,
-Tool loop/search counter, Evidence validator, final parser 또는 source resolver를 만들지 않는다.
-공용 Runner/ToolExecutor와 기존 `validate_final_output()`/evidence reference resolution을 재사용한다.
-
-**Provider projection.** 작은 `_build_provider_research_input()` helper가 명시적 allowlist로
-새 JSON을 조립한다. 전체 Planning DTO를 dump하거나 auth/ownership/temporal validation을
-다시 수행하지 않는다. 기존 request-local `patient_ref`를 유지하며 새 ref를 생성하지 않는다.
+`FeedProfilePlanningInputV1`은 개인화 입력 계약이다. 이름의 Planning은 별도 검색 계획 생성을
+뜻하지 않는다. 외부 공개 projection/serialization은 Stage 1의 `feed_profile_planning.py`에만 있다.
+`build_feed_provider_input()`은 전체 DTO dump나 auth/ownership/temporal 재해석 없이 새 JSON을
+만들고 기존 patient_ref를 유지한다. 새 중간 DTO/Planning Contract는 없다.
 
 | 포함 | 제외 |
 |---|---|
@@ -585,50 +547,43 @@ Tool loop/search counter, Evidence validator, final parser 또는 source resolve
 | latest assessment의 assessment_type만 | assessment score/result_detail/assessed_at |
 | caregiver가 없으면 null, 환자가 없으면 [] | medication 전체, visit department/content 및 기타 narrative |
 
-환자별 경계를 보존하며 여러 환자를 합성 환자로 병합하지 않는다. Positive flags는 제공된 selected
-rows에서만 고르며 false/row 부재를 안전함이나 임상적 부재로 해석하지 않는다. Projection은 Provider
-공개 필드 선택일 뿐이며 자유 텍스트를 sanitize하거나 완전한 비식별화를 보장하지 않는다.
-Caller가 trusted 입력의 upstream scope/time validation과 timezone context를 제공해야 한다.
-CareLog/Summary는 이 Demo에 unavailable이며 정상 empty로 위장하거나 입력에 추가하지 않는다.
+Positive flags는 제공된 selected rows에서만 고르며 false/row 부재를 안전함이나 임상적 부재로
+해석하지 않는다. 여러 환자를 합성 환자로 병합하지 않는다. Projection은 자유 텍스트를
+sanitize하거나 완전한 비식별화를 보장하지 않는다. CareLog/Summary는 Demo에 unavailable이며
+정상 empty로 위장하거나 입력에 추가하지 않는다.
 
-**Feed Runner contract.** `feed.py`의 단일 `validate_feed_runner()`를 Workflow와 Planner가 공유한다.
-Planner 생성 시와 실행 직전에 FeedPromptBuilder, 정확히 search_evidence 한 Tool,
-`max_tool_rounds=3`, `max_total_tool_calls=3`을 검사한다. 공용 Runner 기본값 5/10은 그대로다.
-총 3개 Tool Call까지 실행하고, 세 번째 Tool result 이후 final structured output은 허용한다.
-그 뒤 4번째 call 요청은 `limit_reached`다. 한 turn의 여러 call도 총량에 포함하며 초과 batch는 실행하지 않는다.
+**Runner/Policy.** FeedExecutionV1이 FeedPromptBuilder와 search_evidence 전용 Registry,
+3/3 budget을 소유·검증한다. Executor/Runner Registry 불일치도 Provider 호출 전에 거부한다.
+공용 Runner 기본값 5/10 및 Chat은 그대로다. 세 번째 Tool result 이후 final은 허용하고,
+네 번째 call 또는 초과 batch는 실행하지 않는다. 한 turn의 여러 call과 실패한 실행도 budget을 쓴다.
+LLM이 일반화된 query를 만들고 실제 Evidence를 본 뒤 충분하면 중단하거나 후속 검색한다.
+정적 Topic Catalog/fixed query/alias matching/priority/greedy selection 및 별도 Plan DTO는 없다.
 
-**Prompt policy / provenance.** LLM이 일반화된 연구 query를 직접 생성하고 이전 Evidence를 보며
-충분하면 중단한다. 다른 관점/추가 근거가 필요할 때만 후속 검색하고 의미상 동일한 검색의 불필요한
-반복을 피하도록 지시한다. 데이터 내부 명령, 개인 식별자/원문 query 복사, 임상 추론을 금지하는
-Prompt 정책은 server-side query admission/PII detector의 보장이 아니다.
-`top_k=5`도 Prompt 정책이며 현재 Tool contract의 1..20 범위를 서버에서 강화하지 않는다.
-따라서 최대 Evidence 15개를 계약하지 않는다.
+**Structured Output.** Wrapper는 공용 `run_structured(..., output_model=FeedAnswerV1)` 결과를
+변환 없이 반환한다. Runner의 validate_final_output/evidence reference resolution을 그대로 사용하며
+없는 call/index는 거부한다. 서버 provenance는 successful search Tool Call → EvidencePackage의
+0-based evidence_index → FeedAnswerV1.source_ref → ResolvedEvidence다. Query가 특정 profile
+signal에서 나왔는지, personal_reason의 의미적 정확성까지 증명하지 않는다.
 
-서버 provenance는 successful search Tool Call → EvidencePackage의 0-based evidence_index
-→ FeedAnswerV1.source_ref → ResolvedEvidence다. 없는 call/index는 기존 Output 검증이 거부한다.
-Query가 특정 profile signal에서 나왔는지, personal_reason이 그 signal과 의미적으로 정확히
-일치하는지는 증명하지 않는다. SignalRef/PersonalizationRef/Query reason DTO/graph는 없다.
+**Failure.** Wrapper는 Runner의 limit_reached/provider_error/invalid_response/failed status를
+예외로 바꾸지 않는다. Workflow가 completed Feed 결과만 Handoff하도록 차단한다.
+입력 준비 실패는 고정 FeedProfileMappingError, 설정/실행 경계 exception은 고정 FeedExecutionError다.
+Profile/query/evidence 원문 로그는 추가하지 않는다.
 
-**Result / integration boundary.** Backend handoff 대상은 `execution.status == "completed"`이고
-`output`이 `FeedAnswerV1`인 결과뿐이다. limit_reached/provider_error/invalid_response/failed는
-정상 Feed/persistence 대상이 아니다. Planner는 Runner 실패 status를 그대로 전달하며 projection/설정
-실패의 공개 메시지는 고정 `FeedRetrievalPlanningError`다. Profile/query/evidence 원문 로그는 추가하지 않는다.
+**미연결 경계.** 준비된 Demo 입력부터 V1 Handoff까지 실제 컴포넌트 연결은 검증했다.
+actual RAG/production registry, Query Guard, top_k=5 server enforcement, 실제 Backend DTO 변환/저장,
+same-PMID dedup, semantic duplicate query tracking, Feed history/novelty는 후속이다.
+현재 recommendations API는 patient_id/단일 query 기반 별도 경로다. 복수 환자 FeedAnswerV1을
+그 계약에 임의로 변환하거나 PMID를 DB paper_id로 꾸미지 않는다. 실환자 production 승인을 뜻하지 않는다.
 
-현재 Workflow의 opaque retrieval_planning → agent_loop 및 plan parameter는 후속 integration에서
-정리한다. 이번에는 공용 Runner 검증 helper만 공유하며 persistence/source-resolution 계약을 완성하지 않는다.
-Query Guard와 `top_k=5` server enforcement, actual RAG production Handler/registry 연결,
-Workflow output validation/persistence, same-PMID dedup, semantic duplicate query tracking,
-Feed history/novelty, Frontend/API DTO 연결은 미구현이다. 실환자 외부 Provider 전송은 privacy/provider
-review 전까지 production NO-GO이며 이번 검증은 합성 Fake LLM/Handler만 사용한다.
-
-독립 offline 검증 (`backend/`):
+오프라인 실행 검증 (`backend/`):
 
 ```bash
-MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_retrieval_planning -v
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_execution -v
 ```
 
 **전체 prompt/query privacy.** `FeedPromptBuilder`를 공용 `AgentLoopRunner`에 주입한다.
-FeedWorkflow는 construction과 agent 실행 직전에 이 builder를 확인하여 DefaultPromptBuilder의
+FeedExecutionV1은 construction과 실행 직전에 이 builder를 확인하여 DefaultPromptBuilder의
 raw `AgentContext` 직렬화를 차단한다. Identity는 서버의 auth/tool/persistence 경계에서 유지하고
 Provider initial messages에는 request/user/patient ID를 직렬화하지 않는다. 공용 Runner 및 Chat의
 DefaultPromptBuilder는 변경하지 않았다. Demo에도 동일 builder를 사용해야 한다.
@@ -639,19 +594,19 @@ LLM output·custom system prompt를 PII sanitize하는 것은 아니다.
 고정 exact-query allowlist는 제거했다. LLM이 생성한 query는 현재 기존 EvidenceSearchInput 계약만
 검증한다. 향후 실제 RAG Handler 호출 전에 Feed-specific query admission과 `top_k=5` 강제를
 binding해야 한다. 현재 test-only registry의 validation seam은 합성 hook이며 production Query Guard가 아니다.
-실제 Production registry/Planner wiring은 미연결이다. 회귀 테스트는 Fake Provider의 모든 turn에서
+실제 Production registry/Feed execution wiring은 미연결이다. 회귀 테스트는 Fake Provider의 모든 turn에서
 server identity가 제외되고 허용된 최소 research projection만 전달됨을 확인한다.
 Allowlist projection은 field minimization뿐이다. Symptoms/interests/note/visit_content/CareLog/Summary
 원문 속 PII sanitizer는 **미구현**이며 완전한 PII-safe 보장을 주장하지 않는다.
 
 Deleted-patient CareLog eligibility/NULL 처리와 deleted-derived Summary retention/invalidation은
 **Production 연결 전 반드시 확정할 unresolved item**이다. Complete Feed Read, count-aware history,
-single logical DB snapshot implementation, free-text privacy, Planner/guardrail/source wiring도 후속이다.
+single logical DB snapshot implementation, free-text privacy, Production execution/guardrail/source wiring도 후속이다.
 정식 성공은 Complete Feed Read → real Coverage → consistent snapshot → CareLog/Summary → full V1 →
 FeedWorkflow이며 profile-only demo 준비를 정식 Production integration 완료로 표현하지 않는다.
 
 **AI-side Loader implementation complete**: Fake Source로 DTO/시간/identity/projection/coverage/
-오류 및 Workflow 전달·fail-fast를 검증했다. **Production Feed Context integration은 후속**이다.
+오류와 Demo/Production 입력 경로 구분 및 fail-fast를 검증했다. **Production Feed Context integration은 후속**이다.
 Production Source/DB 함수·DTO, authorization/transaction isolation/snapshot, 실제 count/ordering/
 tie-break/limit, 최신 summary selection, 삭제 데이터 정책, free-text privacy, token budget,
 cache/retry/degraded mode와 운영 APM 설정은 구현하지 않았다.
@@ -705,6 +660,12 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | `_execution.py` | 동기 호출 대기 timeout, 요청 deadline 전파, 제한된 daemon worker |
 | `prompts.py` | PromptBuilder Protocol, 최소 정책과 DefaultPromptBuilder |
 | `agent_loop_runner.py` | 호출 루프, 한 응답의 여러 Tool 순차 실행, 상한, 최종 결과 |
+| `workflows/feed.py` | Demo Context 준비 → Feed 실행 → 검증된 Backend Handoff의 세 단계 |
+| `workflows/feed_profile_planning.py` | UserProfile Mapper/입력 DTO, 유일한 Provider 공개 projection/serialization |
+| `workflows/feed_execution.py` | Feed Prompt/검색 전용 Registry/3·3 설정 검증 및 공용 structured Runner 호출 |
+| `workflows/feed_context*.py` | 별도 Production Context V1.1/Loader/Source 계약 (운영 Source 미연결) |
+| `testing/feed_workflow_fakes.py` | 실제 Demo 컴포넌트에 합성 Backend DTO/LLM/Tool/Handoff를 연결하는 fixture |
+| `tests/test_feed_workflow.py` | Mapper → Execution → Runner → V1 Handoff 통합 및 실패 차단 검증 |
 | `clients/base.py` | Provider-independent LLMClient Protocol |
 | `clients/openai_client.py` | SDK 주입, 모델 설정 주입, Chat Completions 변환/정규화 |
 | `tools/evidence_tools.py` | 미래 RAG 서비스의 EvidenceRetriever Protocol; 실행 구현 없음 |

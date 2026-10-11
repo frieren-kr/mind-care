@@ -3,7 +3,6 @@ import json
 import unittest
 from uuid import UUID
 
-from ..agent_loop_runner import AgentLoopRunner
 from ..prompts import DefaultPromptBuilder
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentContext, ModelTurn, ToolCall
@@ -12,7 +11,8 @@ from ..testing.feed_workflow_fakes import FakeFeedDependencies
 from ..tools.contracts import EvidenceItem, EvidencePackage
 from ..workflows.feed import FeedWorkflowError
 from ..workflows.feed_prompts import FeedPromptBuilder
-from ..workflows.feed_retrieval_planning import FeedRetrievalPlannerV1, _build_provider_research_input
+from ..workflows.feed_execution import FeedExecutionV1
+from ..workflows.feed_profile_planning import build_feed_provider_input
 from .test_feed_profile_planning import NOW, P2, backend_caregiver, backend_patient, backend_profile
 from ..workflows.feed_profile_planning import FeedUserProfileSourceMappingV1
 from app.user_schemas import APP_TIMEZONE
@@ -41,12 +41,11 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                     ModelTurn(text='{"schema_version": "1", "response_type": "feed", "items": []}'
                               if structured else "synthetic final"),
                 ])
-                runner = AgentLoopRunner(client, ToolRegistry((
+                execution = FeedExecutionV1(client, ToolRegistry((
                     ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], search, test_only=True),
-                ), mode="test"),
-                    prompt_builder=FeedPromptBuilder(), max_tool_rounds=3, max_total_tool_calls=3)
-                result = (FeedRetrievalPlannerV1(runner)(CONTEXT, payload)
-                          if structured else runner.run(_build_provider_research_input(payload), CONTEXT))
+                ), mode="test"))
+                result = (execution(CONTEXT, build_feed_provider_input(payload))
+                          if structured else execution.runner.run(build_feed_provider_input(payload), CONTEXT))
                 self.assertEqual(result.execution.status if structured else result.status, "completed")
                 self.assertEqual(len(client.requests), 2)
                 followup = client.requests[1][0]
@@ -68,19 +67,15 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                                   "stored interest", "stored assessment", "legacy whole visit or free memo"):
                     self.assertNotIn(narrative, queries[0])
 
-    def test_workflow_rejects_default_or_mutated_prompt_before_provider(self):
+    def test_workflow_rejects_mutated_prompt_before_provider(self):
         deps = FakeFeedDependencies(CONTEXT)
-        deps.runner.prompt_builder = DefaultPromptBuilder()
-        with self.assertRaises(ValueError):
-            deps.workflow()
-        self.assertEqual(deps.events, [])
-        deps.runner.prompt_builder = FeedPromptBuilder()
         workflow = deps.workflow()
         deps.runner.prompt_builder = DefaultPromptBuilder()
         with self.assertRaises(FeedWorkflowError) as caught:
             workflow.run(CONTEXT)
-        self.assertEqual(caught.exception.stage, "agent_loop")
+        self.assertEqual(caught.exception.stage, "feed_execution")
         self.assertEqual(deps.client.requests, [])
+        self.assertEqual(deps.saved, [])
 
     def test_chat_default_context_serialization_is_unchanged(self):
         messages = DefaultPromptBuilder().build_initial_messages("legacy input", CONTEXT)

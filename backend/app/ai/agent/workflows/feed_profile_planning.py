@@ -6,6 +6,7 @@ claims. Backend selected lists are preserved separately, not promoted to history
 """
 from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal
+import json
 from typing import Literal, Sequence
 from uuid import UUID
 
@@ -95,6 +96,40 @@ class FeedProfileMappingError(RuntimeError):
 
     def __init__(self):
         super().__init__("Feed profile mapping failed")
+
+
+def build_feed_provider_input(planning: FeedProfilePlanningInputV1) -> str:
+    """Stage 1's sole external disclosure allowlist over trusted Demo input.
+
+    Internal DTO fields stay available server-side. Never dump the whole DTO,
+    reinterpret auth/time, regenerate refs or claim to sanitize free-text PII.
+    The execution layer consumes this prepared string without projecting again.
+    """
+    try:
+        if not isinstance(planning, FeedProfilePlanningInputV1):
+            raise TypeError("Trusted Demo planning input required")
+        caregiver = planning.caregiver_profile
+        payload = {
+            "caregiver": None if caregiver is None else {
+                "relationship": caregiver.relationship,
+                "lifestyle_tags": list(caregiver.lifestyle_tags),
+            },
+            "patients": [{
+                "patient_ref": patient.patient_ref,
+                "dementia_stage": patient.dementia_stage,
+                "symptoms": list(patient.symptoms),
+                "interests": list(patient.interests),
+                "safety_events": [
+                    label for flag, label in (
+                        ("has_fall", "fall"), ("has_wandering", "wandering"), ("has_missing", "missing")
+                    ) if any(getattr(row, flag) for row in patient.recent_safety_events)
+                ],
+                "assessment_types": [row.assessment_type for row in patient.latest_assessments],
+            } for patient in planning.managed_patient_profiles],
+        }
+        return json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except Exception:
+        raise FeedProfileMappingError() from None
 
 
 def _visit_payload(row: MedicalVisitOut) -> dict[str, object]:

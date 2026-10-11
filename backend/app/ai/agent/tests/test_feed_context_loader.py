@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from app.ai.agent.schemas import AgentContext
-from app.ai.agent.testing.feed_workflow_fakes import FakeFeedDependencies, STAGES
+from app.ai.agent.testing.feed_workflow_fakes import FakeFeedDependencies
 from app.ai.agent.workflows.feed import FeedWorkflowError
 from app.ai.agent.workflows.feed_context import FeedPersonalizationContextV1
 from app.ai.agent.workflows import feed_context_loader as loader_module
@@ -659,17 +659,18 @@ class FeedContextLoaderTests(unittest.TestCase):
             FeedContextLoadError(PRIVATE)
         self.assertNotIn(PRIVATE, str(caught.exception))
 
-    def test_workflow_forwards_validated_context_to_guardrail_and_planner(self):
+    def test_production_context_is_not_interchangeable_with_demo_workflow_input(self):
         loader, _, _ = self.make_loader(full_snapshot())
+        value = loader(CONTEXT, recent_days=30)
+        self.assertIsInstance(value, FeedPersonalizationContextV1)
         deps = FakeFeedDependencies(CONTEXT)
         workflow = deps.workflow()
-        workflow.context_loader = loader
-        workflow.pre_guardrail = lambda context, value: deps._enter("pre_guardrail", context, value)
-        self.assertIs(workflow.run(CONTEXT), deps.receipt)
-        value = deps.received["pre_guardrail"][1]
-        self.assertIsInstance(value, FeedPersonalizationContextV1)
-        self.assertIs(deps.received["retrieval_planning"][1], value)
-        self.assertEqual(deps.events, list(STAGES[1:]))
+        workflow.context_loader = lambda context: value
+        with self.assertRaises(FeedWorkflowError) as caught:
+            workflow.run(CONTEXT)
+        self.assertEqual(caught.exception.stage, "context_prepare")
+        self.assertEqual(deps.client.requests, [])
+        self.assertEqual(deps.saved, [])
 
     def test_workflow_loader_failure_stops_all_later_dependencies(self):
         for failure in ("source_exception", "invalid_snapshot", "final_validation"):
@@ -684,10 +685,10 @@ class FeedContextLoaderTests(unittest.TestCase):
             loader, _, _ = self.make_loader(source=FakeFeedContextSource(data, error=error))
             deps = FakeFeedDependencies(CONTEXT)
             workflow = deps.workflow()
-            workflow.context_loader = loader
+            workflow.context_loader = lambda context: loader(context, recent_days=30)
             with self.subTest(failure=failure), self.assertRaises(FeedWorkflowError) as caught:
                 workflow.run(CONTEXT)
-            self.assertEqual(caught.exception.stage, "context_load")
+            self.assertEqual(caught.exception.stage, "context_prepare")
             self.assertIsInstance(caught.exception.__context__, FeedContextLoadError)
             self.assertNotIn(PRIVATE, str(caught.exception))
             self.assertEqual(deps.events, [])
