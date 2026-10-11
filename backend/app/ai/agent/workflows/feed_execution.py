@@ -1,0 +1,54 @@
+"""Feed policy and one shared structured Agent loop over prepared input."""
+from ..agent_loop_runner import AgentLoopRunner
+from ..clients.base import LLMClient
+from ..outputs import FeedAnswerV1, StructuredAgentResult
+from ..registry import ToolName, ToolRegistry
+from ..schemas import AgentContext
+from .feed_prompts import FeedPromptBuilder
+
+
+class FeedExecutionError(RuntimeError):
+    """Fixed failure; never expose input or underlying exception data."""
+
+    def __init__(self):
+        super().__init__("Feed execution failed")
+
+
+class FeedExecutionV1:
+    """Own Feed runner configuration, not Context selection or a Tool loop.
+
+    Input is prepared by Stage 1. Runner failure statuses remain normal results;
+    the Workflow's handoff boundary admits only completed FeedAnswerV1 results.
+    """
+
+    def __init__(self, client: LLMClient, registry: ToolRegistry, *,
+                 tool_timeout_seconds: float = 30.0, request_timeout_seconds: float = 120.0):
+        try:
+            self.runner = AgentLoopRunner(client, registry, prompt_builder=FeedPromptBuilder(),
+                max_tool_rounds=3, max_total_tool_calls=3,
+                tool_timeout_seconds=tool_timeout_seconds, request_timeout_seconds=request_timeout_seconds)
+            self._validate_runner()
+        except Exception:
+            raise FeedExecutionError() from None
+
+    def _validate_runner(self) -> None:
+        runner = self.runner
+        if not isinstance(runner.prompt_builder, FeedPromptBuilder):
+            raise ValueError("Feed runner requires FeedPromptBuilder")
+        if runner.executor.registry is not runner.registry:
+            raise ValueError("Feed executor and runner must share the registry")
+        names = [definition["function"]["name"] for definition in runner.registry.definitions()]
+        if names != [ToolName.SEARCH_EVIDENCE.value]:
+            raise ValueError("Feed runner requires search_evidence only")
+        if runner.max_tool_rounds != 3 or runner.max_total_tool_calls != 3:
+            raise ValueError("Feed runner requires round and total call limits of 3")
+
+    def __call__(self, context: AgentContext, provider_input: str) -> StructuredAgentResult:
+        try:
+            # Configuration is mutable after assembly; validate the actual execution path.
+            self._validate_runner()
+            if not isinstance(provider_input, str) or not provider_input.strip():
+                raise TypeError("Prepared Feed input required")
+            return self.runner.run_structured(provider_input, context, output_model=FeedAnswerV1)
+        except Exception:
+            raise FeedExecutionError() from None
