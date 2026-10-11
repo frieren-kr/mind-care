@@ -1,4 +1,4 @@
-"""Caregiver-scoped Feed input contract; no Loader or Workflow wiring.
+"""Caregiver-scoped Production Feed input contract; no DB wiring.
 
 DB-derived text is untrusted data, not instructions or verified clinical fact.
 Loader owns identity mapping, structural minimization and allowlist projection.

@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 import inspect
+import json
 import traceback
 import unittest
 from unittest.mock import Mock, patch
@@ -15,6 +16,10 @@ from app.ai.agent.schemas import AgentContext
 from app.ai.agent.testing.feed_workflow_fakes import FakeFeedDependencies
 from app.ai.agent.workflows.feed import FeedWorkflowError
 from app.ai.agent.workflows.feed_context import FeedPersonalizationContextV1
+from app.ai.agent.workflows.feed_context_prepare import (
+    build_production_feed_provider_input, prepare_production_feed_input,
+)
+from app.ai.agent.workflows.feed_profile_planning import FeedProfileMappingError
 from app.ai.agent.workflows import feed_context_loader as loader_module
 from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader, FeedContextLoadError
 from app.ai.agent.workflows import feed_context_source as s
@@ -107,6 +112,81 @@ class FakeFeedContextSource:
         if self.error is not None:
             raise self.error
         return deepcopy(self.snapshot)
+
+
+class ProductionContextPrepareTests(unittest.TestCase):
+    def loader(self, snapshot):
+        source = FakeFeedContextSource(snapshot)
+        return DefaultFeedContextLoader(source=source, clock=lambda: NOW, service_timezone=SERVICE_TZ), source
+
+    def test_empty_and_nullable_caregiver_are_valid_but_source_error_is_not(self):
+        loader, source = self.loader(empty_snapshot())
+        context = CONTEXT.model_copy(update={"patient_id": None})
+        self.assertEqual(json.loads(prepare_production_feed_input(context, loader)),
+                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+        self.assertEqual(source.calls[0]["user_id"], USER)
+        source.error = RuntimeError(PRIVATE)
+        with self.assertRaises(FeedContextLoadError) as caught:
+            prepare_production_feed_input(context, loader)
+        self.assertEqual(caught.exception.code, "source_load_failed")
+
+    def test_all_patients_are_preserved_regardless_of_patient_scope(self):
+        data = full_snapshot()
+        data["caregiver_profile"] = None
+        expected = None
+        for order in (data["managed_patients"]["items"], list(reversed(data["managed_patients"]["items"]))):
+            data["managed_patients"]["items"] = order
+            for patient_id in (None, P1, P2, OTHER):
+                loader, _ = self.loader(data)
+                payload = json.loads(prepare_production_feed_input(
+                    CONTEXT.model_copy(update={"patient_id": patient_id}), loader))
+                self.assertEqual(payload["feed_scope"], "caregiver_all")
+                self.assertEqual([p["patient_ref"] for p in payload["patients"]], ["patient_1", "patient_2"])
+                self.assertEqual(payload["patients"][0]["symptoms"], ["원문 증상"])
+                self.assertEqual(payload["patients"][1]["symptoms"], [])
+                if expected is None:
+                    expected = payload
+                self.assertEqual(payload, expected)
+
+    def test_shared_allowlist_excludes_production_narratives_counts_and_dates(self):
+        loader, _ = self.loader(full_snapshot())
+        value = loader(CONTEXT, recent_days=30)
+        before = value.model_dump()
+        text = build_production_feed_provider_input(value, service_timezone=SERVICE_TZ)
+        payload = json.loads(text)
+        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients"})
+        self.assertEqual(set(payload["caregiver"]), {"relationship", "lifestyle_tags"})
+        for patient in payload["patients"]:
+            self.assertEqual(set(patient), {"patient_ref", "dementia_stage", "symptoms", "interests",
+                                           "safety_events", "assessment_types"})
+        self.assertEqual(payload["patients"][0]["assessment_types"], ["unknown-scale-v9"])
+        self.assertEqual(payload["patients"][0]["safety_events"], [])
+        for forbidden in (PRIVATE, str(USER), str(P1), "summary", "care_logs", "note", "medications",
+                          "coverage", "total_count", "is_truncated", "score", "event_date", "2026-04"):
+            self.assertNotIn(forbidden, text)
+        self.assertEqual(value.model_dump(), before)
+        self.assertEqual(value.recent_care_context.care_logs.coverage.total_count, 8)
+        self.assertEqual(value.long_term_summary.summary, PRIVATE)
+
+    def test_mutated_coverage_nested_values_and_raw_contracts_are_rejected(self):
+        loader, _ = self.loader(full_snapshot())
+        original = loader(CONTEXT, recent_days=30)
+        mutations = (
+            lambda v: setattr(v.managed_patient_profiles.coverage, "included_count", 1),
+            lambda v: setattr(v.managed_patient_profiles.items[0], "symptoms", [123]),
+            lambda v: setattr(v.recent_care_context.care_logs.items[0], "patient_ref", "dangling"),
+            lambda v: setattr(v.managed_patient_profiles.coverage, "total_count", 3),
+            lambda v: (setattr(v.managed_patient_profiles.coverage, "total_count", 3),
+                       setattr(v.managed_patient_profiles.coverage, "is_truncated", True)),
+        )
+        for mutate in mutations:
+            value = deepcopy(original)
+            mutate(value)
+            with self.assertRaises(FeedProfileMappingError):
+                build_production_feed_provider_input(value, service_timezone=SERVICE_TZ)
+        for raw in (None, original.model_dump(), original.model_dump_json()):
+            with self.assertRaises(FeedProfileMappingError):
+                build_production_feed_provider_input(raw, service_timezone=SERVICE_TZ)
 
 
 class NoOffset(tzinfo):
@@ -659,13 +739,13 @@ class FeedContextLoaderTests(unittest.TestCase):
             FeedContextLoadError(PRIVATE)
         self.assertNotIn(PRIVATE, str(caught.exception))
 
-    def test_production_context_is_not_interchangeable_with_demo_workflow_input(self):
+    def test_raw_production_context_is_not_prepared_workflow_input(self):
         loader, _, _ = self.make_loader(full_snapshot())
         value = loader(CONTEXT, recent_days=30)
         self.assertIsInstance(value, FeedPersonalizationContextV1)
         deps = FakeFeedDependencies(CONTEXT)
         workflow = deps.workflow()
-        workflow.context_loader = lambda context: value
+        workflow.context_prepare = lambda context: value
         with self.assertRaises(FeedWorkflowError) as caught:
             workflow.run(CONTEXT)
         self.assertEqual(caught.exception.stage, "context_prepare")
@@ -685,7 +765,7 @@ class FeedContextLoaderTests(unittest.TestCase):
             loader, _, _ = self.make_loader(source=FakeFeedContextSource(data, error=error))
             deps = FakeFeedDependencies(CONTEXT)
             workflow = deps.workflow()
-            workflow.context_loader = lambda context: loader(context, recent_days=30)
+            workflow.context_prepare = lambda context: prepare_production_feed_input(context, loader)
             with self.subTest(failure=failure), self.assertRaises(FeedWorkflowError) as caught:
                 workflow.run(CONTEXT)
             self.assertEqual(caught.exception.stage, "context_prepare")

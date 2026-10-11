@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import UUID
 
 from pydantic import ValidationError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ..executor import ToolExecutor
 from ..agent_loop_runner import AgentLoopRunner
@@ -31,6 +31,50 @@ def tool_turn(*calls):
 
 def envelopes(client, request_index=-1):
     return [json.loads(m.content) for m in client.requests[request_index][0] if m.role == "tool"]
+
+
+class UserScopedContextTests(unittest.TestCase):
+    def test_user_and_explicit_patient_scope_are_required(self):
+        payload = CONTEXT.model_dump()
+        for field in ("user_id", "patient_id"):
+            invalid = {key: value for key, value in payload.items() if key != field}
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                AgentContext.model_validate(invalid)
+        for user in (None, "not-a-uuid"):
+            with self.assertRaises(ValidationError):
+                AgentContext.model_validate({**payload, "user_id": user})
+        self.assertIsNone(AgentContext.model_validate({**payload, "patient_id": None}).patient_id)
+        self.assertEqual(AgentContext.model_validate(payload), CONTEXT)
+
+    def test_patient_tools_reject_missing_scope_before_handler(self):
+        context = AgentContext.model_validate({**CONTEXT.model_dump(), "patient_id": None})
+        for name in (ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS):
+            handler = Mock(side_effect=AssertionError("Handler must not run"))
+            registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[name], handler, test_only=True),), mode="test")
+            outcome, trace = ToolExecutor(registry).execute(call(name), context)
+            handler.assert_not_called()
+            self.assertFalse(outcome.success)
+            self.assertIsNone(outcome.data)
+            self.assertEqual(outcome.error.code, "patient_context_mismatch")
+            self.assertEqual(trace.error_type, "patient_context_mismatch")
+            client = FakeLLMClient([tool_turn(call(name)), ModelTurn(text="Must not continue")])
+            result = AgentLoopRunner(client, registry).run("Synthetic request", context)
+            self.assertEqual(result.status, "failed")
+            self.assertEqual(len(client.requests), 1)
+            self.assertIsNone(result.final_answer)
+            handler.assert_not_called()
+
+    def test_search_can_run_without_patient_and_chat_defaults_remain(self):
+        context = AgentContext.model_validate({**CONTEXT.model_dump(), "patient_id": None})
+        requested = call(ToolName.SEARCH_EVIDENCE, {"query": "dementia caregiver research"})
+        outcome, _ = ToolExecutor(fake_registry()).execute(requested, context)
+        self.assertTrue(outcome.success)
+        self.assertEqual(outcome.data["evidence"][0]["pmid"], "FAKE-PMID")
+        client = FakeLLMClient([tool_turn(requested), ModelTurn(text="Synthetic general answer")])
+        runner = AgentLoopRunner(client, fake_registry())
+        self.assertEqual((runner.max_tool_rounds, runner.max_total_tool_calls), (5, 10))
+        self.assertIsInstance(runner.prompt_builder, DefaultPromptBuilder)
+        self.assertEqual(runner.run("Synthetic request", context).status, "completed")
 
 
 class WorkflowTests(unittest.TestCase):

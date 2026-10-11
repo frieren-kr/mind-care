@@ -1,24 +1,24 @@
-"""Demo Feed: prepare Context, execute once, hand validated results to Backend.
+"""Feed: prepare Context, execute once, hand validated results to Backend.
 
-Production Context V1.1 and recommendations API integration are separate work.
+Production data sources and recommendations API adapters are separate work.
 No DB writes, paper identity mapping, clinical filtering or fake persistence.
 """
+import json
 from typing import Callable, Literal, Protocol
 
 from ..outputs import FeedAnswerV1, StructuredAgentResult
 from ..schemas import AgentContext
-from .feed_profile_planning import FeedProfilePlanningInputV1, build_feed_provider_input
 
 
 FeedStage = Literal["context_prepare", "feed_execution", "backend_handoff"]
 
 
-class FeedContextLoader(Protocol):
-    def __call__(self, context: AgentContext) -> FeedProfilePlanningInputV1:
-        """Trusted Backend UserProfile read + Mapper; caller supplies auth/time.
+class FeedContextPrepare(Protocol):
+    def __call__(self, context: AgentContext) -> str:
+        """Trusted Stage 1: read/validate/select/minimize/serialize Provider input.
 
-        Return the Demo input after scope/time validation, never a Production
-        FeedPersonalizationContextV1 or empty data substituted for a failed read.
+        Caller owns authentication and successful reads. Return prepared JSON,
+        never a raw DTO or an empty substitute for a failed read.
         """
         ...
 
@@ -39,10 +39,10 @@ class FeedWorkflow:
     A real handoff is required explicitly; no unimplemented default claims success.
     """
 
-    def __init__(self, *, context_loader: FeedContextLoader,
+    def __init__(self, *, context_prepare: FeedContextPrepare,
                  feed_execution: Callable[[AgentContext, str], StructuredAgentResult],
                  backend_handoff: Callable[[AgentContext, StructuredAgentResult], object]):
-        self.context_loader = context_loader
+        self.context_prepare = context_prepare
         self.feed_execution = feed_execution
         self.backend_handoff = backend_handoff
 
@@ -54,10 +54,18 @@ class FeedWorkflow:
             raise FeedWorkflowError(stage) from None
 
     def run(self, context: AgentContext) -> object:
-        provider_input = self._execute("context_prepare", lambda:
-            build_feed_provider_input(self.context_loader(context)))
+        provider_input = self._execute("context_prepare", lambda: self._prepare(context))
         result = self._execute("feed_execution", lambda: self.feed_execution(context, provider_input))
         return self._execute("backend_handoff", lambda: self._handoff(context, result))
+
+    def _prepare(self, context: AgentContext) -> str:
+        value = self.context_prepare(context)
+        if not isinstance(value, str) or not value.strip():
+            raise TypeError("Prepared Provider input required")
+        # Format guard only. Disclosure/scope rules belong to the trusted Stage 1.
+        if not isinstance(json.loads(value), dict):
+            raise TypeError("Prepared Provider input must be a JSON object")
+        return value
 
     def _handoff(self, context: AgentContext, result: StructuredAgentResult) -> object:
         # Reuse the existing wrapper validator at the handoff trust boundary.

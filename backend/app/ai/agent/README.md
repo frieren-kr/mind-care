@@ -10,31 +10,51 @@ Long-term Memory 로딩 정책, Guardrail 정책 결정, Workflow persistence �
 
 이번 단계는 계약/Fake 검증이며 DB/RAG 연결, 의료 규칙, 챗봇 API 완성은 포함하지 않는다.
 
-## Demo FeedWorkflow: 세 단계 실행
+## FeedWorkflow: Demo/Production 공통 세 단계
 
-Feed ownership과 personalization scope는 간병인/user다. 복수 관리 환자는 서로 구분된 돌봄
-배경이며 특정 환자 전용 Feed나 한 명으로 합성한 환자 상태를 의미하지 않는다.
-`workflows/feed.py`의 `FeedWorkflow`는 다음 세 단계만 실행한다.
+Feed ownership은 간병인/user다. Demo는 선택된 환자 0~1명의 배경을 사용하고,
+Production은 전체 관리 환자 0~N명을 서로 구분한다. 여러 환자를 합성 환자로 병합하지 않는다.
 
 ```text
 Stage 1 context_prepare:
-  trusted Backend UserProfileContext read → FeedUserProfileSourceMappingV1
-  → FeedProfilePlanningInputV1 → build_feed_provider_input → 준비된 문자열
+  Demo: authorized UserProfileContext read → 0~1명 선정 → 기존 Mapper/PlanningInput → 최소 JSON
+  Production: authorized Source Snapshot → 기존 Loader/Context V1.1 → 최소 JSON
 Stage 2 feed_execution:
-  FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV1)
-  → LLM query → search_evidence → Evidence 관찰 → 필요할 때 반복 → StructuredAgentResult
+  같은 FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV1) 1회
+  → LLM query ↔ search_evidence → FeedAnswerV1 / StructuredAgentResult
 Stage 3 backend_handoff:
-  completed + FeedAnswerV1 + 현재 request 확인 → 기존 wrapper 계약 재검증
-  → Backend Handoff(context, StructuredAgentResult) → Backend receipt
+  completed + FeedAnswerV1 + 현재 request 확인 → 기존 wrapper 재검증 → 필수 Backend Handoff
 ```
 
-**Context 준비.** `context_loader(context)`는 trusted Backend read와 기존 Mapper를 연결하여
-Demo `FeedProfilePlanningInputV1`을 반환하는 callable이다. Caller가 authorization, read success,
-aware `reference_time`과 `service_timezone`을 제공한다. Mapper는 caregiver/child ownership과
-명시 필드, 시간 의미를 검사하고 UUID byte 순서에 따른 request-local patient_ref를 보존한다.
-같은 파일의 `build_feed_provider_input()`이 유일한 외부 공개 allowlist를 소유한다.
-내부 DTO의 medication/visit/note/score/date는 서버에 남고 전체 DTO를 Provider에 dump하지 않는다.
-실행 계층은 이 문자열을 그대로 사용하며 다시 Context를 선별·조립하지 않는다.
+**실행 Context와 Cold Start.** 기존 `AgentContext`의 user_id는 유효한 UUID 필수이며,
+patient_id 필드는 필수이나 명시적 None을 허용한다. UUID만으로 인증을 대신하지 않는다.
+환자 전용 get_patient_profile/get_recent_care_logs는 유효한 환자 Scope가 없으면 Handler 전에
+기존 patient_context_mismatch로 거부하고 Runner는 failed로 종료한다. search_evidence는 None Scope에서도 실행한다.
+저장된 간병인 프로필 없음/관리 환자 없음은 정상 Cold Start다. 사용자 없음/auth/read 실패는 오류다.
+
+**Context 준비.** 필수 `context_prepare(context) -> str`은 신뢰된 서버 준비 함수다.
+Workflow는 DTO 타입을 분기하거나 공개 필드를 재선언하지 않고 JSON object 형식만 확인한다.
+임의 Raw JSON을 이 dependency로 주입하는 것은 지원되는 입력 경로가 아니다.
+`workflows/feed_context_prepare.py`의 prepare_demo_feed_input은 authorized Backend DTO,
+aware reference_time, service_timezone을 받아 대상 환자를 선정하고 기존 Mapper를 사용한다.
+0명/선택 없음은 Cold Start, 1명/선택 없음은 자동 선정, 복수/선택 없음 또는 미소속 선택은 실패다.
+모든 후보의 identity/ownership을 확인하고 선택된 환자의 child/time 검증은 Mapper가 수행한다.
+Mapper 자체의 복수 환자 지원은 유지하며 입력 DTO를 변경하지 않는다.
+prepare_production_feed_input은 DefaultFeedContextLoader를 통해 user_id 기준 전체 환자를 읽는다.
+patient_id는 Production 필터가 아니며 일반 요청에서는 None을 사용한다.
+Source identity/complete managed set/시간/Coverage 검증은 유지하며 Projection 전에 전체 V1을 재검증한다.
+
+공통 공개 필드 선택과 직렬화는 feed_profile_planning.py의 단일 serializer가 소유한다.
+Stage 1 JSON의 서버 지정 feed_scope는 Demo single_patient_demo / Production caregiver_all이다.
+caregiver relationship/lifestyle_tags와 환자별 ref/stage/symptoms/interests/일반화 안전 label/assessment_type만 공개한다.
+점수·날짜·medication/visit/note·CareLog content·장기 summary·Coverage는 내부 Context에 유지한다.
+Provider 입력에서 제외된 정보는 미제공이며 정상 0건이나 임상적 부재를 뜻하지 않는다.
+자유 텍스트 비식별화·Query Guard는 구현하지 않았고 Allowlist 최소화가 PII-safe 승인은 아니다.
+
+**Cold Start 출력.** 개인화가 비어도 일반 치매·인지건강·간병 연구 query를 생성하고
+검색 Evidence가 있으면 연구 뉴스를 만들 수 있다. personal_reason은 필수 문자열을 유지하며,
+개인화가 없으면 근거의 일반적인 정보적 관련성을 설명한다. 환자 상태를 꾸미지 않는다.
+적절한 Evidence가 없거나 출력 계약을 충족할 수 없으면 items=[]를 허용한다.
 
 **Feed 실행.** `workflows/feed_execution.py`의 `FeedExecutionV1(client, registry, ...)`가
 FeedPromptBuilder와 3 rounds / 3 total calls를 지정하여 공용 Runner를 조립한다.
@@ -59,10 +79,9 @@ DB receipt/API DTO/실제 저장·권한·idempotency·추가 임상 filtering �
 `testing/feed_workflow_fakes.py`는 실제 Mapper/Execution/Runner를 합성 Backend read/LLM/검색/Handoff와
 연결하며 success receipt는 test-only다. 가짜 Plan, legacy text → 합성 Feed item 변환은 제거했다.
 
-**별도 Production 경로.** `DefaultFeedContextLoader → FeedPersonalizationContextV1`은
-CareLog/장기 요약/Source Snapshot/Coverage가 있는 V1.1 계약이다. Demo의 UserProfileContext 기반
-입력과 같은 타입이 아니며 현재 Demo Workflow에 주입하면 context_prepare에서 거부한다.
-Production Source/complete read/Query Guard/RAG/Backend persistence 연결은 완료하지 않았다.
+**Production 데이터 계약.** Context V1.1과 Demo PlanningInput은 별도 모델을 유지한다.
+각 Stage 1 adapter가 준비한 문자열만 공통 Workflow에 주입한다. Raw Context DTO 주입은 거부한다.
+Fake Source로 Production 준비부터 Handoff까지 연결했으며 실제 Source/complete read/Query Guard/RAG/Backend persistence 연결은 후속이다.
 실환자 외부 Provider 전송은 privacy/provider review 전까지 production NO-GO다.
 
 오프라인 통합 검증 (`backend/`):
@@ -247,7 +266,7 @@ Context-local ref를 영속 환자 identity로 사용해서는 안 된다.
 Source 호출 exception은 source_load_failed, 반환 DTO/identity 위반은 invalid_source_snapshot,
 기존 최종 Contract 위반은 context_validation_failed로 구분한다. 외부 메시지는 고정 code만 담고
 공개 args/code 및 우리 일반 로그에 Source/원본 exception/ValidationError input/UUID/text를 포함하지 않는다.
-Loader 자체가 실패를 전파한다. Demo Workflow는 다른 입력 계약을 사용하며 Production Loader를 연결하지 않는다.
+Loader 자체가 실패를 전파한다. Production Stage 1 adapter도 이를 전파하며 공통 Workflow는 context_prepare에서 중단한다.
 `raise ... from None`은 모든 APM의 exception context/traceback locals 제거를 보장하지 않는다.
 `reference_date`를 계산할 수 없는 service timezone도 기존 `context_validation_failed` 분류를
 유지하며 잘못된 기준 날짜로 Source를 호출하지 않는다. Clock 오류를 이 분류와 혼합하지 않는다.
@@ -421,7 +440,7 @@ Medication stable ordering, aggregate와 Source 구분, empty와 read failure �
 | `FeedPersonalizationContextV1` | AI가 받을 수 있는 구조·데이터 의미·무결성 |
 | `FeedUserProfileSourceMappingV1` | Backend UserProfileContext의 scope consistency/명시 필드 검사, caregiver allowlist, patient projection 및 Demo 입력 조립 |
 | Feed Context Loader Policy | scope, eligibility E, inclusion I, count, 시간, snapshot, fail-fast |
-| Feed research execution | FeedExecutionV1의 LLM iterative retrieval + FeedAnswerV1, Demo Workflow/Handoff 연결. Production query admission/RAG/DB 저장은 후속 |
+| Feed research execution | FeedExecutionV1의 LLM iterative retrieval + FeedAnswerV1, Demo/Production Stage 1부터 공통 Workflow/Handoff 연결. Production query admission/RAG/DB 저장은 후속 |
 
 **실제 Backend PatientContext 계약.** `app.user_schemas.PatientContext`는 structured patient profile과
 selected current-state-oriented signal source다. `FeedContextSourceSnapshot`이나 full V1 Context와
@@ -489,7 +508,7 @@ CareLog의 `[reference-720h, reference)`와 safety의 calendar-date policy는 �
 `FeedUserProfileSourceMappingV1(service_timezone=...)`은 trusted caller가 읽은 실제
 `UserProfileContext`와 caller가 명시한 aware `reference_time`을 받아 `FeedProfilePlanningInputV1`을
 반환한다. Demo 경로는 `UserProfileContext → FeedUserProfileSourceMappingV1 → FeedProfilePlanningInputV1`
-에서 멈춘다. Production 경로 `FeedContextSourceSnapshot → DefaultFeedContextLoader → FeedPersonalizationContextV1`은
+을 내부 계약으로 유지하고 Stage 1에서 선정·최소 직렬화한다. Production 경로 `FeedContextSourceSnapshot → DefaultFeedContextLoader → FeedPersonalizationContextV1`은
 별개이며 변경하지 않는다. 두 경로는 최소화/provenance 의미를 공유하지만 Demo DTO는 Production Context가 아니다.
 
 검증 순서는 reference/timezone → UserProfileContext 타입/명시 필드 → top-level user scope →
@@ -497,8 +516,8 @@ caregiver scope/allowlist → patient projection → 전체 Planning validation�
 `profile.user_id == AgentContext.user_id`, caregiver profile의 `user_id`, 각 환자의 `caregiver_id`와
 child `patient_id`를 검사하는 것은 **identity/scope consistency**이며 Backend authorization을 대체하지 않는다.
 Trusted caller가 auth/read 성공을 보장해야 한다. `AgentContext.patient_id`는 환자 필터에 사용하지
-않아 모든 managed patient가 보존된다. 실제 Feed entrypoint의 patient_id 공급은 후속 integration issue이며
-임의 UUID/dummy patient_id를 도입하지 않는다.
+않아 Mapper는 공급된 모든 managed patient를 보존한다. Demo Stage 1의 선정이 Mapper보다 앞서 수행된다.
+Production은 전체를 유지하며 Cold Start에는 명시적 None을 사용하고 dummy patient_id를 만들지 않는다.
 
 Backend의 기본값과 실제 입력을 구분하기 위해 `caregiver_profile`, `patients`가 `model_fields_set`에
 명시되어 있어야 한다. Explicit `caregiver_profile=None`은 성공한 read에서 저장된 profile 없음,
@@ -570,7 +589,7 @@ signal에서 나왔는지, personal_reason의 의미적 정확성까지 증명�
 입력 준비 실패는 고정 FeedProfileMappingError, 설정/실행 경계 exception은 고정 FeedExecutionError다.
 Profile/query/evidence 원문 로그는 추가하지 않는다.
 
-**미연결 경계.** 준비된 Demo 입력부터 V1 Handoff까지 실제 컴포넌트 연결은 검증했다.
+**미연결 경계.** Demo와 Fake Production Source에서 준비된 입력부터 V1 Handoff까지 실제 컴포넌트 연결을 검증했다.
 actual RAG/production registry, Query Guard, top_k=5 server enforcement, 실제 Backend DTO 변환/저장,
 same-PMID dedup, semantic duplicate query tracking, Feed history/novelty는 후속이다.
 현재 recommendations API는 patient_id/단일 query 기반 별도 경로다. 복수 환자 FeedAnswerV1을
@@ -660,8 +679,9 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | `_execution.py` | 동기 호출 대기 timeout, 요청 deadline 전파, 제한된 daemon worker |
 | `prompts.py` | PromptBuilder Protocol, 최소 정책과 DefaultPromptBuilder |
 | `agent_loop_runner.py` | 호출 루프, 한 응답의 여러 Tool 순차 실행, 상한, 최종 결과 |
-| `workflows/feed.py` | Demo Context 준비 → Feed 실행 → 검증된 Backend Handoff의 세 단계 |
+| `workflows/feed.py` | Demo/Production Context 준비 → Feed 실행 → 검증된 Backend Handoff의 세 단계 |
 | `workflows/feed_profile_planning.py` | UserProfile Mapper/입력 DTO, 유일한 Provider 공개 projection/serialization |
+| `workflows/feed_context_prepare.py` | Demo 0~1명 선정 / Production 전체 Loader 연결 및 공개 입력 준비 |
 | `workflows/feed_execution.py` | Feed Prompt/검색 전용 Registry/3·3 설정 검증 및 공용 structured Runner 호출 |
 | `workflows/feed_context*.py` | 별도 Production Context V1.1/Loader/Source 계약 (운영 Source 미연결) |
 | `testing/feed_workflow_fakes.py` | 실제 Demo 컴포넌트에 합성 Backend DTO/LLM/Tool/Handoff를 연결하는 fixture |

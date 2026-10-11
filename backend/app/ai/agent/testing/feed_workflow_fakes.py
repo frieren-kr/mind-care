@@ -10,7 +10,7 @@ from ..schemas import AgentContext, ModelTurn
 from ..tools import contracts as c
 from ..workflows.feed import FeedWorkflow
 from ..workflows.feed_execution import FeedExecutionV1
-from ..workflows.feed_profile_planning import FeedUserProfileSourceMappingV1
+from ..workflows.feed_context_prepare import prepare_demo_feed_input
 from .fake_llm import FakeLLMClient
 from .fake_tools import FIXTURE_NOW, fake_search_evidence
 
@@ -41,7 +41,6 @@ class FakeFeedDependencies:
         self.saved = []
         self.saved_owners = []
         self.receipt = object()
-        self.mapper = FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)
         self.reference_time = reference_time
         if profile is None:
             profile = UserProfileContext(
@@ -54,7 +53,7 @@ class FakeFeedDependencies:
                                 "created_at": reference_time, "updated_at": reference_time},
                     "latest_assessments": [], "current_medications": [], "recent_safety_events": [],
                     "recent_visits": [], "upcoming_visits": [],
-                }) for i in (1, 2)])
+                }) for i in (() if context.patient_id is None else (context.patient_id.int,))])
         self.profile = profile
         self.personalization = None
         self.agent_result = None
@@ -78,7 +77,8 @@ class FakeFeedDependencies:
 
     def load_context(self, context):
         self._enter("context_prepare", context)
-        self.personalization = self.mapper(context, self.profile, reference_time=self.reference_time)
+        self.personalization = prepare_demo_feed_input(context, self.profile,
+            reference_time=self.reference_time, service_timezone=APP_TIMEZONE)
         return self.personalization
 
     def run_feed(self, context, provider_input):
@@ -94,5 +94,5 @@ class FakeFeedDependencies:
         return self.receipt
 
     def workflow(self):
-        return FeedWorkflow(context_loader=self.load_context, feed_execution=self.run_feed,
+        return FeedWorkflow(context_prepare=self.load_context, feed_execution=self.run_feed,
                             backend_handoff=self.handoff)

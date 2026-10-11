@@ -15,6 +15,7 @@ from app.user_schemas import (
     PROFILE_RECENT_VISITS, PROFILE_SAFETY_DAYS,
 )
 from app.ai.agent.schemas import AgentContext
+from app.ai.agent.workflows.feed_context_prepare import prepare_demo_feed_input
 from app.ai.agent.workflows.feed_profile_planning import (
     FeedPatientPlanningProfile, FeedProfileMappingError, FeedProfilePlanningInputV1,
     FeedUserProfileSourceMappingV1, PROFILE_PLANNING_AVAILABLE_SOURCES,
@@ -367,26 +368,81 @@ class UserProfileMappingTests(unittest.TestCase):
         self.assertEqual(result.managed_patient_profiles[0].symptoms, ["FREE_TEXT_PRIVATE_LOCATION"])
 
 
+class DemoContextPrepareTests(unittest.TestCase):
+    def prepare(self, context, profile):
+        return json.loads(prepare_demo_feed_input(context, profile,
+                         reference_time=NOW, service_timezone=APP_TIMEZONE))
+
+    def test_zero_and_one_patient_without_selection_are_valid(self):
+        context = CONTEXT.model_copy(update={"patient_id": None})
+        empty = self.prepare(context, backend_profile([]))
+        self.assertEqual(empty, {"feed_scope": "single_patient_demo", "caregiver": None, "patients": []})
+        patient = backend_patient()
+        patient.patient.symptoms = []
+        patient.patient.interests = []
+        value = self.prepare(context, backend_profile([patient]))
+        self.assertEqual(len(value["patients"]), 1)
+        self.assertEqual(value["patients"][0]["symptoms"], [])
+        self.assertEqual(value["patients"][0]["interests"], [])
+
+    def test_explicit_selection_preserves_one_patient_and_source(self):
+        second = backend_patient(P2)
+        second.patient.symptoms = ["second patient only"]
+        for rows, selected in (([backend_patient()], P1),
+                               ([second, backend_patient()], P2),
+                               ([backend_patient(), second], P2)):
+            profile = backend_profile(rows, caregiver=backend_caregiver())
+            before = profile.model_dump()
+            value = self.prepare(CONTEXT.model_copy(update={"patient_id": selected}), profile)
+            self.assertEqual(value["feed_scope"], "single_patient_demo")
+            self.assertEqual(len(value["patients"]), 1)
+            self.assertEqual(value["patients"][0]["symptoms"],
+                             ["stored symptom"] if selected == P1 else ["second patient only"])
+            self.assertEqual(profile.model_dump(), before)
+
+    def test_ambiguous_missing_and_foreign_selection_fail_closed(self):
+        foreign = backend_patient(P2)
+        foreign.patient.caregiver_id = OTHER
+        cases = ((None, backend_profile([backend_patient(), backend_patient(P2)])),
+                 (OTHER, backend_profile()), (P1, backend_profile([])),
+                 (P2, backend_profile([backend_patient(), foreign])),
+                 (P1, backend_profile([backend_patient(), foreign])),
+                 (P1, backend_profile([backend_patient(), backend_patient()])))
+        for selected, profile in cases:
+            with self.subTest(selected=selected), self.assertRaises(FeedProfileMappingError):
+                self.prepare(CONTEXT.model_copy(update={"patient_id": selected}), profile)
+
+    def test_raw_missing_and_mutated_selected_inputs_are_not_cold_start(self):
+        profile = backend_profile()
+        missing = UserProfileContext(user_id=USER, name="Synthetic", generated_at=NOW)
+        bad = backend_profile()
+        bad.patients[0].recent_visits[0].patient_id = P2
+        future = backend_profile()
+        future.patients[0].latest_assessments[0].assessed_at = TODAY + timedelta(days=1)
+        for value in (None, profile.model_dump(), missing, bad, future):
+            with self.subTest(kind=type(value).__name__), self.assertRaises(FeedProfileMappingError):
+                self.prepare(CONTEXT.model_copy(update={"patient_id": P1}), value)
+
+
 class ProviderProjectionTests(unittest.TestCase):
     def prepare(self, rows=None, *, caregiver=None):
         return FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)(
             CONTEXT, backend_profile(rows, caregiver=caregiver), reference_time=NOW)
 
-    def test_disclosure_allowlist_preserves_multiple_patients_and_internal_input(self):
+    def test_disclosure_allowlist_preserves_selected_patient_and_internal_input(self):
         second = backend_patient(P2)
         second.recent_safety_events[0].has_wandering = True
         second.recent_safety_events[0].has_missing = True
-        source = self.prepare([second, backend_patient()], caregiver=backend_caregiver())
+        with self.assertRaises(FeedProfileMappingError):
+            build_feed_provider_input(self.prepare([second, backend_patient()]))
+        source = self.prepare([second], caregiver=backend_caregiver())
         before = source.model_dump()
         text = build_feed_provider_input(source)
         self.assertEqual(json.loads(text), {
+            "feed_scope": "single_patient_demo",
             "caregiver": {"relationship": "stored relationship", "lifestyle_tags": ["stored caregiver tag"]},
             "patients": [{
                 "patient_ref": "patient_1", "dementia_stage": "legacy-stage",
-                "symptoms": ["stored symptom"], "interests": ["stored interest"],
-                "safety_events": ["fall"], "assessment_types": ["legacy-test"],
-            }, {
-                "patient_ref": "patient_2", "dementia_stage": "legacy-stage",
                 "symptoms": ["stored symptom"], "interests": ["stored interest"],
                 "safety_events": ["fall", "wandering", "missing"], "assessment_types": ["legacy-test"],
             }]})
@@ -401,7 +457,7 @@ class ProviderProjectionTests(unittest.TestCase):
 
     def test_sparse_input_keeps_null_caregiver_and_empty_patients(self):
         self.assertEqual(json.loads(build_feed_provider_input(self.prepare([]))),
-                         {"caregiver": None, "patients": []})
+                         {"feed_scope": "single_patient_demo", "caregiver": None, "patients": []})
 
     def test_projection_reuses_trusted_refs_without_full_dump_or_revalidation(self):
         source = self.prepare()

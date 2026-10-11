@@ -15,7 +15,8 @@ class AgentContext(AgentModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     request_id: str = Field(min_length=1, max_length=128)
     user_id: UUID
-    patient_id: UUID
+    # Explicit None is a user-scoped request, not a missing authenticated user.
+    patient_id: UUID | None
     locale: str = "ko-KR"
 
 

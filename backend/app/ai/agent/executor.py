@@ -2,13 +2,14 @@
 import json
 import logging
 from time import perf_counter
+from uuid import UUID
 
 from httpx import TimeoutException
 from openai import APITimeoutError
 from pydantic import BaseModel, ValidationError
 
 from ._execution import RequestTimeout, bounded_handler, positive_seconds
-from .registry import ToolRegistry
+from .registry import ToolName, ToolRegistry
 from .schemas import AgentContext, AgentError, ToolCall, ToolOutcome, ToolTrace
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ ERROR_MESSAGES = {
     "invalid_output": "Tool 출력이 계약과 일치하지 않습니다.",
     "serialization_error": "Tool 결과를 JSON으로 전달할 수 없습니다.",
     "tool_timeout": "Tool 실행 대기 시간이 초과되었습니다. 자동으로 재실행하지 않습니다.",
-    "patient_context_mismatch": "Tool 결과가 실행 환자 Context와 일치하지 않습니다.",
+    "patient_context_mismatch": "Tool 환자 Scope가 실행 Context와 일치하지 않습니다.",
 }
 
 
@@ -37,6 +38,9 @@ class ToolExecutor:
         data = None
         if spec is None:
             error_code = "unknown_tool"
+        elif (spec.contract.name in (ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS)
+              and not isinstance(context.patient_id, UUID)):
+            error_code = "patient_context_mismatch"
         else:
             try:
                 args = json.loads(call.arguments) if isinstance(call.arguments, str) else call.arguments

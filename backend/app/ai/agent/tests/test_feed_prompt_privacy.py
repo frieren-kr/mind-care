@@ -3,7 +3,8 @@ import json
 import unittest
 from uuid import UUID
 
-from ..prompts import DefaultPromptBuilder
+from ..prompts import DefaultPromptBuilder, build_structured_output_policy
+from ..outputs import ChatAnswerV1, FeedAnswerV1
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentContext, ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
@@ -24,7 +25,7 @@ CONTEXT = AgentContext(request_id="PRIVATE_REQUEST_ID", user_id=UUID(int=10), pa
 class FeedPromptPrivacyTests(unittest.TestCase):
     def test_provider_messages_across_tool_rounds_exclude_server_identity(self):
         payload = FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)(
-            CONTEXT, backend_profile([backend_patient(), backend_patient(P2)],
+            CONTEXT, backend_profile([backend_patient()],
                                      caregiver=backend_caregiver()), reference_time=NOW)
         for structured in (False, True):
             with self.subTest(structured=structured):
@@ -80,6 +81,17 @@ class FeedPromptPrivacyTests(unittest.TestCase):
     def test_chat_default_context_serialization_is_unchanged(self):
         messages = DefaultPromptBuilder().build_initial_messages("legacy input", CONTEXT)
         self.assertEqual(json.loads(messages[1].content)["trusted_agent_context"], CONTEXT.model_dump(mode="json"))
+
+    def test_cold_start_policy_is_feed_only_and_does_not_force_empty_items(self):
+        feed_policy = build_structured_output_policy(FeedAnswerV1).content
+        chat_policy = build_structured_output_policy(ChatAnswerV1).content
+        self.assertIn("Cold Start", feed_policy)
+        self.assertIn("개인화 정보가 비어 있다는 이유만으로 items=[]를 강제하지 않는다", feed_policy)
+        self.assertIn("모든 item은 유효한 검색 Evidence를 인용한다", feed_policy)
+        self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", feed_policy)
+        self.assertNotIn("personal_reason", chat_policy)
+        self.assertNotIn("Cold Start", chat_policy)
+        self.assertIn("citation_refs", chat_policy)
 
     def test_feed_prompt_explains_iterative_research_and_stopping_policy(self):
         policy = FeedPromptBuilder().build_system_prompt(CONTEXT)
