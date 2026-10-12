@@ -192,6 +192,10 @@ class PaperListItem(BaseModel):
     published_at: Optional[date] = Field(default=None, description="발행일 (papers.published_date)")
     journal: Optional[str] = None
     evidence_level: Optional[str] = Field(default=None, description="근거 등급. 요약 전이면 null")
+    evidence_grade: Optional[str] = Field(
+        default=None,
+        description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
+    )
     summary_finding: Optional[str] = Field(default=None, description="요약 첫 칸. 요약 전이면 null")
 
 
@@ -216,6 +220,7 @@ class PaperListResponse(BaseModel):
                         "published_at": "2026-09-20",
                         "journal": "Alzheimer's & Dementia",
                         "evidence_level": "2",
+                        "evidence_grade": "B",
                         "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
                     }
                 ],
@@ -239,6 +244,10 @@ class PaperDetailResponse(BaseModel):
     # --- 아래는 paper_analysis. 요약이 아직 없으면 모두 null ---
     study_type: Optional[str] = None
     evidence_level: Optional[str] = None
+    evidence_grade: Optional[str] = Field(
+        default=None,
+        description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
+    )
     summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
     summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
@@ -257,6 +266,7 @@ class PaperDetailResponse(BaseModel):
                 "mesh_terms": ["Dementia", "Caregivers"],
                 "study_type": "rct",
                 "evidence_level": "2",
+                "evidence_grade": "B",
                 "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
                 "summary_comparison": "기존 권고(수면 위생 교육)와 방향이 같다.",
                 "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
@@ -294,6 +304,10 @@ class RecommendationItem(BaseModel):
     # --- 아래는 paper_analysis. 요약이 아직 없으면 모두 null ---
     study_type: Optional[str] = None
     evidence_level: Optional[str] = None
+    evidence_grade: Optional[str] = Field(
+        default=None,
+        description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
+    )
     summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
     summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
@@ -333,6 +347,7 @@ class RecommendationResponse(BaseModel):
                         "category": None,
                         "study_type": "rct",
                         "evidence_level": "2",
+                        "evidence_grade": "B",
                         "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
                         "summary_comparison": "기존 권고(수면 위생 교육)와 방향이 같다.",
                         "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
