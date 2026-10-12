@@ -275,11 +275,12 @@ interests, lifestyle_tags, assessment_type, drug_name, department, log_type, moo
 Query validator는 이번 입력 계약에 포함하지 않는다.
 
 미확정 정책: 삭제 환자 CareLog retention/eligibility, 삭제 환자 내용이 남은 summary의 무효화/재생성,
-향후 degraded Context 정책 및 patient selection/limit, child collection limit,
-최신 summary row 선택, token/input-size budget, free-text privacy/redaction, Production APM privacy,
+향후 degraded Context 정책, 날짜 기반 기간의 양끝 포함·진료 배분·최신 summary 동률 선정,
+token/input-size budget, free-text privacy/redaction, Production APM privacy,
 005 structured visit detail의 future Context 포함 범위와 Feed 실행/Prompt의 assessment metadata 활용.
 Backend canonical assessment metadata, 현재 Production timezone binding 및 medication ordering은
-아래 V1.1에서 확정한다. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
+아래 V1.1에서 확정한다. 관리 환자 20명 상한·기록별 E/I 기간/상한·CareLog 정렬·요약 조건은
+아래 정식 Feed Read Contract/Policy에 구체화한다. 실제 DB 조회/authorization 및 Workflow 연결은 후속이다.
 
 독립 계약 검증 (`backend/`):
 
@@ -386,7 +387,7 @@ Patient의 종속 collection/count는 별도 Feed Read 결과가 제공해야 �
 | Safety Event | `event_date DESC` (환자/날짜별 UNIQUE) |
 | Medication | `is_taking DESC → start_date DESC NULLS LAST → created_at DESC → id` |
 | Medical Visit | `visit_date DESC → created_at DESC → id` |
-| CareLog | `logged_at DESC` + future Backend Feed Read Contract의 deterministic tie-break |
+| CareLog | `logged_at DESC → id` (정식 Backend Feed Read 구현 계약) |
 
 `created_at` / raw DB `id`는 server-side tie-break에만 쓰며 final Context로 노출하지 않는다.
 Medication ordering은 이 기준으로 확정하지만 **ordering != eligibility**다. Current-only selection을
@@ -432,8 +433,8 @@ User 없음 → empty patients, CareLog 실패 → 0/0, Summary 미구현 → No
 `total_count=len(items)`, 일부 patient 실패 → 성공한 patient만 반환하는 변환을 금지한다.
 Partial read를 정상 Snapshot으로 승격하지 않고 fail-fast한다.
 
-Backend 구현 형태는 담당자가 결정한다. Success는 explicit Backend Feed Snapshot DTO,
-Failure는 explicit exception 또는 unambiguous failure result를 권장한다. 하나의
+정식 인터페이스는 아래 `get_feed_context_snapshot(...) -> FeedReadSnapshot`으로 확정하고
+실제 함수/DTO는 Backend 담당자가 구현한다. Failure는 `FeedUserNotFound`/`FeedReadError`로 구분한다. 하나의
 `get_feed_context_snapshot(...) -> None`이 user 없음/권한 실패/정상 empty/query failure를 동시에
 표현하는 모호한 계약을 피한다. Backend DTO를 AI Source DTO와 동일하게 만들 필요는 없다.
 이 문서에서 새 Backend DTO/function을 구현하지 않는다.
@@ -510,6 +511,172 @@ algorithm, token/input budget, visit detail 확장, free-text privacy/redaction,
 Production APM privacy 및 Source wiring은 후속이다. Timezone binding/reference_date 전달,
 Medication stable ordering, aggregate와 Source 구분, empty와 read failure 의미는 V1.1에서 확정했다.
 
+### Development Feed Context Source — Stage 1 부분 DB 연동
+
+`workflows/feed_context_backend_source.py`의 `DevelopmentFeedContextSource`는
+`user_functions.get_user_profile_context(user_id)`를 주입받아 기존 Source DTO로 명시적으로 투영한다.
+**최종 Production Source가 아니다.** 위 Production의 complete-read/eligible-count/snapshot
+정책을 완화하지 않으며, 형식 검증 성공이 데이터 완전성이나 사용자 인증을 보장하지 않는다.
+
+| 데이터 | 이번 Adapter의 처리 |
+|---|---|
+| 간병인 자가점검 | 실제 `caregiver_profile` 투영, 조회 결과가 실제 null일 때만 None |
+| 전체 관리 환자 | 실제 `patients[].patient` 0~20명 전원 유지; 21명 이상 실패, `AgentContext.patient_id`로 선정하지 않음 |
+| 평가·복약·안전 | 실제 `latest_assessments` / `current_medications` / `recent_safety_events` 선택 목록 |
+| 진료 | 실제 `recent_visits` + `upcoming_visits`, ID 중복 거부 후 date DESC / created_at DESC / id ASC |
+| CareLog | **미조회 개발용 자리표시자** `items=[]`, `total_count=0`; 실제 기록 부재가 아님 |
+| 장기 개인화 요약 | **미조회 개발용 자리표시자** `None`; 실제 요약 부재가 아님 |
+| 기록별 total_count | 반환된 선택 목록 길이의 개발용 임시 건수; 실제 eligible/전체 이력 건수가 아님 |
+
+전체 모델 dump는 Backend DTO의 중첩 형식 재검증에만 사용하고 Source 객체에는 필드별로 투영한다.
+표시 이름·dosage/frequency·005 진료 상세를 추가하지 않고 `visit_content` 원문만 허용 필드로 보존한다.
+평가 점수는 `Decimal(str(score))`로 변환하며 원문을 임상적으로 보정하거나 추론하지 않는다.
+Source에서 없어지는 하위 기록 ID의 중복은 투영 전에 검사한다. 평가·복약·진료 배열은 기존
+Source 정렬 기준으로 정렬하지만 최신 평가/현재 복약/선택된 진료를 전체 이력으로 승격하지 않는다.
+
+누락된 사용자·실제 조회 예외·불명시된 선택 목록·잘못된 DTO·중복/소속 오류는 실패한다.
+기존 Loader의 소속/환자 중복 invariant 함수를 재사용하고, patient_ref 생성·기간·최종 Context
+검증·LLM 공개 최소화는 기존 Loader/Prepare에 남긴다. Adapter 오류는 Loader에서
+`source_load_failed`로 전달되며 실패한 조회를 빈 Context로 대체하지 않는다.
+소속 일치 검사는 인증이 아니다. 호출부는 인증된 user_id를 전달해야 한다.
+Backend 자체 clock/순차 조회를 Feed 기준 시각에 맞는 일관된 Snapshot이라고 주장하지 않는다.
+
+개발용 DI 예시 (실제 API에 자동 연결하지 않음):
+
+```python
+from datetime import datetime, timezone
+from app.db import user_functions
+from app.user_schemas import APP_TIMEZONE
+from app.ai.agent.workflows.feed_context_backend_source import DevelopmentFeedContextSource
+from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader
+from app.ai.agent.workflows.feed_context_prepare import prepare_production_feed_input
+
+development_source = DevelopmentFeedContextSource(
+    read_profile=user_functions.get_user_profile_context,
+)
+development_loader = DefaultFeedContextLoader(
+    source=development_source,
+    clock=lambda: datetime.now(timezone.utc),
+    service_timezone=APP_TIMEZONE,
+)
+
+def development_feed_context_prepare(context):
+    return prepare_production_feed_input(context, development_loader)
+```
+
+결과는 `feed_scope="caregiver_all"`이며 0~20명의 환자를 모두 포함한다. Adapter 모듈의
+`MAX_MANAGED_PATIENTS = 20`은 방어적 상한이며 초과 시 `DevelopmentFeedContextSourceError`로
+실패한다. 일부 환자만 잘라 반환하지 않고 기존 Loader/Workflow 오류 체계를 유지한다.
+정식 Backend도 20명 초과 시 오류를 반환해야 하며 20명만 반환하는 LIMIT으로 숨기면 안 된다.
+`/recommendations`의
+단일 환자 Demo API 계약과 기존 Demo Mapper는 변경하지 않는다. AgentLoopRunner/ToolExecutor/
+ToolRegistry에 환자 조회 Tool을 추가하지 않는다. 자유 서술의 PII 비식별화는 구현하지 않았다.
+
+후속 TODO: 아래 확정된 조회 인터페이스가 Backend에 실제 구현되고 반환 DTO 필드가 확인되면
+`read_profile` 및 내부 투영 교체,
+CareLog 실제 조회·total_count와 월간 요약 연결, 기록별 eligibility/정확한 건수·선택 정책 적용,
+일관된 DB Snapshot 보장, Loader 기준 시각과 정렬/선택 정책 일치 확인, 개발용 자리표시자와
+TODO 제거, 정식 Production Source 통합 테스트, 개인정보 최소화·자유 서술 PII 정책 보강.
+조회 시그니처는 아래 계약을 따르되 아직 없는 함수/DTO를 import하거나 대체 구현하지 않는다.
+
+오프라인 검증 (`backend/`, DB/Provider 사용 없음):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_feed_context_backend_source app.ai.agent.tests.test_feed_context_loader app.ai.agent.tests.test_feed_profile_planning app.ai.agent.tests.test_feed_workflow app.ai.agent.tests.test_feed_execution
+```
+
+#### 정식 Feed Read Contract/Policy — 후속 Backend 구현 계약
+
+Backend/DB 담당자가 다음 조회 함수를 `app/db/feed_read.py`에, 반환 DTO를
+`app/feed_schemas.py`에 구현한다. **현재 Agent에는 함수 호출·import·FeedReadSnapshot 대체
+클래스가 없다.** 위 개발용 DI는 계속 실제 `get_user_profile_context(user_id)`를 사용한다.
+이 절은 기존 V1.1 문서에서 미확정으로 남긴 기록별 조회 범위·포함 상한·CareLog tie-break를
+구체화한다. 기존 DTO/Protocol/Loader의 런타임 구조와 검증 정책은 그대로 유지한다.
+
+```text
+get_feed_context_snapshot(
+    *, user_id, reference_time, reference_date,
+    recent_period_start, recent_period_end,
+) -> FeedReadSnapshot
+```
+
+| 계층 | 책임 |
+|---|---|
+| Backend Feed Read | DB/SQL, 사용자 존재·전체 관리 환자 조회, 기록 eligibility/선정/LIMIT/count, 기준 시각과 안정 정렬, 조회/빈 결과 구분 |
+| Agent Adapter | 조회 함수 호출, 명시적 필드 투영, Source Snapshot 조립, 필수 데이터·형식·소속/중복/참조 검증, 실패 전파 |
+| DefaultFeedContextLoader | Source 재검증, UUID → patient_ref, Coverage, V1 Context 조립·최종 검증 |
+| Provider Input Mapper | 기존 allowlist 최소화, UUID·불필요한 원문 제외, caregiver_all 유지 |
+
+Backend는 **읽기 전용 단일 REPEATABLE READ 트랜잭션**에서 조회와 count가 동일한 DB Snapshot을
+보도록 보장한다. 관리 환자는 0명도 정상이며 1~20명은 전원 반환, 21명 이상은 실패한다.
+Adapter는 SQL을 실행하거나 기간/LIMIT으로 재선정하지 않고, 잘린 목록을 복원하거나 가상
+레코드를 추가하지 않는다. Snapshot 일관성은 과거 mutable profile의 DB AS-OF 복원을 뜻하지 않는다.
+
+**Eligibility(E)와 inclusion(I).** E는 기간·상태·user/patient Scope 조건을 모두 만족하는 조회 대상,
+I는 E에 기록별 포함 상한과 선정 정책을 적용하여 실제 반환한 집합이다.
+`total_count = |E|`는 **상한 적용 전 건수**이며 `len(items) = |I|`다.
+기존 Loader가 `included_count=len(items)`, `is_truncated=(total_count > included_count)`를 계산한다.
+평가 37건 중 20건 반환이면 `total_count=37`이며 정상적인 자식 기록 truncation이다.
+자식 기록은 상한 초과 자체로 실패하지 않지만, 관리 환자 목록은 전체 포함이 필수다.
+개발용 `total_count=len(items)`는 이미 선택된 현재 상태 목록의 임시 값이고 정식 E의 count가 아니다.
+현재 Adapter에서 별도 count 조회를 추가하거나 이 값으로 실제 이력 건수를 추측하지 않는다.
+
+| 기록 | 정식 Backend의 조회 대상 E | 독립적인 포함 상한 |
+|---|---|---|
+| 임상 평가 | reference_date 기준 최근 365일 | 환자당 20건 |
+| 안전 기록 | 최근 180일 중 낙상·배회·실종 플래그가 하나 이상 참인 날 | 환자당 50건 |
+| 복약 기록 | 현재 복용 중이거나 최근 90일 이내 중단된 약 | 환자당 30건 |
+| 병원 방문 | 과거 365일 완료 진료 및 향후 90일 예약 | 환자당 20건 |
+| CareLog | 전달받은 정확한 최근 30×24시간 구간 | 간병인당 200건 |
+| 월간 개인화 요약 | 기준 날짜 전에 종료되고 기준 시각까지 생성된 요약 중 최신 1건 | 1건 |
+
+기준은 전달받은 `reference_time`과 서비스 시간대의 `reference_date`이며 Adapter에서 새 now/today를
+호출하지 않는다. **이 기간·상한을 현재 개발용 aggregate에 억지로 적용하지 않는다.** 날짜 기반
+기간의 정확한 양끝 포함 여부, 요약 최신 1건의 세부 선정/동률 처리는 Backend 구현 확인 항목이다.
+
+**선정과 최종 정렬은 별개다.** Backend의 안정 정렬 기준:
+
+- 평가: `assessed_at DESC, created_at DESC, id`
+- 안전: `event_date DESC` (환자/날짜당 한 행)
+- 복약: `is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id`
+- 진료: `visit_date DESC, created_at DESC, id`
+- CareLog: `logged_at DESC, id`
+
+완료 진료와 예약이 모두 있으면 단순 날짜 정렬/LIMIT 때문에 한쪽이 전부 빠지지 않도록 Backend가
+선정 정책을 결정해야 한다. 구체적인 배분은 미확정이다. Agent는 선정된 순서의 의미/실제 값을
+바꾸지 않고 투영한다. 기존 개발용 최소 정렬은 유지하되 최종 Backend 선정과 동일하다고 주장하지
+않는다. 정렬용 id/created_at을 Agent Source DTO에 새로 추가하지 않는다.
+
+**CareLog.** `[recent_period_start, recent_period_end)` 반열린 구간을 정확히 사용한다.
+`recent_period_end == reference_time`, 길이는 정확히 30×24시간이며 최대 200건을 포함한다.
+`user_id`는 요청 간병인과 일치하고, non-null `patient_id`는 현재 관리 환자 범위에 속해야 한다.
+NULL도 포함 가능하며 본인 기록/특정 환자 기록이라고 추정하지 않는다. Loader는 NULL을
+`patient_ref=None`으로 보존한다. 정식 total_count는 이 조회 대상의 실제 건수다.
+현재 빈 collection/0건은 **미조회 개발용 자리표시자**이며 실제 CareLog 0건을 뜻하지 않는다.
+
+**월간 요약.** 요청 간병인의 유효한 기간을 가진 요약 중 `period_end < reference_date`,
+`generated_at <= reference_time`인 최신 1건을 Backend가 선정한다. 실제로 대상이 없을 때만 None이다.
+기존 Context 날짜/기간 validator는 그대로 유지한다. 현재 Development의 None은 미조회 자리표시자다.
+
+**필드 정책.** 실제 Backend FeedRead* DTO의 클래스/추가 필드가 달라도 Source 허용 필드만 투영한다.
+`visit_reason`, `diagnosis`, `treatment_content`, `test_summary`, `medication_change`, `doctor_note`,
+`follow_up_plan`, `dosage`, `frequency`는 제외한다. `visit_content`는 005 이후 기타 자유 메모이며
+진단/처치로 재해석하거나 005 이전 원문을 변환·재분류하지 않는다. DB NULL 배열을 Backend가
+유효한 []로 정규화하는 것은 허용하지만, 필수 조회 필드 누락·조회 실패를 []로 보정하지 않는다.
+추가 신호 활용 및 자유 서술 PII 처리는 별도 작업이다.
+
+**오류 계약.** Backend는 없는 사용자에 `FeedUserNotFound`, 조회·건수·검증 실패에 `FeedReadError`를
+발생시킨다. Adapter는 빈 Snapshot으로 바꾸지 않고 기존 Loader의 `source_load_failed` 래핑을 유지한다.
+존재하는 사용자의 환자 0명, 미등록 caregiver profile, 대상 기록 0건은 모든 필수 조회 성공 후의 정상
+부재다. 없는 사용자·Backend 실패·누락된 필수 데이터는 실패다. 새 외부 오류 체계는 만들지 않는다.
+
+**Backend 구현 후 테스트 TODO:** 확정 인자 전부의 정확한 전달, 실제 FeedReadSnapshot → Source
+필드 투영, pre-cap eligible count와 상한/Coverage, CareLog 30×24시간 경계·NULL ref, 요약 기준일/
+생성 시각/선정, 단일 DB Snapshot 및 실패 처리, 완료 진료·예약 배분, 정상 DB 데이터 통합 검증.
+현재는 가상 Snapshot 함수/DTO로 성공을 가장하는 테스트를 만들지 않는다. Backend 구현 확인 후
+자리표시자·개발용 count와 TODO를 제거하고 Production Source로 전환하되 기존 3-Stage/Loader/
+Mapper 역할을 유지한다. 인증·개인정보 정책 및 정식 API 연결도 후속이다.
+
 ### Patient Profile Alignment / Feed Source Integration
 
 기존 V1 Pydantic field/type/validator/`schema_version="1"`은 그대로 유지한다.
@@ -566,8 +733,8 @@ Inclusion은 LIMIT뿐 아니라 latest-N/latest-per-type/token budget/representa
 | history가 E이고 latest-per-type을 Inclusion I로 선언 | 10 | 3 | true |
 
 이름 자체가 어느 policy인지 결정하지 않는다. Source/Loader/Feed 실행은 동일한 trusted static
-collection policy를 공유해야 한다. Assessment history, safety 전체/positive subset, medication history,
-visit history의 production E/I 범위는 **unresolved**이며 code default를 추가하지 않는다.
+collection policy를 공유해야 한다. 기록별 production E/I 범위·상한은 위 정식 Feed Read
+Contract/Policy로 확정하며, Backend 구현 전 현재 aggregate나 Mapper에 기간/LIMIT default를 추가하지 않는다.
 Feed 실행은 count 3/3에서 “현재 policy의 eligible 3건이 모두 포함됨”만 판단할 수 있다.
 DB 전체 history가 3건뿐이라고 해석하거나 aggregate에 없는 history 때문에 truncated를 추정하지
 않는다. Returned length → total fallback은 없다. Actual eligible count를 모르면 정식 V1 Coverage를
@@ -698,7 +865,8 @@ server identity가 제외되고 허용된 최소 research projection만 전달�
 Allowlist projection은 field minimization뿐이다. Symptoms/interests/note/visit_content/CareLog/Summary
 원문 속 PII sanitizer는 **미구현**이며 완전한 PII-safe 보장을 주장하지 않는다.
 
-Deleted-patient CareLog eligibility/NULL 처리와 deleted-derived Summary retention/invalidation은
+CareLog NULL 보존·non-null 현재 관리 환자 범위 검사는 위 계약을 따른다.
+Deleted-patient CareLog retention/eligibility와 deleted-derived Summary retention/invalidation은
 **Production 연결 전 반드시 확정할 unresolved item**이다. Complete Feed Read, count-aware history,
 single logical DB snapshot implementation, free-text privacy, Production execution/guardrail/source wiring도 후속이다.
 정식 성공은 Complete Feed Read → real Coverage → consistent snapshot → CareLog/Summary → full V1 →
