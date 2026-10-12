@@ -97,6 +97,41 @@ ANIMAL_RE = re.compile(
 HUMAN_RE = re.compile(r"\b(patients?|participants?|people|persons?|caregivers?|carers?|residents?|older adults|nursing home)\b", re.I)
 
 
+# ---- 치매 관련 논문인지 (검색 결과에서 뇌졸중·파킨슨 등 다른 질환 논문을 빼기 위함) ----
+# 수집 검색식에 "Cognitive Dysfunction"[MeSH]가 있어서 뇌졸중 후 인지장애 같은 논문도 섞여 들어온다.
+# 골드셋 901편으로 확인: 이 규칙으로 32편이 빠지고, 그중 관련(1·2점) 논문은 0편이었다.
+DEMENTIA_MESH_RE = re.compile(r"\b(Dementia|Alzheimer Disease|Lewy Body Disease|Frontotemporal)", re.I)
+DEMENTIA_RE = re.compile(
+    r"\b(dementias?|alzheimer|neurocognitive disorders?|lewy bod(?:y|ies)|frontotemporal|"
+    r"mild cognitive impairment|MCI|BPSD|memory clinic)", re.I
+)
+COGNITIVE_RE = re.compile(r"\b(cognitive impairment|cognitively impaired|cognitive decline|cognitive dysfunction)\b", re.I)
+OTHER_DISEASE_RE = re.compile(
+    r"\b(stroke|parkinson|huntington|multiple sclerosis|HIV|cancer|chemotherap|schizophreni|bipolar|"
+    r"traumatic brain|TBI|epilep|diabet|kidney|renal|hemodialysis|haemodialysis|cardiac|heart failure|"
+    r"delirium|surgery|anesthe|COVID)", re.I
+)
+
+
+def is_dementia_related(mesh_terms: list[str] | None, title: str = "", abstract: str | None = None) -> bool:
+    """치매·MCI 관련 논문이면 True.
+
+    ① MeSH에 Dementia / Alzheimer Disease 등이 있으면 True
+    ② 제목이 다른 질환(뇌졸중·파킨슨·헌팅턴 등)인데 제목에 치매 단어가 없으면 False
+    ③ 제목+초록에 치매 단어(dementia, Alzheimer, MCI 등)가 있으면 True
+    ④ "cognitive impairment"만 있으면 제목에 다른 질환이 없을 때만 True
+    """
+    if DEMENTIA_MESH_RE.search(" ".join(mesh_terms or [])):
+        return True
+    title = title or ""
+    if OTHER_DISEASE_RE.search(title) and not DEMENTIA_RE.search(title):
+        return False
+    text = f"{title} {abstract or ''}"
+    if DEMENTIA_RE.search(text):
+        return True
+    return bool(COGNITIVE_RE.search(text))
+
+
 class Evidence(NamedTuple):
     study_type: str               # 위 LEVEL의 키 중 하나
     evidence_level: Optional[int] # 1(강함) ~ 6(약함), 판단 불가면 None
