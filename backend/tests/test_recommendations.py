@@ -13,16 +13,24 @@
 - 논문 임베딩 (`paper_embeddings`) + `sentence-transformers` 설치 — 검색 방식 경로
 뒤 두 가지는 팀 덤프를 복원해야 생긴다 (루트 README의 "팀원 데이터 맞추기").
 """
+import json
 import unittest
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from app.ai.agent.outputs import StructuredAgentResult
-from app.api.recommendations import backend_handoff, get_feed_execution
+from app.ai.agent.schemas import AgentContext
+from app.api.recommendations import (
+    GENERAL_QUERY,
+    _feed_context_loader,
+    backend_handoff,
+    context_prepare,
+    get_feed_execution,
+)
 from app.db.connection import get_connection
 from main import app
 
@@ -30,6 +38,7 @@ from main import app
 SEED_EMAIL_ONE_PATIENT = "dev-seed-1@example.com"   # 환자 1명
 SEED_EMAIL_TWO_PATIENTS = "dev-seed-4@example.com"  # 환자 2명
 SEED_EMAIL_LIKE = "dev-seed-%@example.com"
+TEST_EMAIL_PREFIX = "test-reco-"  # 이 파일이 만들고 지우는 임시 사용자 (환자 0명)
 
 NO_USER = "00000000-0000-0000-0000-000000000000"  # 어느 DB에도 없는 sentinel
 
@@ -204,14 +213,36 @@ class EndpointTests(unittest.TestCase):
             f"/recommendations/{user_id or self.caregiver_one}", params=params
         )
 
-    def assert_search(self, response):
+    def assert_search(self, response, queries=1):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["mode"], "search")
-        self.assertTrue(body["query"])
+        self.assertEqual(len(body["queries"]), queries)
+        self.assertTrue(all(body["queries"]))
         self.assertEqual(len(body["items"]), SEARCH_ITEMS)
         self.assertIsNotNone(body["items"][0]["relevance_score"])
         self.assertIsNone(body["items"][0]["headline"])
+        return body
+
+    def patient_ids(self, user_id) -> list[str]:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM patient_profiles WHERE caregiver_id = %s"
+                            " ORDER BY created_at, id", (user_id,))
+                return [str(row[0]) for row in cur.fetchall()]
+
+    def create_user_without_patients(self) -> UUID:
+        def cleanup():
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM users WHERE email LIKE %s", (TEST_EMAIL_PREFIX + "%",))
+
+        self.addCleanup(cleanup)
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO users (name, email) VALUES (%s, %s) RETURNING id",
+                            ("테스트 간병인", f"{TEST_EMAIL_PREFIX}{uuid4().hex[:12]}@example.com"))
+                return cur.fetchone()[0]
 
     def test_no_feed_execution_uses_search(self):
         require_search(self)
@@ -231,9 +262,13 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["mode"], "ai")
-        self.assertIsNone(body["query"])
+        self.assertIsNone(body["queries"])
+        self.assertIsNone(body["patient_id"])
         self.assertEqual(len(body["items"]), 3)
-        self.assertTrue(received[0])  # 실제 프로필이 context_prepare를 통과했다
+        # 실 DB 스냅샷이 정식 Stage 1(context_prepare)을 통과했다.
+        provider_input = json.loads(received[0])
+        self.assertEqual(provider_input["feed_scope"], "caregiver_all")
+        self.assertEqual(len(provider_input["patients"]), 1)
         for item, pmid in zip(body["items"], DB_PMIDS):
             self.assertTrue(item["headline"])
             self.assertTrue(item["personal_reason"])
@@ -264,13 +299,118 @@ class EndpointTests(unittest.TestCase):
         self.use(lambda context, _: make_result(context.request_id, [None, MISSING_PMID]))
         self.assert_search(self.get())
 
-    def test_error_statuses(self):
-        # 환자가 2명이면 patient_id를 지정하지 않는 요청은 400이다.
+    def test_ai_uses_all_patients_even_with_patient_id(self):
+        """AI 방식은 patient_id를 줘도 관리 환자 전체가 기준이다 (patient_id는 응답에만 적힌다)."""
+        require_team_papers(self)
         caregiver_two = seed_user_id(self, SEED_EMAIL_TWO_PATIENTS, expected_patients=2)
-        self.assertEqual(self.get(caregiver_two).status_code, 400)
+        received = []
+
+        def fake(context, provider_input):
+            received.append((context, json.loads(provider_input)))
+            return make_result(context.request_id, DB_PMIDS)
+
+        self.use(fake)
+        first = self.patient_ids(caregiver_two)[0]
+        for params, expected in (({}, None), ({"patient_id": first}, first)):
+            with self.subTest(params):
+                body = self.get(caregiver_two, **params).json()
+                self.assertEqual(body["mode"], "ai")
+                self.assertEqual(body["patient_id"], expected)
+                context, provider_input = received[-1]
+                self.assertIsNone(context.patient_id)
+                self.assertEqual(len(provider_input["patients"]), 2)
+
+    def test_search_covers_all_patients_or_one(self):
+        """검색 방식: 환자 2명 + patient_id 생략은 200(검색어 2개), 주면 그 환자 검색어 하나."""
+        require_search(self)
+        caregiver_two = seed_user_id(self, SEED_EMAIL_TWO_PATIENTS, expected_patients=2)
+        both = self.assert_search(self.get(caregiver_two), queries=2)
+        self.assertIsNone(both["patient_id"])
+
+        second = self.patient_ids(caregiver_two)[1]
+        one = self.assert_search(self.get(caregiver_two, patient_id=second), queries=1)
+        self.assertEqual(one["patient_id"], second)
+        self.assertEqual(one["queries"], [both["queries"][1]])
+
+    def test_no_patients_search_uses_general_query(self):
+        """환자 0명도 404가 아니라 응답한다 (검색 방식은 일반 검색어 하나)."""
+        require_search(self)
+        body = self.assert_search(self.get(self.create_user_without_patients()))
+        self.assertEqual(body["queries"], [GENERAL_QUERY])
+        self.assertIsNone(body["patient_id"])
+
+    def test_no_patients_ai_is_cold_start(self):
+        """환자 0명: AI 방식은 빈 환자 목록(cold start)으로 끝까지 돈다."""
+        require_team_papers(self)
+        received = []
+
+        def fake(context, provider_input):
+            received.append(json.loads(provider_input))
+            return make_result(context.request_id, DB_PMIDS)
+
+        self.use(fake)
+        body = self.get(self.create_user_without_patients()).json()
+        self.assertEqual(body["mode"], "ai")
+        self.assertEqual(received[0]["patients"], [])
+        self.assertIsNone(received[0]["caregiver"])
+
+    def test_error_statuses(self):
+        caregiver_two = seed_user_id(self, SEED_EMAIL_TWO_PATIENTS, expected_patients=2)
         self.assertEqual(self.get(NO_USER).status_code, 404)
         self.assertEqual(self.get(patient_id=NO_USER).status_code, 404)
+        # 다른 간병인의 환자도 404.
+        self.assertEqual(
+            self.get(patient_id=self.patient_ids(caregiver_two)[0]).status_code, 404)
         self.assertEqual(self.get(k=6).status_code, 422)
+
+
+class ProductionStage1Tests(unittest.TestCase):
+    """정식 Stage 1(get_feed_context_snapshot → Source → Loader → Prepare)을 실 DB로 돌린다."""
+
+    def test_sample_caregivers_pass_without_identifiers(self):
+        state = db_state()
+        if state.error:
+            self.skipTest(state.error)
+        if not state.seed_users:
+            self.skipTest(SEED_HINT)
+
+        for email, (user_id, patient_count) in sorted(state.seed_users.items()):
+            with self.subTest(email), get_connection() as conn, conn.cursor() as cur:
+                cur.execute("SELECT name, phone_number FROM users WHERE id = %s", (user_id,))
+                identifiers = [email, str(user_id), *cur.fetchone()]
+                cur.execute("SELECT id, name FROM patient_profiles WHERE caregiver_id = %s",
+                            (user_id,))
+                patients = cur.fetchall()
+                patient_ids = [row[0] for row in patients]
+                identifiers += [str(v) for row in patients for v in row]
+                cur.execute("SELECT DISTINCT hospital_name FROM medical_visits"
+                            " WHERE patient_id = ANY(%s)", (patient_ids,))
+                identifiers += [row[0] for row in cur.fetchall()]
+                cur.execute("SELECT count(*) FROM care_logs WHERE user_id = %s"
+                            " AND logged_at >= now() - interval '29 days'", (user_id,))
+                has_logs = cur.fetchone()[0] > 0
+                cur.execute("SELECT count(*) FROM profile_summaries WHERE user_id = %s"
+                            " AND period_end < current_date - 1", (user_id,))
+                has_summary = cur.fetchone()[0] > 0
+
+                context = AgentContext(request_id="stage1", user_id=user_id, patient_id=None)
+                full = _feed_context_loader(context, recent_days=30)
+                provider_json = context_prepare(context)
+
+                # 관리 환자 전원이 빠짐없이 들어간다.
+                coverage = full.managed_patient_profiles.coverage
+                self.assertEqual((coverage.total_count, coverage.included_count),
+                                 (patient_count, patient_count))
+                self.assertEqual(len(json.loads(provider_json)["patients"]), patient_count)
+                # 돌봄 기록·월간 요약 (python -m scripts.seed_dev_care_logs 를 돌린 DB라면 들어 있다).
+                if has_logs:
+                    self.assertGreater(full.recent_care_context.care_logs.coverage.total_count, 0)
+                if has_summary:
+                    self.assertIsNotNone(full.long_term_summary)
+                # 이름·이메일·전화번호·병원명·raw id가 전체 Context에도, LLM 입력에도 없다.
+                for text in (full.model_dump_json(), provider_json):
+                    for value in filter(None, identifiers):
+                        self.assertNotIn(value, text)
 
 
 if __name__ == "__main__":
