@@ -33,10 +33,9 @@ class PaperOut(BaseModel):
 class AnalysisIn(BaseModel):
     """save_summary()가 받는 논문 분석 결과. (paper_analysis 테이블)
 
-    embedding을 함께 넣으면 paper_embeddings에도 같이 upsert 한다.
-    embedding 길이는 EMBEDDING_DIM(= 1024)과 일치해야 한다.
-    ⚠️ 이 임베딩 경로는 아직 실 데이터로 검증되지 않았다 (요약 담당 확인 후 처리 예정).
-    임베딩만 저장할 때는 save_embeddings()를 쓴다.
+    ★ 2026-10-12 변경: embedding / embedding_model 필드를 없앴다.
+      save_summary()는 paper_analysis만 저장하고, 임베딩 저장은
+      save_embeddings(items, model_name) 한 경로로만 한다.
     """
 
     # model_name 필드가 pydantic 보호 네임스페이스 "model_"과 겹쳐서 해제한다.
@@ -56,12 +55,6 @@ class AnalysisIn(BaseModel):
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
     tags: list[str] = Field(default_factory=list, description="매칭용 태그 (수면장애, 배회 등)")
     model_name: Optional[str] = Field(default=None, description="분석에 쓴 LLM 이름")
-    embedding: Optional[list[float]] = Field(
-        default=None, description="논문 임베딩. 주면 paper_embeddings에 함께 저장"
-    )
-    embedding_model: Optional[str] = Field(
-        default=None, description="임베딩 모델 이름. embedding을 줄 때 필수"
-    )
 
 
 class SearchResult(BaseModel):

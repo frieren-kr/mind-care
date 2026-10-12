@@ -43,7 +43,8 @@ npm start                         # Expo 개발 서버 (npm run android / ios / 
 
 ```
 PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/구조화 요약)
-                                        → paper_analysis (+ paper_embeddings)
+                                        → paper_analysis
+논문 본문 → 임베딩 배치 → paper_embeddings
 사용자 질문 → 임베딩 → search_similar() → RAG → LLM → 챗봇 응답(chat_messages)
 돌봄 기록(care_logs) → 월1회 배치 → profile_summaries → 개인화 피드(feed_items)
 ```
@@ -152,7 +153,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 |------|------|------|
 | `save_papers(papers: list[PaperIn])` | `papers`: 수집기가 만든 `PaperIn` 목록 | `SavePapersResult` |
 | `get_new_papers(since=None, limit=100, source=None)` | `since`: ISO8601 날짜/시각(선택), `limit`: int, `source`: `'pubmed'` 등(선택) | `list[PaperOut]` |
-| `save_summary(analysis: AnalysisIn)` | `AnalysisIn` | 저장된 `paper_analysis` id (`UUID`) |
+| `save_summary(analysis: AnalysisIn)` | `AnalysisIn` (임베딩 없음) | 저장된 `paper_analysis` id (`UUID`) |
 | `save_evidence(items)` | `items`: `(paper_id, study_type, evidence_level)` 목록 (`EvidenceIn`도 가능). `evidence_level`은 1~6 또는 `None` | `SaveEvidenceResult` |
 | `get_papers_without_evidence(limit=100)` | `limit`: int | `list[PaperDetail]` |
 | `search_similar(embedding, top_k=5, model_name=None)` | `embedding`: `list[float]`(길이=`EMBEDDING_DIM`=**1024**), `top_k`: int, `model_name`: 임베딩 모델 필터(선택) | `list[SearchResult]` — `paper_id` + `score`만 |
@@ -169,7 +170,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
 - **SavePapersResult**: `total, inserted, skipped, inserted_ids`
 - **PaperOut** (`papers`): `id, source, external_id, title, abstract?, published_date?, url?, collected_at`
-- **AnalysisIn** (`paper_analysis` + 선택적 `paper_embeddings`): `paper_id, study_type?, evidence_level?, guideline_relation?, summary_finding?, summary_comparison?, summary_limitation?, tags, model_name?, embedding?, embedding_model?`
+- **AnalysisIn** (`paper_analysis`): `paper_id, study_type?, evidence_level?, guideline_relation?, summary_finding?, summary_comparison?, summary_limitation?, tags, model_name?`
+  — ★2026-10-12 `embedding?` / `embedding_model?` **제거**. 임베딩 저장은 `save_embeddings()`로만 한다.
   - `study_type` / `evidence_level`은 **비워 보내면 기존 값을 유지한다** (등급 저장은 `save_evidence()`).
 - **EvidenceIn** (`save_evidence` 입력): `paper_id, study_type`(필수, 빈 값 불가), `evidence_level?`(int 1~6, 등급 없음은 `None`)
 - **SaveEvidenceResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
@@ -198,7 +200,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   정렬은 `published_date DESC NULLS LAST` → `collected_at DESC` → `id`. 한 배치는 `collected_at`이
   모두 같아서, 마지막 `id` 키가 있어야 `limit`을 준 결과 순서가 호출마다 흔들리지 않는다.
   `since`/`source`는 `None`이면 해당 조건을 적용하지 않고, `limit <= 0`이면 빈 목록을 돌려준다.
-- `save_summary()`는 `paper_analysis`에 upsert 하고, `embedding`을 함께 주면 `paper_embeddings`에도 upsert 한다.
+- `save_summary()`는 `paper_analysis`에만 upsert 한다. `paper_embeddings`는 건드리지 않는다.
   **(2026-10-09 변경)** `study_type` / `evidence_level`은 값을 보냈을 때만 바꾸고, 비워 보내면 기존 값을
   유지한다(`COALESCE`). 요약 칸·`guideline_relation`·`tags`·`model_name`은 예전처럼 보낸 값으로 덮어쓴다.
 - **근거 등급 전용 함수 2개는 요약 칸을 전혀 건드리지 않는다.** 등급 배치와 요약 배치는 어느 쪽을
@@ -246,11 +248,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 
 - `save_summary()`는 `paper_analysis`에 upsert 한다 (`paper_id` UNIQUE → 재분석하면 기존 행을 갱신하고
   `generated_at`을 다시 찍는다. id는 그대로). `summary_finding`을 채워 저장한 논문은 `get_new_papers()` 목록에서 빠진다.
-  `embedding`을 함께 주면 `paper_embeddings`에도 같은 트랜잭션으로 upsert 하며, 이때 `embedding_model`이
-  없으면 `ValueError`를 던진다(`paper_embeddings.model_name`이 NOT NULL).
-  **`save_summary()`의 임베딩 저장 경로는 여전히 미검증이다** (차원은 1024로 정리됐지만 이 경로 자체는
-  아직 실 데이터로 확인하지 않았다). 요약 담당 확인 후 따로 처리한다.
-  임베딩만 저장할 때는 `save_embeddings()`를 쓰는 것이 권장 경로다.
+  **`save_summary()`는 `paper_embeddings`를 전혀 건드리지 않는다** (2026-10-12 정리).
+  `AnalysisIn`의 `embedding` / `embedding_model` 필드를 없애고, 임베딩 저장은
+  `save_embeddings(items, model_name)` **한 경로로만** 한다. 요약 배치와 임베딩 배치를
+  서로 기다리지 않고 따로 돌릴 수 있다.
 
 > `functions.py`의 함수는 **모두 구현·검증 완료**다 (스텁 없음).
 
