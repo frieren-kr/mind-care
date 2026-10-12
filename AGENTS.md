@@ -58,7 +58,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - `backend/app/config.py` — 환경 변수(pydantic-settings).
 - `backend/app/db/functions.py` — **데이터 접근 함수 (팀 공용 계약, 데이터 담당).**
 - `backend/app/db/migrations/` — **DB 스키마 정본.** `001_init.sql`(테이블 정의, 팀 리뷰 후 확정)
-  + `002_add_paper_metadata.sql`(논문 메타데이터 컬럼) + `003_embedding_dim_1024.sql`(임베딩 `vector(1024)` + HNSW).
+  + `002_add_paper_metadata.sql`(논문 메타데이터 컬럼) + `003_embedding_dim_1024.sql`(임베딩 `vector(1024)` + HNSW)
+  + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE).
 - `backend/app/schemas.py` — 함수 입출력 스키마(pydantic). 이 계약의 단일 출처.
 - `backend/app/collectors/pubmed.py` — PubMed 수집(주 1회 배치).
 - `backend/app/api/` — API 라우터. 기능별 파일(`papers.py` …)에 `router`를 두고 `main.py`에서 등록.
@@ -111,6 +112,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 |---|---|---|
 | `backend/app/collectors/` | 데이터 (PubMed 수집) | |
 | `backend/app/db/` (`functions.py`, `connection.py`) | 데이터 (DB 접근 함수 계층) | |
+| `backend/app/db/feed_read.py`, `backend/app/feed_schemas.py` | 데이터 (피드 개인화 조회·쓰기) | 박주현 |
 | `backend/app/db/migrations/` | 데이터 (스키마) — **변경 전 팀 공지** | |
 | `backend/app/schemas.py` | 데이터 (공용 계약) — **변경 전 팀 공지** | |
 | `backend/main.py`, `backend/app/config.py` | 백엔드 (앱 진입점·설정) — 공용, 라우터 등록만 추가 | |
@@ -166,6 +168,14 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
 | `get_paper_details_by_pmids(pmids: list[str])` | `pmids`: PubMed PMID 목록 (`papers.external_id`, `source='pubmed'`) | `dict[str, PaperDetailResponse]` — 키가 PMID |
 
+**피드 개인화 조회·쓰기** — `backend/app/db/feed_read.py` (담당 박주현, 입출력 정본은 `app/feed_schemas.py`):
+
+| 함수 | 입력 | 반환 |
+|------|------|------|
+| `get_feed_context_snapshot(*, user_id, reference_time, reference_date, recent_period_start, recent_period_end)` | 전부 키워드 전용. `reference_time`/`recent_period_*`는 **tz-aware** `datetime`, `reference_date`는 `date` | `FeedReadSnapshot` |
+| `save_care_log(user_id, log_type, content=None, mood_tag=None, patient_id=None, logged_at=None)` | `log_type`: `patient_care` / `caregiver_selfcare`(필수), `patient_id`: 선택(그 간병인의 환자여야 함), `logged_at`: `None`이면 DB `now()` | 저장된 `care_logs` id (`UUID`) |
+| `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
+
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
 - **SavePapersResult**: `total, inserted, skipped, inserted_ids`
@@ -180,15 +190,41 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **UpdateMetadataResult**: `total, updated, not_found`(papers에 없던 `external_id` 목록)
 - **EmbeddingIn** (`paper_embeddings` 입력): `paper_id, embedding` — `embedding` 길이는 반드시 `EMBEDDING_DIM`(=1024).
 - **SaveEmbeddingsResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
-- **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, summary_finding?` — 초록 없음.
+- **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, evidence_grade?, summary_finding?` — 초록 없음.
 - **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
-- **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?`
+- **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, evidence_grade?, summary_finding?, summary_comparison?, summary_limitation?`
   - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
-- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, summary_finding?, summary_comparison?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
+- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, evidence_grade?, summary_finding?, summary_comparison?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
   - `relevance_score?`(float) — `mode="search"`일 때만. **`ai`면 `None`** (AI 결과에는 점수가 없다).
   - `headline?, summary_bullets?`(`list[str]`), `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — `mode="ai"`일 때만. `search`면 모두 `None`.
 - **RecommendationResponse**: `user_id, patient_id, mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지), `query?`(이번에 쓴 검색어. `search`일 때만, `ai`면 `None`), `items`(`RecommendationItem` 목록, 최대 5개. `search`면 관련도 높은 순, `ai`면 AI가 정한 순)
+- **evidence_grade** (위 세 응답 모델 공통) = 화면 표시용 근거 등급 `"A"`~`"D"`. 등급이 없으면 `None`.
+  DB의 `evidence_level`(문자 `"1"`~`"6"`)을 **묶은 값**이고, `evidence_level`은 그대로 함께 돌려준다.
+  변환 규칙의 정본은 AI 쪽 `app/ai/retrieval/evidence.py`의 `to_grade()` (`1→A, 2→B, 3·4→C, 5·6→D`).
+  **채우는 곳은 API 계층(`app/api/evidence_grade.py`)이다** — `app/db/`는 `app/ai/`를 import 하지 않기
+  때문에 조회 함수는 `evidence_level`만 돌려주고, 응답을 만들 때 등급을 덧붙인다.
+  `to_grade()`는 **정수**를 받으므로 문자열을 그대로 넘기면 조용히 `None`이 된다 (여기서 정수로 바꿔 넘긴다).
 - **EMBEDDING_DIM** = `1024` (`schemas.py` 상수). DB의 `vector(1024)`와 같아야 한다 — 바꿀 때는 새 마이그레이션 + 이 상수 + `config.py`의 `embedding_dim`을 **함께** 고친다.
+
+피드 개인화 스키마 (`app/feed_schemas.py`) — AI 쪽 `Source*` DTO와 **필드 이름·타입이 1:1**이다:
+- **FeedReadSnapshot**: `caregiver_profile?`, `managed_patients`, `recent_care_logs`, `long_term_summary?`
+- **FeedReadCollection[T]**: `items`(실제로 담은 기록 = I) + `total_count`(적격 조건을 모두 적용한 뒤,
+  **상한으로 자르기 전** 건수 = E). `len(items) <= total_count`를 모델이 검증하고,
+  `is_truncated`로 잘렸는지 알 수 있다. `total_count`는 **항상 별도 집계 쿼리**로 센다
+  (`len(items)`로 대체하지 않는다 — 조회 실패와 '데이터 없음'을 구분할 수 없게 되므로).
+- **FeedReadCaregiverProfile**: `user_id, relationship?, burden_score?, mood_score?, lifestyle_tags, updated_at`
+- **FeedReadManagedPatient**: `patient_id, caregiver_id, dementia_stage?, diagnosis_date?, symptoms, interests, updated_at`
+  + 자식 묶음 4개 `clinical_assessments / safety_events / medications / medical_visits`
+- **FeedReadClinicalAssessment**: `patient_id, assessment_type, score?`(**`Decimal`** 그대로), `result_detail?, assessed_at`
+- **FeedReadSafetyEvent**: `patient_id, event_date, has_fall, has_wandering, has_missing, note?`
+- **FeedReadMedication**: `patient_id, drug_name, is_taking, start_date?, end_date?, note?` + **추가 칸** `dosage?, frequency?`
+- **FeedReadMedicalVisit**: `patient_id, visit_date, is_visited, department?, visit_content?`(= **기타 자유 메모**)
+  + **추가 칸** `visit_reason?, diagnosis?, treatment_content?, test_summary?, medication_change?, doctor_note?, follow_up_plan?`
+- **FeedReadCareLog**: `user_id, patient_id?`(**`None`이면 환자 미연결 = 간병인 본인 기록**), `log_type, content?, mood_tag?, logged_at`
+- **FeedReadLongTermSummary**: `user_id, period_start, period_end, summary?, updated_tags, generated_at`
+- **일부러 넣지 않은 칸**: `hospital_name`, `assessed_by`, 환자 이름, 사용자 이름·이메일·전화번호
+  (LLM에 보낼 이유가 없는 식별 정보라서 조회 단계에서 아예 뺀다.)
+- **MAX_MANAGED_PATIENTS** = `20`. 넘으면 **자르지 않고** `FeedPatientLimitExceeded`를 던진다.
 
 동작 메모:
 - `save_papers()`는 `(source, external_id)` UNIQUE + `ON CONFLICT DO NOTHING`으로 이미 있는 논문을
@@ -240,6 +276,42 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     배치 안에 한 건이라도 섞여 있으면 **아무것도 저장하지 않는다**(다른 모델 벡터 혼입 방지).
     배치 내 중복 `paper_id`는 첫 건만 쓴다. `papers`에 없는 `paper_id`는 외래키 위반으로 배치가 통째로
     실패하지 않게 건너뛰고 `not_found`로 보고한다.
+
+`feed_read.py` 정책 (2026-10-12, AI 담당과 확정):
+- `get_feed_context_snapshot()`은 **사용자 확인부터 모든 조회·건수까지를 읽기 전용
+  REPEATABLE READ 트랜잭션 하나**에서 처리한다. 모든 값이 같은 DB 상태를 보고, 쓰기는 DB 레벨에서 막힌다.
+  **함수 안에서 `now()` / `today()`를 쓰지 않는다** — 시간 기준은 전부 인자로 받는다
+  (호출하는 쪽 AI Loader의 시계와 어긋나지 않게 하기 위해서다).
+- **실패를 빈 결과로 바꾸지 않는다.** `None` / 빈 목록 / `0`은 **모든 조회가 성공했을 때만** 나온다.
+  - `ValueError` — 시각에 시간대가 없음, `recent_period_start >= recent_period_end`,
+    `recent_period_end > reference_time` (DB에 가기 전에 검사).
+  - `FeedUserNotFound`(`LookupError`) — 없는 사용자. **`except FeedReadError`에 걸리지 않는다.**
+  - `FeedPatientLimitExceeded`(`FeedReadError`) — 관리 환자가 20명 초과. 환자 수를 담고 있다.
+  - `FeedReadError`(`RuntimeError`) — 조회·건수·DTO 검증 실패. DB 예외를 감싼다.
+- 컬렉션별 적격 조건(E)과 상한(I) — `total_count`는 **적격 조건을 모두 적용한 뒤, 상한으로 자르기 전** 건수:
+  | 컬렉션 | 적격 조건 (E) | 정렬 | 상한 (I) |
+  |---|---|---|---|
+  | 관리 환자 | `caregiver_id = user_id` 전부 | `created_at, id` | **없음** (20명 초과면 예외. `total_count == len(items)`) |
+  | 평가 | `assessed_at` ∈ `[reference_date - 365일, reference_date]` | `assessed_at DESC, created_at DESC, id` | 환자당 20 |
+  | 안전 | `event_date` 최근 180일 **AND** `has_fall`/`has_wandering`/`has_missing` 중 하나라도 true | `event_date DESC` | 환자당 50 |
+  | 복약 | `is_taking = true` **또는** `end_date >= reference_date - 90일` | `is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id` | 환자당 30 |
+  | 방문 | `visit_date` ∈ `[reference_date - 365일, reference_date + 90일]` | `visit_date DESC, created_at DESC, id` | 환자당 20 |
+  | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
+  | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
+- **안전 이벤트: 플래그가 전부 false인 날(= 확인했고 사건 없음)은 적격이 아니다** (`total_count`에도 안 들어간다).
+- **방문 선정은 두 갈래다**: 앞으로의 예약(`visit_date > reference_date`)을 **가까운 순으로 최대 5건** 먼저
+  잡고, 남은 자리를 지난 진료가 최근 순으로 채운다. 한쪽이 모자라면 다른 쪽이 그 자리를 쓴다.
+  최종 반환 순서는 `visit_date DESC, created_at DESC, id`.
+- **돌봄 기록의 `patient_id IS NULL`은 그대로 담는다** (간병인 본인 자기돌봄 기록).
+  다른 간병인의 환자에 붙은 기록은 적격이 아니다 (`total_count`에도 반영).
+- 환자별 자식 기록은 **환자 수와 관계없이 쿼리 수가 고정**이다
+  (`patient_id = ANY(...)` + 창 함수로 환자별 상한, `GROUP BY`로 건수. 건수 0인 환자는 `0`으로 채움).
+- 배열 칸(`symptoms` / `interests` / `lifestyle_tags` / `updated_tags`)은 DB에서 nullable이라
+  **`COALESCE`로 빈 목록**을 만든다 (AI 쪽 DTO는 non-null `list[str]`이다).
+- `save_profile_summary()`의 upsert는 `006_profile_summaries_index.sql`의
+  `(user_id, period_start, period_end)` UNIQUE 인덱스를 `ON CONFLICT` 대상으로 쓴다.
+- 개발용 샘플: `python -m scripts.seed_dev_care_logs` (최근 30일 돌봄 기록 + 지난달 요약. 재실행 안전).
+  테스트: `python -m unittest tests.test_feed_read`.
 
 수집기(`collectors/pubmed.py`) 쪽 함수:
 - `fetch_papers_by_pmids(pmids, require_abstract=True)` — PMID 목록으로 논문을 받아온다(검색 단계 없음).
