@@ -279,6 +279,21 @@ class MedicationTests(FeedReadTestBase):
         self.assertEqual([r.drug_name for r in col.items], ["복용중-오래된", "최근중단"])
         self.assertEqual([r.is_taking for r in col.items], [True, False])
 
+    def test_stopped_with_future_or_missing_end_date_is_excluded(self):
+        """중단인데 종료일이 미래이거나 NULL이면 제외 (total_count에도 안 들어간다)."""
+        patient = self._add_patient()
+        self._insert("medications", patient_id=patient, drug_name="중단-종료일미래",
+                     is_taking=False, end_date=REFERENCE_DATE + timedelta(days=1))
+        self._insert("medications", patient_id=patient, drug_name="중단-종료일없음",
+                     is_taking=False)
+        self._insert("medications", patient_id=patient, drug_name="오늘중단",
+                     is_taking=False, end_date=REFERENCE_DATE)
+        self._insert("medications", patient_id=patient, drug_name="90일전중단",
+                     is_taking=False, end_date=REFERENCE_DATE - timedelta(days=90))
+        col = snapshot(self.user_id).managed_patients.items[0].medications
+        self.assertEqual(col.total_count, 2)
+        self.assertEqual({r.drug_name for r in col.items}, {"오늘중단", "90일전중단"})
+
     def test_extra_columns_are_returned(self):
         """추가 칸(dosage, frequency)이 담긴다."""
         patient = self._add_patient()
@@ -349,6 +364,39 @@ class MedicalVisitTests(FeedReadTestBase):
         self._insert("medical_visits", patient_id=patient, is_visited=False, visit_date=inside)
         col = snapshot(self.user_id).managed_patients.items[0].medical_visits
         self.assertEqual([r.visit_date for r in col.items], [inside])
+
+    def test_state_and_date_must_agree(self):
+        """과거+미방문, 미래+방문완료는 제외. 오늘은 미방문이면 예정, 방문완료면 지난 진료."""
+        patient = self._add_patient()
+        for label, visited, days in (("과거+미방문", False, -1), ("미래+방문완료", True, 1),
+                                     ("오늘+미방문", False, 0), ("오늘+방문완료", True, 0),
+                                     ("과거+방문완료", True, -1), ("미래+미방문", False, 1)):
+            self._insert("medical_visits", patient_id=patient, is_visited=visited,
+                         visit_date=REFERENCE_DATE + timedelta(days=days), visit_content=label)
+        col = snapshot(self.user_id).managed_patients.items[0].medical_visits
+        self.assertEqual(col.total_count, 4, "제외된 조합은 total_count에도 안 들어간다")
+        self.assertEqual({r.visit_content for r in col.items},
+                         {"오늘+미방문", "오늘+방문완료", "과거+방문완료", "미래+미방문"})
+
+    def test_excluded_visits_do_not_take_slots(self):
+        """제외된 조합이 20건 자리를 차지하지 않는다. 오늘 미방문은 예정 쪽 자리(5건)를 쓴다."""
+        patient = self._add_patient()
+        for i in range(1, 31):
+            self._insert("medical_visits", patient_id=patient, is_visited=True,
+                         visit_date=REFERENCE_DATE - timedelta(days=i))
+            self._insert("medical_visits", patient_id=patient, is_visited=False,
+                         visit_date=REFERENCE_DATE - timedelta(days=i))   # 과거+미방문
+        for d in range(0, 10):
+            self._insert("medical_visits", patient_id=patient, is_visited=False,
+                         visit_date=REFERENCE_DATE + timedelta(days=d))
+            self._insert("medical_visits", patient_id=patient, is_visited=True,
+                         visit_date=REFERENCE_DATE + timedelta(days=d + 1))  # 미래+방문완료
+        col = snapshot(self.user_id).managed_patients.items[0].medical_visits
+        self.assertEqual(col.total_count, 40)
+        self.assertEqual(len(col.items), 20)
+        upcoming = sorted(r.visit_date for r in col.items if not r.is_visited)
+        self.assertEqual(upcoming, [REFERENCE_DATE + timedelta(days=d) for d in range(0, 5)])
+        self.assertTrue(all(r.visit_date < REFERENCE_DATE for r in col.items if r.is_visited))
 
     def test_extra_detail_columns_are_returned(self):
         """005 진료 상세 칸이 담긴다."""
@@ -619,6 +667,46 @@ class SourceDtoCompatibilityTests(FeedReadTestBase):
         self.assertEqual(revalidated.long_term_summary.summary, "9월 요약")
         self.assertEqual(revalidated.managed_patients.items[0].medications.items[0].drug_name,
                          "도네페질")
+
+    def test_production_source_accepts_boundary_records(self):
+        """정책 경계에 걸친 기록이 DB에 있어도 웅 님 ProductionFeedContextSource가 거부하지 않는다.
+
+        adapter는 과거+미방문 / 미래+방문완료 / 종료일이 미래인 중단 약이 하나라도 오면
+        스냅샷 전체를 거부한다. 조회 단계에서 그 조합이 아예 안 나가야 한다.
+        """
+        from app.ai.agent.schemas import AgentContext
+        from app.ai.agent.workflows.feed_context_backend_source import ProductionFeedContextSource
+        from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader
+        from app.ai.agent.workflows.feed_context_prepare import prepare_production_feed_input
+        from app.user_schemas import APP_TIMEZONE
+
+        patient = self._add_patient(dementia_stage="경도", symptoms=["배회"])
+        for visited, days in ((False, -1), (True, 1), (False, 0), (True, 0), (True, -1), (False, 1)):
+            self._insert("medical_visits", patient_id=patient, is_visited=visited,
+                         visit_date=REFERENCE_DATE + timedelta(days=days))
+        for taking, end in ((False, 1), (False, None), (False, 0), (True, 1), (True, None)):
+            self._insert("medications", patient_id=patient, drug_name="약", is_taking=taking,
+                         end_date=None if end is None else REFERENCE_DATE + timedelta(days=end))
+        self._insert("safety_events", patient_id=patient, event_date=REFERENCE_DATE,
+                     has_fall=False, has_wandering=False, has_missing=False)
+        save_care_log(user_id=self.user_id, log_type="patient_care", content="산책",
+                      patient_id=patient, logged_at=REFERENCE_TIME - timedelta(days=2))
+
+        source = ProductionFeedContextSource(read_snapshot=get_feed_context_snapshot)
+        loaded = source.load_snapshot(
+            user_id=self.user_id, reference_time=REFERENCE_TIME, reference_date=REFERENCE_DATE,
+            recent_period_start=PERIOD_START, recent_period_end=PERIOD_END)
+        got = loaded.managed_patients.items[0]
+        self.assertEqual((got.medical_visits.total_count, len(got.medical_visits.items)), (4, 4))
+        self.assertEqual((got.medications.total_count, len(got.medications.items)), (3, 3))
+        self.assertEqual(got.safety_events.total_count, 0)
+
+        # Loader → Prepare(정식 Stage 1)까지 같은 기준 시각으로 통과해야 한다.
+        loader = DefaultFeedContextLoader(source=source, clock=lambda: REFERENCE_TIME,
+                                          service_timezone=APP_TIMEZONE)
+        context = AgentContext(request_id="test", user_id=self.user_id, patient_id=None)
+        self.assertIn('"feed_scope": "caregiver_all"',
+                      prepare_production_feed_input(context, loader))
 
     def test_field_names_match_source_dtos(self):
         """Source DTO의 모든 칸이 내 DTO에도 같은 이름으로 있는지 (빠진 칸 조기 발견)."""
