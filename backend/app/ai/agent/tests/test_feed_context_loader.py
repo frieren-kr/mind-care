@@ -19,7 +19,7 @@ from app.ai.agent.workflows.feed_context import FeedPersonalizationContextV1
 from app.ai.agent.workflows.feed_context_prepare import (
     build_production_feed_provider_input, prepare_production_feed_input,
 )
-from app.ai.agent.workflows.feed_profile_planning import FeedProfileMappingError
+from app.ai.agent.workflows.feed_context_prepare import FeedProfileMappingError
 from app.ai.agent.workflows import feed_context_loader as loader_module
 from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader, FeedContextLoadError
 from app.ai.agent.workflows import feed_context_source as s

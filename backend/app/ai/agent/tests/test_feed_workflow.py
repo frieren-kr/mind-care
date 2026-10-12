@@ -1,4 +1,4 @@
-"""Real Demo components from Backend DTO mapping through structured handoff."""
+"""Production Stage 1 through real execution/Runner and structured handoff."""
 import ast
 import inspect
 import json
@@ -16,41 +16,42 @@ from ..tools.contracts import EvidencePackage, EvidenceSearchInput
 from ..workflows import feed
 from ..workflows.feed import FeedWorkflow, FeedWorkflowError
 from ..testing import feed_workflow_fakes as fake_module
-from ..workflows.feed_context_prepare import prepare_demo_feed_input, prepare_production_feed_input
+from ..workflows.feed_context_prepare import prepare_production_feed_input
 from ..workflows.feed_context_loader import DefaultFeedContextLoader
 from .test_feed_context_loader import (
     FakeFeedContextSource, empty_snapshot, full_snapshot, NOW as SOURCE_NOW,
     SERVICE_TZ, PRIVATE as SOURCE_PRIVATE,
 )
 from .test_feed_execution import search_call, final_turn
-from .test_feed_profile_planning import CONTEXT, NOW, P2, backend_caregiver, backend_patient, backend_profile
+from .test_feed_context_production_source import CONTEXT, NOW, P2, patient, snapshot
 
 
 class FeedWorkflowTests(unittest.TestCase):
-    def test_real_mapper_execution_runner_and_handoff_preserve_input_and_sources(self):
-        second = backend_patient(P2)
-        second.patient.symptoms = ["second patient signal"]
-        profile = backend_profile([second, backend_patient()], caregiver=backend_caregiver())
-        before = profile.model_dump()
+    def test_real_prepare_execution_runner_and_handoff_preserve_input_and_sources(self):
+        second = patient(P2)
+        second["symptoms"] = ["second patient signal"]
+        raw = snapshot([second, patient()])
+        before = raw.model_dump()
         context = CONTEXT.model_copy(update={"patient_id": P2})
-        deps = FakeFeedDependencies(context, profile=profile, reference_time=NOW,
+        deps = FakeFeedDependencies(context, snapshot=raw, reference_time=NOW,
             turns=[ModelTurn(tool_calls=[search_call()]), final_turn()])
         workflow = deps.workflow()
-        with patch.object(fake_module, "prepare_demo_feed_input", wraps=prepare_demo_feed_input) as prepare, \
+        with patch.object(fake_module, "prepare_production_feed_input", wraps=prepare_production_feed_input) as prepare, \
              patch.object(deps.runner, "run_structured", wraps=deps.runner.run_structured) as run:
             self.assertIs(workflow.run(context), deps.receipt)
-        prepare.assert_called_once_with(context, profile, reference_time=NOW,
-                                        service_timezone=fake_module.APP_TIMEZONE)
+        prepare.assert_called_once_with(context, deps.loader)
+        self.assertEqual(len(deps.read_calls), 1)
+        self.assertEqual(deps.read_calls[0]["user_id"], context.user_id)
         run.assert_called_once()
         prepared = deps.received["feed_execution"][1]
         self.assertIs(run.call_args.args[0], prepared)
         user = next(m for m in deps.client.requests[0][0] if m.kind == "user_input")
         self.assertEqual(user.content, prepared)
         patients = json.loads(prepared)["patients"]
-        self.assertEqual([p["patient_ref"] for p in patients], ["patient_1"])
-        self.assertEqual([p["symptoms"] for p in patients], [["second patient signal"]])
-        self.assertEqual(json.loads(prepared)["feed_scope"], "single_patient_demo")
-        self.assertEqual(profile.model_dump(), before)
+        self.assertEqual([p["patient_ref"] for p in patients], ["patient_1", "patient_2"])
+        self.assertEqual([p["symptoms"] for p in patients], [["signal 1"], ["second patient signal"]])
+        self.assertEqual(json.loads(prepared)["feed_scope"], "caregiver_all")
+        self.assertEqual(raw.model_dump(), before)
         self.assertEqual(deps.events, list(STAGES))
         self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
         handed = deps.saved[0]
@@ -62,10 +63,9 @@ class FeedWorkflowTests(unittest.TestCase):
         for messages, _ in deps.client.requests:
             text = json.dumps([m.model_dump(mode="json") for m in messages])
             for forbidden in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id),
-                              "PRIVATE", "stored drug", "stored medication note", "stored event note",
-                              "stored assessment", "stored department", "legacy whole visit or free memo",
+                              "PRIVATE", "stored stopped drug", "stored current drug", "stored department",
                               "reference_time", "updated_at", "diagnosis_date", "assessed_at", "result_detail",
-                              "burden_score", "mood_score", "2026-10", "2020-01"):
+                              "burden_score", "mood_score", "2026-10", "coverage", "long_term_summary"):
                 self.assertNotIn(forbidden, text)
 
     def test_workflow_observes_first_evidence_then_llm_chooses_followup(self):
@@ -103,7 +103,7 @@ class FeedWorkflowTests(unittest.TestCase):
 
     def test_invalid_backend_ownership_stops_before_provider(self):
         deps = FakeFeedDependencies(CONTEXT)
-        deps.profile.patients[0].patient.caregiver_id = CONTEXT.patient_id
+        deps.snapshot.managed_patients.items[0].caregiver_id = CONTEXT.patient_id
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "context_prepare")
@@ -147,7 +147,7 @@ class FeedWorkflowTests(unittest.TestCase):
 
     def test_empty_evidence_and_empty_feed_are_successful_not_failed_reads(self):
         deps = FakeFeedDependencies(CONTEXT.model_copy(update={"patient_id": None}),
-            profile=backend_profile([]), reference_time=NOW,
+            snapshot=snapshot([], full=False), reference_time=NOW,
             turns=[ModelTurn(tool_calls=[search_call()]), final_turn(empty=True)],
             handler=lambda context, args: EvidencePackage(query=args.query, evidence=[]))
         self.assertIs(deps.workflow().run(CONTEXT.model_copy(update={"patient_id": None})), deps.receipt)
@@ -317,67 +317,54 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
             self.assertNotIn(str(context.user_id), text)
             self.assertFalse(any(m.kind == "agent_context" for m in messages))
 
-    def test_both_cold_start_routes_can_search_and_handoff_general_news(self):
+    def test_production_cold_start_can_search_and_handoff_general_news(self):
         context = CONTEXT.model_copy(update={"patient_id": None})
-        for production in (False, True):
-            turn = final_turn()
-            value = json.loads(turn.text)
-            reason = "치매 가족 돌봄에 참고할 수 있는 최신 연구이기 때문입니다."
-            value["items"][0]["personal_reason"] = reason
-            query = "General dementia cognitive health caregiver research"
-            turns = [ModelTurn(tool_calls=[search_call(query=query)]), ModelTurn(text=json.dumps(value))]
-            if production:
-                deps, workflow = self.production(context, empty_snapshot(), turns)
-            else:
-                deps = FakeFeedDependencies(context, profile=backend_profile([]), reference_time=NOW, turns=turns)
-                workflow = deps.workflow()
-            with self.subTest(production=production), patch.object(
-                    deps.runner, "run_structured", wraps=deps.runner.run_structured) as run:
-                self.assertIs(workflow.run(context), deps.receipt)
-            run.assert_called_once()
-            self.assertEqual(deps.events, list(STAGES))
-            self.assertEqual(deps.search_queries, [query])
-            self.assertEqual(deps.saved[0].output.items[0].personal_reason, reason)
-            self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
-            messages = deps.client.requests[0][0]
-            payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
-            self.assertEqual(payload, {"feed_scope": "caregiver_all" if production else "single_patient_demo",
-                                      "caregiver": None, "patients": []})
-            policy = "\n".join(m.content for m in messages if m.role == "system")
-            self.assertIn("Cold Start", policy)
-            self.assertIn("일반적인 정보적 관련성", policy)
-            self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", policy)
+        turn = final_turn()
+        value = json.loads(turn.text)
+        reason = "치매 가족 돌봄에 참고할 수 있는 최신 연구이기 때문입니다."
+        value["items"][0]["personal_reason"] = reason
+        query = "General dementia cognitive health caregiver research"
+        turns = [ModelTurn(tool_calls=[search_call(query=query)]), ModelTurn(text=json.dumps(value))]
+        deps, workflow = self.production(context, empty_snapshot(), turns)
+        with patch.object(deps.runner, "run_structured", wraps=deps.runner.run_structured) as run:
+            self.assertIs(workflow.run(context), deps.receipt)
+        run.assert_called_once()
+        self.assertEqual(deps.events, list(STAGES))
+        self.assertEqual(deps.search_queries, [query])
+        self.assertEqual(deps.saved[0].output.items[0].personal_reason, reason)
+        self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
+        messages = deps.client.requests[0][0]
+        payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
+        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+        policy = "\n".join(m.content for m in messages if m.role == "system")
+        self.assertIn("Cold Start", policy)
+        self.assertIn("일반적인 정보적 관련성", policy)
+        self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", policy)
 
     def test_cold_start_empty_evidence_and_invalid_or_failed_citations(self):
         context = CONTEXT.model_copy(update={"patient_id": None})
-        for production in (False, True):
-            for behavior in ("empty", "invalid_ref", "failed_search"):
-                def handler(context, args):
-                    if behavior == "failed_search":
-                        raise RuntimeError("PRIVATE failed search")
-                    return EvidencePackage(query=args.query, evidence=[])
-                turns = [ModelTurn(tool_calls=[search_call()]), final_turn(empty=behavior == "empty")]
-                if production:
-                    deps, workflow = self.production(context, empty_snapshot(), turns, handler=handler)
+        for behavior in ("empty", "invalid_ref", "failed_search"):
+            def handler(context, args):
+                if behavior == "failed_search":
+                    raise RuntimeError("PRIVATE failed search")
+                return EvidencePackage(query=args.query, evidence=[])
+            turns = [ModelTurn(tool_calls=[search_call()]), final_turn(empty=behavior == "empty")]
+            deps, workflow = self.production(context, empty_snapshot(), turns, handler=handler)
+            with self.subTest(behavior=behavior):
+                if behavior == "empty":
+                    self.assertIs(workflow.run(context), deps.receipt)
+                    self.assertEqual(deps.saved[0].output.items, [])
                 else:
-                    deps = FakeFeedDependencies(context, profile=backend_profile([]), reference_time=NOW,
-                        turns=turns, handler=handler)
-                    workflow = deps.workflow()
-                with self.subTest(production=production, behavior=behavior):
-                    if behavior == "empty":
-                        self.assertIs(workflow.run(context), deps.receipt)
-                        self.assertEqual(deps.saved[0].output.items, [])
-                    else:
-                        with self.assertRaises(FeedWorkflowError):
-                            workflow.run(context)
-                        self.assertEqual(deps.agent_result.execution.status, "invalid_response")
-                        self.assertIsNone(deps.agent_result.output)
-                        self.assertEqual(deps.agent_result.sources, [])
-                        self.assertEqual(deps.saved, [])
+                    with self.assertRaises(FeedWorkflowError):
+                        workflow.run(context)
+                    self.assertEqual(deps.agent_result.execution.status, "invalid_response")
+                    self.assertIsNone(deps.agent_result.output)
+                    self.assertEqual(deps.agent_result.sources, [])
+                    self.assertEqual(deps.saved, [])
 
     def test_unprepared_dtos_stop_at_stage_one_before_execution(self):
         context = CONTEXT.model_copy(update={"patient_id": None})
-        for value in (None, {}, backend_profile([]), "", "  ", "not JSON", "[]", "null"):
+        for value in (None, {}, snapshot([], full=False), "", "  ", "not JSON", "[]", "null"):
             deps = FakeFeedDependencies(context)
             workflow = deps.workflow()
             workflow.context_prepare = lambda context: value

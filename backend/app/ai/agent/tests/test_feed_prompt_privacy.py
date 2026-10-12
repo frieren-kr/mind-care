@@ -13,10 +13,9 @@ from ..tools.contracts import EvidenceItem, EvidencePackage
 from ..workflows.feed import FeedWorkflowError
 from ..workflows.feed_prompts import FeedPromptBuilder
 from ..workflows.feed_execution import FeedExecutionV1
-from ..workflows.feed_profile_planning import build_feed_provider_input
-from .test_feed_profile_planning import NOW, P2, backend_caregiver, backend_patient, backend_profile
-from ..workflows.feed_profile_planning import FeedUserProfileSourceMappingV1
-from app.user_schemas import APP_TIMEZONE
+from ..workflows.feed_context_prepare import prepare_production_feed_input
+from .test_feed_context_production_source import NOW, P2, snapshot, context_loader
+from ..workflows.feed_context_backend_source import ProductionFeedContextSource
 
 
 CONTEXT = AgentContext(request_id="PRIVATE_REQUEST_ID", user_id=UUID(int=10), patient_id=UUID(int=99))
@@ -24,9 +23,8 @@ CONTEXT = AgentContext(request_id="PRIVATE_REQUEST_ID", user_id=UUID(int=10), pa
 
 class FeedPromptPrivacyTests(unittest.TestCase):
     def test_provider_messages_across_tool_rounds_exclude_server_identity(self):
-        payload = FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)(
-            CONTEXT, backend_profile([backend_patient()],
-                                     caregiver=backend_caregiver()), reference_time=NOW)
+        source = ProductionFeedContextSource(read_snapshot=lambda **kwargs: snapshot())
+        payload = prepare_production_feed_input(CONTEXT, context_loader(source))
         for structured in (False, True):
             with self.subTest(structured=structured):
                 queries = []
@@ -45,8 +43,8 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                 execution = FeedExecutionV1(client, ToolRegistry((
                     ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], search, test_only=True),
                 ), mode="test"))
-                result = (execution(CONTEXT, build_feed_provider_input(payload))
-                          if structured else execution.runner.run(build_feed_provider_input(payload), CONTEXT))
+                result = (execution(CONTEXT, payload)
+                          if structured else execution.runner.run(payload, CONTEXT))
                 self.assertEqual(result.execution.status if structured else result.status, "completed")
                 self.assertEqual(len(client.requests), 2)
                 followup = client.requests[1][0]
@@ -60,7 +58,9 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                                   str(UUID(int=1)), str(P2), *(str(UUID(int=i)) for i in range(101, 106)),
                                   "request_id", "user_id", "patient_id", "caregiver_id", "PRIVATE_CAREGIVER_NAME",
                                   "PRIVATE_PATIENT_NAME", "PRIVATE_005_DETAIL", "PRIVATE_ASSESSOR",
-                                  "PRIVATE_HOSPITAL", "PRIVATE_DOSAGE", "PRIVATE_FREQUENCY"):
+                                  "PRIVATE_HOSPITAL", "PRIVATE_DOSAGE", "PRIVATE_FREQUENCY",
+                                  "PRIVATE_NULL_LOG", "PRIVATE_PATIENT_LOG", "PRIVATE_MONTHLY_SUMMARY",
+                                  "PRIVATE_ASSESSMENT", "PRIVATE_SAFETY", "PRIVATE_MEDICATION", "PRIVATE_VISIT_MEMO"):
                         self.assertNotIn(value, serialized)
                     self.assertFalse(any(message.kind == "agent_context" for message in messages))
                 self.assertEqual(queries, ["dementia sleep research"])

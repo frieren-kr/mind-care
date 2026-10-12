@@ -1,8 +1,10 @@
-"""Test-only Backend DTO -> Mapper -> Feed execution -> handoff fixtures."""
+"""Test-only Production Snapshot -> Loader -> Prepare -> execution -> handoff."""
+from datetime import timedelta
 from typing import Callable
 from uuid import UUID
 
-from app.user_schemas import APP_TIMEZONE, PatientContext, UserProfileContext
+from app.feed_schemas import FeedReadSnapshot
+from app.user_schemas import APP_TIMEZONE
 
 from ..outputs import StructuredAgentResult
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
@@ -10,12 +12,40 @@ from ..schemas import AgentContext, ModelTurn
 from ..tools import contracts as c
 from ..workflows.feed import FeedWorkflow
 from ..workflows.feed_execution import FeedExecutionV1
-from ..workflows.feed_context_prepare import prepare_demo_feed_input
+from ..workflows.feed_context_backend_source import ProductionFeedContextSource
+from ..workflows.feed_context_loader import DefaultFeedContextLoader
+from ..workflows.feed_context_prepare import prepare_production_feed_input
 from .fake_llm import FakeLLMClient
 from .fake_tools import FIXTURE_NOW, fake_search_evidence
 
 
 STAGES = ("context_prepare", "feed_execution", "backend_handoff")
+
+
+def fake_feed_snapshot(context: AgentContext, *, reference_time=FIXTURE_NOW) -> FeedReadSnapshot:
+    """Synthetic successful Backend read; patient_id never selects its scope.
+
+    Empty child collections/summary are explicit fixture data, not runtime
+    placeholders. Production Source must preserve the supplied eligible counts.
+    """
+    patients = [{
+        "patient_id": UUID(int=i), "caregiver_id": context.user_id,
+        "dementia_stage": None, "diagnosis_date": None,
+        "symptoms": [f"synthetic signal {i}"], "interests": [],
+        "updated_at": reference_time,
+        **{field: {"items": [], "total_count": 0} for field in (
+            "clinical_assessments", "safety_events", "medications", "medical_visits")},
+    } for i in (1, 2)]
+    return FeedReadSnapshot.model_validate({
+        "caregiver_profile": None,
+        "managed_patients": {"items": patients, "total_count": 2},
+        "recent_care_logs": {"items": [{
+            "user_id": context.user_id, "patient_id": None, "log_type": "caregiver_selfcare",
+            "content": "PRIVATE synthetic care log", "mood_tag": None,
+            "logged_at": reference_time - timedelta(hours=1),
+        }], "total_count": 1},
+        "long_term_summary": None,
+    })
 
 
 def build_feed_test_registry(*, query_validator: Callable[[AgentContext, c.EvidenceSearchInput], None],
@@ -30,9 +60,9 @@ def build_feed_test_registry(*, query_validator: Callable[[AgentContext, c.Evide
 
 
 class FakeFeedDependencies:
-    """Wire real Mapper/Feed execution/Runner to synthetic reads and receipts."""
+    """Wire real Production Source/Loader/Prepare/Runner to synthetic reads."""
 
-    def __init__(self, context: AgentContext, *, profile=None, reference_time=FIXTURE_NOW,
+    def __init__(self, context: AgentContext, *, snapshot=None, reference_time=FIXTURE_NOW,
                  fail_at=None, turns=None, client=None, handler=fake_search_evidence):
         self.events = []
         self.received = {}
@@ -42,19 +72,12 @@ class FakeFeedDependencies:
         self.saved_owners = []
         self.receipt = object()
         self.reference_time = reference_time
-        if profile is None:
-            profile = UserProfileContext(
-                user_id=context.user_id, name="PRIVATE synthetic caregiver",
-                caregiver_profile=None, generated_at=reference_time,
-                patients=[PatientContext.model_validate({
-                    "patient": {"id": UUID(int=i), "caregiver_id": context.user_id,
-                                "name": "PRIVATE synthetic patient",
-                                "symptoms": [f"synthetic signal {i}"], "interests": [],
-                                "created_at": reference_time, "updated_at": reference_time},
-                    "latest_assessments": [], "current_medications": [], "recent_safety_events": [],
-                    "recent_visits": [], "upcoming_visits": [],
-                }) for i in (() if context.patient_id is None else (context.patient_id.int,))])
-        self.profile = profile
+        self.snapshot = (fake_feed_snapshot(context, reference_time=reference_time)
+                         if snapshot is None else snapshot)
+        self.read_calls = []
+        self.source = ProductionFeedContextSource(read_snapshot=self.read_snapshot)
+        self.loader = DefaultFeedContextLoader(source=self.source,
+            clock=lambda: self.reference_time, service_timezone=APP_TIMEZONE)
         self.personalization = None
         self.agent_result = None
         self.client = client if client is not None else FakeLLMClient(turns if turns is not None else [
@@ -77,9 +100,12 @@ class FakeFeedDependencies:
 
     def load_context(self, context):
         self._enter("context_prepare", context)
-        self.personalization = prepare_demo_feed_input(context, self.profile,
-            reference_time=self.reference_time, service_timezone=APP_TIMEZONE)
+        self.personalization = prepare_production_feed_input(context, self.loader)
         return self.personalization
+
+    def read_snapshot(self, **kwargs):
+        self.read_calls.append(kwargs)
+        return self.snapshot
 
     def run_feed(self, context, provider_input):
         self._enter("feed_execution", context, provider_input)

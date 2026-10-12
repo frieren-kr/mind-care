@@ -1,54 +1,49 @@
-"""Stage 1 Demo selection and Production projection; no DB handlers/new DTOs.
+"""Production Stage 1 minimization and serialization for all managed patients.
 
-Trusted callers inject authorized reads and time configuration. These helpers
-never interpret read failure as Cold Start or expose raw narrative/history.
+Trusted callers inject authorized reads and time configuration. Loader errors
+retain their codes. The legacy recommendations API shim is isolated and lazy;
+it is not an alternative official Stage 1 or a Production fallback.
 """
 from datetime import datetime, tzinfo
-from uuid import UUID
+import json
 
-from app.user_schemas import PatientContext, UserProfileContext
+from app.user_schemas import UserProfileContext
 
 from ..schemas import AgentContext
 from .feed_context import FeedPersonalizationContextV1
 from .feed_context_loader import DefaultFeedContextLoader
-from .feed_profile_planning import (
-    FeedProfileMappingError, FeedUserProfileSourceMappingV1,
-    _serialize_feed_provider_input, build_feed_provider_input,
-)
 
 
-def prepare_demo_feed_input(context: AgentContext, profile: UserProfileContext, *,
-                            reference_time: datetime, service_timezone: tzinfo) -> str:
-    """Select 0..1 owned patient, then reuse the unchanged multi-patient Mapper.
+class FeedProfileMappingError(RuntimeError):
+    """Fixed failure only; no Backend data or validation input in public text."""
 
-    Selection checks every candidate identity/owner; selected child/time rules
-    remain the Mapper's responsibility. The supplied Backend DTO is unchanged.
+    def __init__(self):
+        super().__init__("Feed profile mapping failed")
+
+
+def _serialize_feed_provider_input(caregiver, profiles) -> str:
+    """Production disclosure allowlist. Callers provide validated row views.
+
+    A row view is (profile, safety rows, assessment rows), not a new DTO.
+    Production-only logs/summary/coverage stay internal, never fabricated empty.
     """
-    try:
-        if (not isinstance(profile, UserProfileContext)
-                or not {"caregiver_profile", "patients"} <= profile.model_fields_set
-                or profile.user_id != context.user_id):
-            raise ValueError("Explicit owned Backend read required")
-        ids = set()
-        for row in profile.patients:
-            if (not isinstance(row, PatientContext) or "patient" not in row.model_fields_set
-                    or not isinstance(row.patient.id, UUID) or row.patient.id in ids
-                    or row.patient.caregiver_id != context.user_id):
-                raise ValueError("Invalid candidate ownership/identity")
-            ids.add(row.patient.id)
-        if context.patient_id is None:
-            if len(profile.patients) > 1:
-                raise ValueError("Ambiguous Demo patient scope")
-            selected = profile.patients
-        else:
-            if not isinstance(context.patient_id, UUID) or context.patient_id not in ids:
-                raise ValueError("Selected patient is not managed")
-            selected = [row for row in profile.patients if row.patient.id == context.patient_id]
-        mapped = FeedUserProfileSourceMappingV1(service_timezone=service_timezone)(
-            context, profile.model_copy(update={"patients": selected}), reference_time=reference_time)
-        return build_feed_provider_input(mapped)
-    except Exception:
-        raise FeedProfileMappingError() from None
+    patients = [{
+        "patient_ref": patient.patient_ref,
+        "dementia_stage": patient.dementia_stage,
+        "symptoms": list(patient.symptoms),
+        "interests": list(patient.interests),
+        "safety_events": [label for flag, label in (
+            ("has_fall", "fall"), ("has_wandering", "wandering"), ("has_missing", "missing")
+        ) if any(getattr(row, flag) for row in safety)],
+        "assessment_types": [row.assessment_type for row in assessments],
+    } for patient, safety, assessments in profiles]
+    return json.dumps({
+        "feed_scope": "caregiver_all",
+        "caregiver": None if caregiver is None else {
+            "relationship": caregiver.relationship, "lifestyle_tags": list(caregiver.lifestyle_tags),
+        },
+        "patients": patients,
+    }, ensure_ascii=False, allow_nan=False)
 
 
 def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
@@ -69,7 +64,7 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
         return _serialize_feed_provider_input(value.caregiver_profile, (
             (patient, patient.safety_events.items, patient.clinical_assessments.items)
             for patient in value.managed_patient_profiles.items
-        ), feed_scope="caregiver_all")
+        ))
     except Exception:
         raise FeedProfileMappingError() from None
 
@@ -82,3 +77,15 @@ def prepare_production_feed_input(context: AgentContext, loader: DefaultFeedCont
     """
     value = loader(context, recent_days=30)
     return build_production_feed_provider_input(value, service_timezone=loader.service_timezone)
+
+
+def prepare_demo_feed_input(context: AgentContext, profile: UserProfileContext, *,
+                            reference_time: datetime, service_timezone: tzinfo) -> str:
+    """Temporary import-compatible entry point for recommendations.py only.
+
+    Remove together with feed_demo_compat after the API owner switches its read
+    and Stage 1 to the Production Snapshot/Loader contract. Never use internally.
+    """
+    from .feed_demo_compat import prepare_demo_feed_input as prepare_legacy
+    return prepare_legacy(context, profile, reference_time=reference_time,
+                          service_timezone=service_timezone)

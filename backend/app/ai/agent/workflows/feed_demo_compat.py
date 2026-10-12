@@ -1,8 +1,9 @@
-"""UserProfileContext to minimized caregiver/patient demo planning input.
+"""Temporary recommendations API compatibility; not official Feed Stage 1.
 
-Consumes Backend DTOs after a trusted read; scope consistency is not authorization.
-No DB calls, counts, Source Snapshot, CareLog/Summary placeholders or full V1
-claims. Backend selected lists are preserved separately, not promoted to history.
+Keep the existing UserProfileContext selection/validation and Demo DTOs solely
+for the external API's existing import/call contract. Production never imports
+this module. Remove when the API owner adopts Snapshot -> Loader -> Prepare.
+No new models, DB reads, fallback or execution path are introduced here.
 """
 from datetime import date, datetime, timezone, tzinfo
 from decimal import Decimal
@@ -15,16 +16,10 @@ from pydantic import AwareDatetime, ConfigDict, Field, StrictStr, ValidationInfo
 from app.user_schemas import CaregiverProfileOut, MedicalVisitOut, PatientContext, UserProfileContext
 
 from ..schemas import AgentContext, AgentModel
+from .feed_context_prepare import FeedProfileMappingError, _serialize_feed_provider_input
 from .feed_context import (
     CaregiverProfileContext, ClinicalAssessmentContext, MedicationContext, MedicalVisitContext, SafetyEventContext,
 )
-
-
-# Trusted server configuration for this mapper; never serialized as patient data.
-PROFILE_PLANNING_AVAILABLE_SOURCES = frozenset({
-    "caregiver_profile", "stored_patient_profile", "latest_assessments", "current_medications",
-    "recent_safety_events", "recent_visits", "upcoming_visits",
-})
 
 
 class FeedPatientPlanningProfile(AgentModel):
@@ -91,40 +86,6 @@ class FeedProfilePlanningInputV1(AgentModel):
         return self
 
 
-class FeedProfileMappingError(RuntimeError):
-    """Fixed failure only; no Backend data or validation input in public text."""
-
-    def __init__(self):
-        super().__init__("Feed profile mapping failed")
-
-
-def _serialize_feed_provider_input(caregiver, profiles, *, feed_scope: str) -> str:
-    """Sole disclosure allowlist. Callers provide already validated row views.
-
-    A row view is (profile, safety rows, assessment rows), not a new DTO.
-    Production-only logs/summary/coverage stay internal, never fabricated empty.
-    """
-    if feed_scope not in ("single_patient_demo", "caregiver_all"):
-        raise ValueError("Invalid Feed scope")
-    patients = [{
-        "patient_ref": patient.patient_ref,
-        "dementia_stage": patient.dementia_stage,
-        "symptoms": list(patient.symptoms),
-        "interests": list(patient.interests),
-        "safety_events": [label for flag, label in (
-            ("has_fall", "fall"), ("has_wandering", "wandering"), ("has_missing", "missing")
-        ) if any(getattr(row, flag) for row in safety)],
-        "assessment_types": [row.assessment_type for row in assessments],
-    } for patient, safety, assessments in profiles]
-    if feed_scope == "single_patient_demo" and len(patients) > 1:
-        raise ValueError("Demo requires zero or one selected patient")
-    return json.dumps({
-        "feed_scope": feed_scope,
-        "caregiver": None if caregiver is None else {
-            "relationship": caregiver.relationship, "lifestyle_tags": list(caregiver.lifestyle_tags),
-        },
-        "patients": patients,
-    }, ensure_ascii=False, allow_nan=False)
 
 
 def build_feed_provider_input(planning: FeedProfilePlanningInputV1) -> str:
@@ -136,10 +97,14 @@ def build_feed_provider_input(planning: FeedProfilePlanningInputV1) -> str:
     try:
         if not isinstance(planning, FeedProfilePlanningInputV1):
             raise TypeError("Trusted Demo planning input required")
-        return _serialize_feed_provider_input(planning.caregiver_profile, (
+        payload = json.loads(_serialize_feed_provider_input(planning.caregiver_profile, (
             (patient, patient.recent_safety_events, patient.latest_assessments)
             for patient in planning.managed_patient_profiles
-        ), feed_scope="single_patient_demo")
+        )))
+        if len(payload["patients"]) > 1:
+            raise ValueError("Demo requires zero or one selected patient")
+        payload["feed_scope"] = "single_patient_demo"
+        return json.dumps(payload, ensure_ascii=False, allow_nan=False)
     except Exception:
         raise FeedProfileMappingError() from None
 
@@ -257,3 +222,37 @@ class FeedUserProfileSourceMappingV1:
             }, context={"service_timezone": self.service_timezone})
         except Exception:
             raise FeedProfileMappingError() from None
+
+
+def prepare_demo_feed_input(context: AgentContext, profile: UserProfileContext, *,
+                            reference_time: datetime, service_timezone: tzinfo) -> str:
+    """Select 0..1 owned patient, then reuse the unchanged multi-patient Mapper.
+
+    Selection checks every candidate identity/owner; selected child/time rules
+    remain the Mapper's responsibility. The supplied Backend DTO is unchanged.
+    """
+    try:
+        if (not isinstance(profile, UserProfileContext)
+                or not {"caregiver_profile", "patients"} <= profile.model_fields_set
+                or profile.user_id != context.user_id):
+            raise ValueError("Explicit owned Backend read required")
+        ids = set()
+        for row in profile.patients:
+            if (not isinstance(row, PatientContext) or "patient" not in row.model_fields_set
+                    or not isinstance(row.patient.id, UUID) or row.patient.id in ids
+                    or row.patient.caregiver_id != context.user_id):
+                raise ValueError("Invalid candidate ownership/identity")
+            ids.add(row.patient.id)
+        if context.patient_id is None:
+            if len(profile.patients) > 1:
+                raise ValueError("Ambiguous Demo patient scope")
+            selected = profile.patients
+        else:
+            if not isinstance(context.patient_id, UUID) or context.patient_id not in ids:
+                raise ValueError("Selected patient is not managed")
+            selected = [row for row in profile.patients if row.patient.id == context.patient_id]
+        mapped = FeedUserProfileSourceMappingV1(service_timezone=service_timezone)(
+            context, profile.model_copy(update={"patients": selected}), reference_time=reference_time)
+        return build_feed_provider_input(mapped)
+    except Exception:
+        raise FeedProfileMappingError() from None
