@@ -30,6 +30,14 @@ LEVEL = {
     "protocol": None, "animal": None, "other": None,
 }
 
+# 화면 표시용 근거 등급 (2026-10 회의에서 A~D로 결정). 1~6 등급을 묶는다.
+#   A = 1 메타분석·체계적 문헌고찰·가이드라인
+#   B = 2 RCT
+#   C = 3~4 비무작위 임상시험·관찰연구·질적연구
+#   D = 5~6 서술적 리뷰·증례보고·전문가 의견
+#   None = 판단 불가·프로토콜·동물 → 화면에는 "등급 미확인"
+GRADE = {1: "A", 2: "B", 3: "C", 4: "C", 5: "D", 6: "D"}
+
 # PubMed PublicationType → study_type. 위에서부터 먼저 걸리는 것(= 더 강한 근거)을 쓴다.
 PUBTYPE_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("protocol", ("Clinical Trial Protocol",)),
@@ -135,3 +143,12 @@ def classify(
             return Evidence(study_type, LEVEL[study_type], False, "keyword")
 
     return Evidence("other", None, False, "none")
+
+
+def to_grade(evidence_level: Optional[int]) -> Optional[str]:
+    """1~6 근거 등급 → 화면 표시용 A~D. 등급이 없으면(None) None을 돌려준다(= 등급 미확인).
+
+    예) to_grade(classify(...).evidence_level)  →  "B"
+        to_grade(None)                           →  None
+    """
+    return GRADE.get(evidence_level)
