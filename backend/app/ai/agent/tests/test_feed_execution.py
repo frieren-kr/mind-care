@@ -5,7 +5,6 @@ import traceback
 import unittest
 from unittest.mock import patch
 
-from app.user_schemas import APP_TIMEZONE
 from ..outputs import FeedAnswerV1, StructuredAgentResult
 from ..prompts import DefaultPromptBuilder
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec, production_registry
@@ -13,14 +12,23 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..testing.fake_tools import fake_registry
 from ..tools.contracts import EvidenceItem, EvidencePackage
-from ..workflows.feed_profile_planning import build_feed_provider_input, FeedUserProfileSourceMappingV1
+from ..workflows.feed_context_prepare import prepare_production_feed_input
 from ..workflows.feed_execution import FeedExecutionV1, FeedExecutionError
-from .test_feed_profile_planning import CONTEXT, NOW, backend_profile
+from .test_feed_context_production_source import CONTEXT as SOURCE_CONTEXT, snapshot, context_loader
+from ..workflows.feed_context_backend_source import ProductionFeedContextSource
+
+
+CONTEXT = SOURCE_CONTEXT.model_copy(update={"request_id": "private-request-marker"})
 
 
 def planning():
-    return FeedUserProfileSourceMappingV1(service_timezone=APP_TIMEZONE)(
-        CONTEXT, backend_profile(), reference_time=NOW)
+    source = ProductionFeedContextSource(read_snapshot=lambda **kwargs: snapshot())
+    return context_loader(source)(CONTEXT, recent_days=30)
+
+
+def prepared_input():
+    source = ProductionFeedContextSource(read_snapshot=lambda **kwargs: snapshot())
+    return prepare_production_feed_input(CONTEXT, context_loader(source))
 
 
 def search_call(identifier="search_1", query="Dementia sleep research"):
@@ -68,7 +76,7 @@ class FeedExecutionContractTests(unittest.TestCase):
                 execution, client, searches = research_runner([])
                 setattr(execution.runner, attribute, value)
                 with self.assertRaises(FeedExecutionError) as caught:
-                    execution(CONTEXT, build_feed_provider_input(planning()))
+                    execution(CONTEXT, prepared_input())
                 self.assertEqual(str(caught.exception), "Feed execution failed")
                 self.assertEqual(client.requests, [])
                 self.assertEqual(searches, [])
@@ -83,7 +91,7 @@ class FeedExecutionContractTests(unittest.TestCase):
                     target = execution.runner if changed_side == "runner" else execution.runner.executor
                     target.registry = registry
                     with self.assertRaises(FeedExecutionError):
-                        execution(CONTEXT, build_feed_provider_input(planning()))
+                        execution(CONTEXT, prepared_input())
                     self.assertEqual(client.requests, [])
                     self.assertEqual(searches, [])
 
@@ -114,7 +122,7 @@ class IterativeResearchTests(unittest.TestCase):
             returned.append(result)
             return result
         with patch.object(execution.runner, "run_structured", side_effect=capture) as run:
-            prepared = build_feed_provider_input(planning())
+            prepared = prepared_input()
             result = execution(CONTEXT, prepared)
         self.assertIs(run.call_args.args[0], prepared)
         self.assertIs(result, returned[0])
@@ -150,7 +158,7 @@ class IterativeResearchTests(unittest.TestCase):
                 return super().generate(messages, tools)
         client = EvidenceDrivenFake([ModelTurn(tool_calls=[search_call()])])
         execution, _, searches = research_runner([], client=client)
-        result = execution(CONTEXT, build_feed_provider_input(planning()))
+        result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual([args.query for _, args in searches],
                          ["Dementia sleep research", "Caregiver sleep support research"])
@@ -161,7 +169,7 @@ class IterativeResearchTests(unittest.TestCase):
     def test_third_search_result_can_be_followed_by_normal_final_output(self):
         turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research angle {i}")]) for i in range(1, 4)]
         execution, client, searches = research_runner(turns + [final_turn("search_3")])
-        result = execution(CONTEXT, build_feed_provider_input(planning()))
+        result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.execution.tool_rounds, 3)
         self.assertEqual(result.execution.total_tool_calls, 3)
@@ -172,7 +180,7 @@ class IterativeResearchTests(unittest.TestCase):
     def test_fourth_tool_call_is_not_executed(self):
         execution, client, searches = research_runner([
             ModelTurn(tool_calls=[search_call(f"search_{i}")]) for i in range(1, 5)])
-        result = execution(CONTEXT, build_feed_provider_input(planning()))
+        result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")
         self.assertEqual(result.execution.total_tool_calls, 3)
         self.assertEqual(len(searches), 3)
@@ -195,7 +203,7 @@ class IterativeResearchTests(unittest.TestCase):
                 if status == "completed":
                     turns.append(final_turn(f"search_{identifier}"))
                 execution, _, searches = research_runner(turns)
-                result = execution(CONTEXT, build_feed_provider_input(planning()))
+                result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)
                 self.assertEqual(result.execution.total_tool_calls, count)
                 self.assertEqual(result.execution.tool_rounds, rounds)
@@ -210,7 +218,7 @@ class IterativeResearchTests(unittest.TestCase):
                 else:
                     turns.append(final_turn(empty=True))
                 execution, client, searches = research_runner(turns, empty_queries={"Dementia sleep research"})
-                result = execution(CONTEXT, build_feed_provider_input(planning()))
+                result = execution(CONTEXT, prepared_input())
                 tool = next(m for m in client.requests[1][0] if m.role == "tool")
                 self.assertEqual(json.loads(tool.content), {"success": True,
                     "data": {"query": "Dementia sleep research", "evidence": []}, "error": None})
@@ -223,7 +231,7 @@ class IterativeResearchTests(unittest.TestCase):
         for call_id, index in (("nonexistent_call", 0), ("search_1", 1)):
             execution, _, _ = research_runner([ModelTurn(tool_calls=[search_call()]), final_turn(call_id, index)])
             with self.subTest(call_id=call_id, index=index):
-                result = execution(CONTEXT, build_feed_provider_input(planning()))
+                result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, "invalid_response")
                 self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
                 self.assertIsNone(result.output)
@@ -237,7 +245,7 @@ class IterativeResearchTests(unittest.TestCase):
             (ModelTurn.model_construct(text=123, tool_calls=[]), "invalid_response", "invalid_model_turn")):
             with self.subTest(status=status, code=code):
                 execution, _, _ = research_runner([turn])
-                result = execution(CONTEXT, build_feed_provider_input(planning()))
+                result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)
                 self.assertEqual(result.execution.errors[-1].code, code)
                 self.assertIsNone(result.output)

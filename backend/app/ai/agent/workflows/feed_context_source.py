@@ -172,8 +172,8 @@ class FeedContextSource(Protocol):
         Summary and use their own clock. ProductionFeedContextSource in
         feed_context_backend_source.py uses the actual FeedReadSnapshot with
         explicit field projection, not those aggregates or /feed HTTP APIs.
-        DevelopmentFeedContextSource remains a separate partial-read compatibility
-        path. Production keeps real CareLog/Summary reads and pre-cap counts;
+        ProductionFeedContextSource is the only official Backend Source.
+        Production keeps real CareLog/Summary reads and pre-cap counts;
         live DB verification and HTTP/API activation are separate integration work.
         """
         ...
