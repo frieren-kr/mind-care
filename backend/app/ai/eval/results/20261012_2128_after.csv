@@ -1,0 +1,10 @@
+﻿profile,profile_name,query_type,query,P@5,P@10,nDCG@10,2점회수@10,DB_P@10(채점가능),DB_judged@10
+P1,수면장애,ko_profile,"경도 단계, 밤에 잠을 못 주무시는 어머니를 돌보는 딸",1.0,0.7,0.262,0.0,0.667,0.9
+P1,수면장애,ko_colloquial,엄마가 밤에 자꾸 깨서 잠을 못 주무세요. 어떻게 해야 하나요?,1.0,1.0,0.646,0.267,1.0,0.7
+P1,수면장애,en_rewritten,sleep disturbance in mild dementia: interventions family caregivers can use at home,1.0,1.0,0.629,0.2,1.0,0.9
+P2,배회·공격성,ko_profile,"중등도 단계, 저녁마다 집 밖으로 나가려는 아버지를 돌보는 배우자",1.0,0.7,0.263,0.0,0.778,0.9
+P2,배회·공격성,ko_colloquial,남편이 저녁만 되면 자꾸 밖에 나가려고 하고 화를 내요. 어떻게 해야 하나요?,0.8,0.8,0.276,0.0,0.714,0.7
+P2,배회·공격성,en_rewritten,"wandering, agitation and sundowning in moderate dementia: non-pharmacological strategies for family caregivers",0.8,0.6,0.512,0.13,0.625,0.8
+P3,약물·비약물 치료,ko_profile,"막 진단받은 경도 환자의 가족, 약물·비약물 치료 정보를 찾는 중",0.8,0.4,0.207,0.0,0.5,0.8
+P3,약물·비약물 치료,ko_colloquial,엄마가 치매 초기 진단을 받았는데 어떤 치료를 받을 수 있나요?,0.8,0.8,0.43,0.143,0.833,0.6
+P3,약물·비약물 치료,en_rewritten,effectiveness of pharmacological and non-pharmacological treatments for mild dementia and mild cognitive impairment,0.8,0.7,0.403,0.143,0.7,1.0

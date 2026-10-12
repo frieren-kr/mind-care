@@ -143,6 +143,44 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "\d medical_visits"
 `visit_reason`부터 `follow_up_plan`까지 일곱 컬럼이 보이면 완료입니다.
 (논문 `papers`·임베딩 `paper_embeddings` 데이터는 건드리지 않습니다.)
 
+### ⚠️ 이미 DB를 띄워 둔 사람은 006도 직접 적용해야 합니다
+
+위와 같은 이유로 `006_profile_summaries_index.sql`도 자동 반영되지 않습니다.
+월간 요약 `profile_summaries`에 인덱스 2개를 추가하는 마이그레이션입니다.
+
+- `idx_profile_summaries_user_period` — 개인화 피드가 월간 요약 1건을 고를 때 쓰는 조회 인덱스
+  (001에는 PK(`id`) 인덱스만 있어서 `user_id`로 찾으면 테이블 전체를 읽습니다).
+- `profile_summaries_user_period_key` — `(user_id, period_start, period_end)` UNIQUE.
+  `save_profile_summary()`가 "같은 기간이면 갱신"(upsert)할 때 `ON CONFLICT` 대상이 됩니다.
+  이게 없으면 같은 달 요약을 두 번 돌릴 때 행이 2개 쌓입니다.
+
+`backend/` 에서 아래 명령으로 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\006_profile_summaries_index.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/006_profile_summaries_index.sql
+```
+
+`CREATE INDEX IF NOT EXISTS`라서 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d profile_summaries"
+```
+
+`idx_profile_summaries_user_period`와 `profile_summaries_user_period_key`가 보이면 완료입니다.
+
+> UNIQUE 인덱스라서, **이미 같은 기간 요약이 중복으로 쌓여 있으면 생성이 실패합니다.**
+> 그럴 때는 아래로 중복을 확인한 뒤 정리하고 다시 적용하세요.
+>
+> ```bash
+> docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT user_id, period_start, period_end, count(*) FROM profile_summaries GROUP BY 1,2,3 HAVING count(*) > 1;"
+> ```
+
 ### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
 
 팀은 **같은 논문 1,000편 + bge-m3 임베딩 1,000개**를 기준 데이터로 공유합니다.
@@ -177,7 +215,7 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 ### 개발용 샘플 사용자 넣기
 
 피드·추천·챗봇을 개발할 때 쓸 예시 간병인 4명(환자 5명)을 넣습니다. 실제 사람 정보가 아닙니다.
-005까지 적용한 DB가 떠 있는 상태로, 가상환경을 켜고 `backend/` 에서 실행하세요.
+006까지 적용한 DB가 떠 있는 상태로, 가상환경을 켜고 `backend/` 에서 실행하세요.
 
 ```bash
 python -m scripts.seed_dev_profiles   # 예시 프로필 적재 (이미 있으면 건너뜀 — 여러 번 실행해도 안전)

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 
+from app.api.evidence_grade import with_grade, with_grades
 from app.db import functions
 from app.schemas import PaperDetailResponse, PaperListResponse
 
@@ -19,7 +20,9 @@ def list_papers(
     offset: int = Query(0, ge=0, description="건너뛸 개수"),
 ) -> PaperListResponse:
     """최신 발행일 순 논문 목록. 초록은 빠져 있다 (상세에서 받는다)."""
-    return functions.list_papers(limit=limit, offset=offset)
+    papers = functions.list_papers(limit=limit, offset=offset)
+    # 근거 등급 A~D는 조회 계층이 아니라 여기서 붙인다 (evidence_grade.py 설명 참고).
+    return papers.model_copy(update={"items": with_grades(papers.items)})
 
 
 @router.get(
@@ -38,4 +41,4 @@ def get_paper(paper_id: UUID) -> PaperDetailResponse:
     paper = functions.get_paper_detail(paper_id)
     if paper is None:
         raise HTTPException(status_code=404, detail="논문을 찾을 수 없습니다.")
-    return paper
+    return with_grade(paper)

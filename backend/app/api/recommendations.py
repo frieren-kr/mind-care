@@ -23,6 +23,7 @@ from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.feed import FeedWorkflow, FeedWorkflowError
 from app.ai.agent.workflows.feed_context_prepare import prepare_demo_feed_input
 from app.ai.retrieval.search import search
+from app.api.evidence_grade import with_grades
 from app.db import functions, user_functions
 from app.schemas import RecommendationItem, RecommendationResponse
 from app.user_schemas import APP_TIMEZONE, PatientOut, UserProfileContext
@@ -83,7 +84,9 @@ def search_recommendations(user_id: UUID, patient: PatientOut, k: int) -> Recomm
         # 이름이 같은 필드만 옮겨진다 (초록 등 나머지는 버려진다).
         items.append(RecommendationItem(**paper.model_dump(), relevance_score=e.relevance_score))
     return RecommendationResponse(
-        user_id=user_id, patient_id=patient.id, mode="search", query=query, items=items
+        user_id=user_id, patient_id=patient.id, mode="search", query=query,
+        # 근거 등급 A~D는 응답을 만드는 이 계층에서 붙인다 (evidence_grade.py 설명 참고).
+        items=with_grades(items),
     )
 
 
@@ -116,7 +119,8 @@ def backend_handoff(result: StructuredAgentResult) -> list[RecommendationItem]:
             personal_reason=item.personal_reason,
             category=item.category,
         ))
-    return items
+    # 근거 등급 A~D는 응답을 만드는 이 계층에서 붙인다 (evidence_grade.py 설명 참고).
+    return with_grades(items)
 
 
 @router.get(
