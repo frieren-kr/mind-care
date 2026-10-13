@@ -190,7 +190,6 @@ class BackendHandoffTests(unittest.TestCase):
 
         self.assertEqual(len(items), 3)
         # AI 결과에서 온 칸 — 빠진 항목(1, 3번) 때문에 번호가 밀리지 않아야 한다.
-        self.assertTrue(all(i.headline is None and i.summary_bullets is None for i in items))
         self.assertEqual([i.personal_reason for i in items], ["이유 0", "이유 2", "이유 4"])
         for item, pmid in zip(items, DB_PMIDS):
             self.assertEqual(item.category, "care")
@@ -267,8 +266,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
             self.assertEqual((item.summary_background, item.summary_finding, item.summary_limitation),
                              (f"DB background {i}", f"DB finding {i}", f"DB limitation {i}"))
             self.assertEqual((item.category, item.evidence_grade), ("care", "B"))
-            self.assertIsNone(item.headline)
-            self.assertIsNone(item.summary_bullets)
+            self.assertFalse(hasattr(item, "headline") or hasattr(item, "summary_bullets"))
             self.assertIsNone(item.relevance_score)
         self.assertEqual(result.model_dump(), before)
 
@@ -298,8 +296,8 @@ class OfflineFeedHandoffTests(unittest.TestCase):
             self.assertEqual(item["summary_finding"], f"DB finding {i}")
             self.assertEqual(item["category"], "care")
             self.assertEqual(item["evidence_grade"], "B")
-            self.assertIsNone(item["headline"])
-            self.assertIsNone(item["summary_bullets"])
+            self.assertNotIn("headline", item)
+            self.assertNotIn("summary_bullets", item)
         self.search.assert_not_called()
 
     def test_http_k_preserves_recommendation_order(self):
@@ -334,16 +332,16 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         with self.assertLogs("app.api.recommendations", "WARNING"):
             body = self.get().json()
         self.assertEqual(body["mode"], "search")
-        self.assertIsNone(body["items"][0]["headline"])
-        self.assertIsNone(body["items"][0]["summary_bullets"])
+        self.assertNotIn("headline", body["items"][0])
+        self.assertNotIn("summary_bullets", body["items"][0])
         self.search.assert_called_once()
 
     def test_http_default_search_is_unchanged(self):
         body = self.get().json()
         self.assertEqual(body["mode"], "search")
         self.assertEqual(len(body["queries"]), 2)
-        self.assertIsNone(body["items"][0]["headline"])
-        self.assertIsNone(body["items"][0]["summary_bullets"])
+        self.assertNotIn("headline", body["items"][0])
+        self.assertNotIn("summary_bullets", body["items"][0])
         self.read_snapshot.assert_not_called()
 
     def test_http_zero_patients_keeps_ai_cold_start_and_general_search(self):
@@ -385,7 +383,7 @@ class EndpointTests(unittest.TestCase):
         self.assertTrue(all(body["queries"]))
         self.assertEqual(len(body["items"]), SEARCH_ITEMS)
         self.assertIsNotNone(body["items"][0]["relevance_score"])
-        self.assertIsNone(body["items"][0]["headline"])
+        self.assertNotIn("headline", body["items"][0])
         return body
 
     def patient_ids(self, user_id) -> list[str]:
@@ -434,8 +432,8 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(provider_input["feed_scope"], "caregiver_all")
         self.assertEqual(len(provider_input["patients"]), 1)
         for item, pmid in zip(body["items"], DB_PMIDS):
-            self.assertIsNone(item["headline"])
-            self.assertIsNone(item["summary_bullets"])
+            self.assertNotIn("headline", item)
+            self.assertNotIn("summary_bullets", item)
             self.assertTrue(item["personal_reason"])
             self.assertEqual(item["category"], "care")
             self.assertIsNone(item["relevance_score"])

@@ -204,7 +204,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
 - **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, evidence_grade?, title_ko?, summary_background?, summary_finding?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
   - `relevance_score?`(float) — `mode="search"`일 때만. **`ai`면 `None`** (AI 결과에는 점수가 없다).
-  - `headline?, summary_bullets?`(`list[str]`), `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — `mode="ai"`일 때만. `search`면 모두 `None`.
+  - `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — **AI 결과에서 오는 칸은 이 둘뿐이다.**
+    `mode="ai"`일 때만 채워지고 `search`면 둘 다 `None`.
+  - ★2026-10-13 `headline` / `summary_bullets` **제거** (허웅 님 `FeedAnswerV2`에서 AI 결과의 두 칸이 빠졌다).
+    카드 제목은 `title_ko`(없으면 `title`), 요약은 요약 3칸을 쓴다 — 모두 DB(`paper_analysis`)에서 온다.
 - **RecommendationResponse**: `user_id`, `patient_id?`(**요청에 준 값 그대로**, 안 줬으면 `None` = 관리 환자 전체 기준),
   `mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지),
   `queries?`(`list[str]` — 이번에 쓴 검색어 목록. `search`일 때만, `ai`면 `None`. ★2026-10-13 `query: str` → `queries: list[str]`),
@@ -428,8 +431,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     - **`patient_id`를 줘도 AI 방식은 관리 환자 전체(0~20명)가 기준이다** (`feed_scope="caregiver_all"`).
       환자가 0명이면 빈 환자 목록으로 그대로 돈다(cold start).
     - `backend_handoff(result)`는 순수 함수다. `result.output.items`와 `result.sources`를 짝지어
-      `sources[].pmid`로 `get_paper_details_by_pmids()`를 한 번 부르고, `headline` / `summary_bullets` /
-      `personal_reason` / `category`는 AI 결과에서, 나머지(`id`, `title`, … 요약 3칸)는 DB에서 채운다.
+      `sources[].pmid`로 `get_paper_details_by_pmids()`를 한 번 부르고, `personal_reason` / `category`만 AI 결과에서,
+      나머지(`id`, `title`, `title_ko`, … 요약 3칸)는 DB에서 채운다.
       **`pmid`가 없거나 DB에 없는 항목은 뺀다.** `relevance_score`는 `null`.
   - **`mode="search"`** — `search_recommendations()`. 환자마다 `build_query()`로 검색어를 하나씩 만들어
     현서 님 `search_by_queries(검색어 목록, k)`로 합친다(검색어별 상위 논문을 번갈아 뽑고 중복은 한 번만) →
@@ -524,6 +527,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   (bge-m3 로드, CPU), 그 뒤로는 약 0.4초.
 - **`/recommendations` ↔ FeedWorkflow 연결(백엔드 쪽) 구현·검증 완료** (2026-10-11, 실 DB). **응답 계약 변경**:
   `mode` 추가, `query`·`relevance_score` null 가능, `headline`/`summary_bullets`/`category` 추가, `k` 최대 20 → 5.
+  (`headline`/`summary_bullets`는 2026-10-13에 다시 제거했다 — 아래 참고.)
   가짜 `feed_execution`으로 `mode="ai"`(AI 칸 + DB 칸), 예외·0건일 때 `search` 폴백, 400·404·422를
   `tests/test_recommendations.py`(7건)로 확인했다. **실제 `feed_execution`은 아직 없어서(`get_feed_execution()`이
   `None`) 지금 응답은 항상 `mode="search"`다.**
@@ -541,6 +545,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   가짜 LLM으로 정상 저장·초록 없는 논문 건너뛰기·형식 오류 미저장·dry-run 미저장·기존 등급 유지를
   `tests/test_summarize_papers.py`(12건, 다듬기·자동 검사·재생성 포함)로 확인했다. **실제 OpenAI 호출과 1,000편 생성은 아직 하지 않았다**
   (`paper_analysis`의 요약은 0건).
+- **추천 응답에서 `headline`·`summary_bullets` 제거** (2026-10-13). **응답 계약 변경**: 허웅 님 `FeedAnswerV2`에서
+  AI 결과의 두 칸이 빠진 데 맞춰 `RecommendationItem`에서도 지웠다. AI 결과에서 오는 칸은 `personal_reason`·`category`뿐이고,
+  제목(`title_ko`)과 요약 3칸은 DB에서 온다. `frontend/`의 타입·목업에는 아직 `summary_bullets`가 남아 있다(프론트 담당 영역).
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**

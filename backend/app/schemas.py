@@ -301,9 +301,8 @@ class RecommendationItem(BaseModel):
     relevance_score: Optional[float] = Field(
         default=None, description="검색어와의 코사인 유사도 (0~1, 클수록 관련). mode='ai'면 null"
     )
-    # --- 아래 4개는 AI(FeedWorkflow) 결과. mode='search'면 모두 null ---
-    headline: Optional[str] = Field(default=None, description="카드 제목 한 줄")
-    summary_bullets: Optional[list[str]] = Field(default=None, description="핵심 요약 1~5줄")
+    # --- 아래 2개만 AI(FeedWorkflow) 결과. mode='search'면 모두 null ---
+    # (2026-10-13: headline / summary_bullets 제거 — 제목은 title_ko, 요약은 아래 3칸으로 DB에서 온다)
     personal_reason: Optional[str] = Field(default=None, description="왜 이 사용자에게 관련 있는지")
     category: Optional[Literal["treatment", "care", "prevention", "diagnosis"]] = None
     # --- 아래는 paper_analysis. 요약이 아직 없으면 모두 null ---
@@ -354,8 +353,6 @@ class RecommendationResponse(BaseModel):
                         "journal": "Alzheimer's & Dementia",
                         "pubmed_url": "https://pubmed.ncbi.nlm.nih.gov/12345678/",
                         "relevance_score": 0.6123,
-                        "headline": None,
-                        "summary_bullets": None,
                         "personal_reason": None,
                         "category": None,
                         "study_type": "rct",
