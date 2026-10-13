@@ -124,8 +124,8 @@ def context_prepare(context: AgentContext) -> str:
 def backend_handoff(result: StructuredAgentResult) -> list[RecommendationItem]:
     """FeedWorkflow 3단계. AI 결과에 DB의 논문 정보를 붙인다.
 
-    headline / summary_bullets / personal_reason / category는 AI 결과에서,
-    나머지(id, title, journal, … 요약 3칸)는 DB에서 채운다.
+    personal_reason / category는 AI 결과에서,
+    논문 제목·요약 3칸을 비롯한 나머지(id, title, journal, …)는 DB에서 채운다.
     pmid가 없거나(가이드라인 등) DB에 없는 항목은 뺀다.
     """
     pairs = [(item, source) for item, source in zip(result.output.items, result.sources) if source.pmid]
@@ -138,8 +138,6 @@ def backend_handoff(result: StructuredAgentResult) -> list[RecommendationItem]:
             continue
         items.append(RecommendationItem(
             **paper.model_dump(),
-            headline=item.headline,
-            summary_bullets=item.summary_bullets,
             personal_reason=item.personal_reason,
             category=item.category,
         ))
@@ -163,7 +161,7 @@ def get_recommendations(
 ) -> RecommendationResponse:
     """간병인의 관리 환자 전체를 기준으로 논문을 최대 `k`편 돌려준다.
 
-    - `mode="ai"`: AI가 고른 논문 + `headline` / `summary_bullets` / `personal_reason` / `category`.
+    - `mode="ai"`: AI가 고른 논문 + `personal_reason` / `category`. 제목·요약은 DB에서 온다.
       `patient_id`와 관계없이 관리 환자 전체가 기준이다.
     - `mode="search"`: 검색어(`queries`)와 가까운 논문 + `relevance_score`. AI 방식을 아직 못 쓰거나
       실패했거나 결과가 0건일 때의 대신 응답이다. 환자마다 검색어를 하나씩 만들고,

@@ -81,7 +81,7 @@ class FakeFeedDependencies:
         self.personalization = None
         self.agent_result = None
         self.client = client if client is not None else FakeLLMClient(turns if turns is not None else [
-            ModelTurn(text='{"schema_version":"1","response_type":"feed","items":[]}')
+            ModelTurn(text='{"schema_version":"2","response_type":"feed","items":[]}')
         ])
         self.execution = FeedExecutionV1(self.client,
             build_feed_test_registry(query_validator=self.validate_query, handler=handler))

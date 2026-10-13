@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from .. import agent_loop_runner
 from ..agent_loop_runner import AgentLoopRunner
-from ..outputs import ChatAnswerV1, FeedAnswerV1, StructuredAgentResult
+from ..outputs import ChatAnswerV1, FeedAnswerV2, StructuredAgentResult
 from ..registry import ToolName, production_registry
 from ..schemas import AgentResult, ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
@@ -56,7 +56,7 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
         handed = deps.saved[0]
         self.assertEqual(handed, deps.agent_result)
-        self.assertIsInstance(handed.output, FeedAnswerV1)
+        self.assertIsInstance(handed.output, FeedAnswerV2)
         self.assertEqual(handed.sources[0].pmid, "FAKE-PMID")
         self.assertEqual(handed.sources[0].title, "[FAKE] Dementia sleep orchestration fixture")
         self.assertEqual(handed.sources[0].source_ref, handed.output.items[0].source_ref)
@@ -197,7 +197,7 @@ class FeedWorkflowTests(unittest.TestCase):
         for mutate in (lambda r: setattr(r.output, "response_type", "chat"),
                        lambda r: r.sources.clear(),
                        lambda r: setattr(r.execution, "request_id", "another request"),
-                       lambda r: setattr(r.output.items[0], "headline", "")):
+                       lambda r: setattr(r.output.items[0], "personal_reason", "")):
             deps = FakeFeedDependencies(CONTEXT, turns=[ModelTurn(tool_calls=[search_call()]), final_turn()])
             workflow = deps.workflow()
             def execute(context, provider_input):
@@ -241,8 +241,8 @@ class FeedWorkflowTests(unittest.TestCase):
             self.assertIsNot(result.output.items[0].source_ref,
                              original.output.items[0].source_ref)
             self.assertIsNot(result.sources[0].source_ref, original.sources[0].source_ref)
-            result.output.items[0].headline = "Synthetic handoff mutation"
-            result.output.items[0].summary_bullets.append("Synthetic handoff bullet")
+            result.output.items[0].personal_reason = "Synthetic handoff mutation"
+            result.output.items[0].category = "prevention"
             result.sources[0].title = "Synthetic handoff source"
             result.output.items[0].source_ref.evidence_index = 1
             result.sources[0].source_ref.evidence_index = 1
@@ -253,7 +253,8 @@ class FeedWorkflowTests(unittest.TestCase):
         workflow.backend_handoff = mutate_handoff
         self.assertIs(workflow.run(CONTEXT), deps.receipt)
         self.assertEqual(deps.agent_result.model_dump(), original_payload[0])
-        self.assertEqual(deps.saved[0].output.items[0].headline, "Synthetic handoff mutation")
+        self.assertEqual(deps.saved[0].output.items[0].personal_reason, "Synthetic handoff mutation")
+        self.assertEqual(deps.saved[0].output.items[0].category, "prevention")
         self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
 
     def test_failed_search_evidence_cannot_be_cited_in_final_feed(self):

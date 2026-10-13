@@ -6,7 +6,7 @@ No DB writes, paper identity mapping, clinical filtering or fake persistence.
 import json
 from typing import Callable, Literal, Protocol
 
-from ..outputs import FeedAnswerV1, StructuredAgentResult
+from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..schemas import AgentContext
 
 
@@ -73,7 +73,7 @@ class FeedWorkflow:
         if not isinstance(result, StructuredAgentResult):
             raise TypeError("Structured Feed execution required")
         validated = StructuredAgentResult.model_validate(result)
-        if (validated.execution.status != "completed" or not isinstance(validated.output, FeedAnswerV1)
+        if (validated.execution.status != "completed" or not isinstance(validated.output, FeedAnswerV2)
                 or validated.execution.request_id != context.request_id):
             raise ValueError("Completed Feed output for this request required")
         return self.backend_handoff(context, validated)

@@ -1,7 +1,7 @@
 """Feed policy and one shared structured Agent loop over prepared input."""
 from ..agent_loop_runner import AgentLoopRunner
 from ..clients.base import LLMClient
-from ..outputs import FeedAnswerV1, StructuredAgentResult
+from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..registry import ToolName, ToolRegistry
 from ..schemas import AgentContext
 from .feed_prompts import FeedPromptBuilder
@@ -18,7 +18,7 @@ class FeedExecutionV1:
     """Own Feed runner configuration, not Context selection or a Tool loop.
 
     Input is prepared by Stage 1. Runner failure statuses remain normal results;
-    the Workflow's handoff boundary admits only completed FeedAnswerV1 results.
+    the Workflow's handoff boundary admits only completed FeedAnswerV2 results.
     """
 
     def __init__(self, client: LLMClient, registry: ToolRegistry, *,
@@ -49,6 +49,6 @@ class FeedExecutionV1:
             self._validate_runner()
             if not isinstance(provider_input, str) or not provider_input.strip():
                 raise TypeError("Prepared Feed input required")
-            return self.runner.run_structured(provider_input, context, output_model=FeedAnswerV1)
+            return self.runner.run_structured(provider_input, context, output_model=FeedAnswerV2)
         except Exception:
             raise FeedExecutionError() from None

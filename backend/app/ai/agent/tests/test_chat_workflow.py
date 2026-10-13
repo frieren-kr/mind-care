@@ -8,7 +8,7 @@ from uuid import UUID
 
 from ..agent_loop_runner import AgentLoopRunner
 from ..executor import ToolExecutor
-from ..outputs import FeedAnswerV1, StructuredAgentResult
+from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import ModelTurn
 from ..testing.chat_workflow_fakes import FakeChatDependencies, STAGES, chat_call, chat_final
@@ -322,7 +322,7 @@ class ChatWorkflowTests(unittest.TestCase):
 
     def test_invalid_structured_output_or_evidence_reference_never_reaches_handoff(self):
         cases = ([ModelTurn(text="PRIVATE not JSON")],
-                 [ModelTurn(text='{"schema_version":"1","response_type":"feed","items":[]}')],
+                 [ModelTurn(text='{"schema_version":"2","response_type":"feed","items":[]}')],
                  [chat_final(answer=" ")], [chat_final(refs=[reference("missing")])],
                  [ModelTurn(tool_calls=[search()]), chat_final(refs=[reference(index=1)])],
                  [ModelTurn(tool_calls=[chat_call()]), chat_final(refs=[reference("profile_1")])],
@@ -368,7 +368,7 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_completed_feed_result_is_rejected_at_chat_handoff(self):
         deps = FakeChatDependencies([chat_final()])
         result = deps.execution(CONTEXT, '{}')
-        result.output = FeedAnswerV1(schema_version="1", response_type="feed", items=[])
+        result.output = FeedAnswerV2(schema_version="2", response_type="feed", items=[])
         result.execution.final_answer = None
         result = StructuredAgentResult.model_validate(result)
         workflow = deps.workflow()

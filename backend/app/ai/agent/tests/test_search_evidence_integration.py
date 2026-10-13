@@ -8,7 +8,7 @@ from app.ai.retrieval import search as rag
 from ..adapters.rag_evidence import RagEvidenceRetriever
 from ..agent_loop_runner import AgentLoopRunner
 from ..composition import build_evidence_registry
-from ..outputs import ChatAnswerV1, FeedAnswerV1
+from ..outputs import ChatAnswerV1, FeedAnswerV2
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec, production_registry
 from ..schemas import ModelTurn
 from ..testing.chat_workflow_fakes import chat_final
@@ -59,7 +59,7 @@ class SearchEvidenceIntegrationTests(TestCase):
              patch.object(rag, "get_papers_by_ids", return_value=[paper]), \
              patch.object(rag, "search", wraps=rag.search) as search:
             result = AgentLoopRunner(client, build_evidence_registry()).run_structured(
-                "Synthetic request", self.context, output_model=FeedAnswerV1)
+                "Synthetic request", self.context, output_model=FeedAnswerV2)
         self.assertEqual(result.execution.status, "completed")
         search.assert_called_once_with(query="Dementia sleep research", k=5)
         embed.assert_called_once_with("Dementia sleep research")
@@ -74,7 +74,7 @@ class SearchEvidenceIntegrationTests(TestCase):
         result = execution(self.context, prepared_input())
         self.assertEqual((execution.runner.max_tool_rounds, execution.runner.max_total_tool_calls), (3, 3))
         self.assertEqual(result.execution.status, "completed")
-        self.assertIsInstance(result.output, FeedAnswerV1)
+        self.assertIsInstance(result.output, FeedAnswerV2)
         self.assertEqual(result.execution.errors, [])
         self.assertEqual(result.sources[0].source_ref, result.output.items[0].source_ref)
         for field in ("pmid", "doi", "title", "study_type", "evidence_type", "source_url", "journal"):

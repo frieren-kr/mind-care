@@ -4,7 +4,7 @@ import unittest
 from uuid import UUID
 
 from ..prompts import DefaultPromptBuilder, build_structured_output_policy
-from ..outputs import ChatAnswerV1, FeedAnswerV1
+from ..outputs import ChatAnswerV1, FeedAnswerV2
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentContext, ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
@@ -37,7 +37,7 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                     )])
                 client = FakeLLMClient([
                     ModelTurn(tool_calls=[ToolCall(id="search_1", name="search_evidence", arguments={"query": "dementia sleep research"})]),
-                    ModelTurn(text='{"schema_version": "1", "response_type": "feed", "items": []}'
+                    ModelTurn(text='{"schema_version": "2", "response_type": "feed", "items": []}'
                               if structured else "synthetic final"),
                 ])
                 execution = FeedExecutionV1(client, ToolRegistry((
@@ -83,7 +83,11 @@ class FeedPromptPrivacyTests(unittest.TestCase):
         self.assertEqual(json.loads(messages[1].content)["trusted_agent_context"], CONTEXT.model_dump(mode="json"))
 
     def test_cold_start_policy_is_feed_only_and_does_not_force_empty_items(self):
-        feed_policy = build_structured_output_policy(FeedAnswerV1).content
+        feed_policy = build_structured_output_policy(FeedAnswerV2).content
+        for retired_field in ('"headline"', '"summary_bullets"'):
+            self.assertNotIn(retired_field, feed_policy)
+        for required_field in ('"source_ref"', '"personal_reason"', '"category"'):
+            self.assertIn(required_field, feed_policy)
         chat_policy = build_structured_output_policy(ChatAnswerV1).content
         self.assertIn("Cold Start", feed_policy)
         self.assertIn("개인화 정보가 비어 있다는 이유만으로 items=[]를 강제하지 않는다", feed_policy)
@@ -100,7 +104,7 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                          "여러 환자의 신호를 한 환자 상태로 합성하지 않는다", "임상 사실을 추론하거나 진단하지 않는다",
                          "충분하면 추가 검색을 하지 않는다", "후속 query", "의미상 동일한 검색",
                          "search_evidence만 사용", "최대 3회", "3번째 Tool 결과", "4번째 Tool Call",
-                         "top_k는 5", "서버 강제를 보장하는 것은 아니다", "FeedAnswerV1 structured output",
+                         "top_k는 5", "서버 강제를 보장하는 것은 아니다", "FeedAnswerV2 structured output",
                          "효과 없음/안전함/임상적 부재"):
             self.assertIn(required, policy)
         self.assertNotIn("승인한 일반화된 연구 query만", policy)

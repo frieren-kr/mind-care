@@ -104,10 +104,10 @@ Stage 1 context_prepare:
   → FeedContextSourceSnapshot → DefaultFeedContextLoader
   → FeedPersonalizationContextV1 → prepare_production_feed_input() → 최소 JSON
 Stage 2 feed_execution:
-  같은 FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV1) 1회
-  → LLM query ↔ search_evidence → FeedAnswerV1 / StructuredAgentResult
+  같은 FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV2) 1회
+  → LLM query ↔ search_evidence → FeedAnswerV2 / StructuredAgentResult
 Stage 3 backend_handoff:
-  completed + FeedAnswerV1 + 현재 request 확인 → 기존 wrapper 재검증 → 필수 Backend Handoff
+  completed + FeedAnswerV2 + 현재 request 확인 → 기존 wrapper 재검증 → 필수 Backend Handoff
 ```
 
 **실행 Context와 Cold Start.** 기존 `AgentContext`의 user_id는 유효한 UUID 필수이며,
@@ -145,10 +145,10 @@ Workflow에는 별도 Runner, Retrieval Planner, Plan parameter, agent_stage 또
 run_feed_agent_loop seam이 없다. Wrapper는 공용 Runner를 요청당 한 번 호출하며,
 Tool 반복/timeout/structured parser/evidence resolution은 공용 엔진에 위임한다.
 
-**Backend Handoff.** 필수 `backend_handoff(context, result)` callable에 기존 V1 output과
+**Backend Handoff.** 필수 `backend_handoff(context, result)` callable에 FeedAnswerV2 output과
 server-resolved sources를 함께 넘긴다. 기존 StructuredAgentResult validator로 nested 계약과
-출처 참조 순서를 재검증하고 completed FeedAnswerV1 및 현재 request의 결과만 전달한다.
-다른 LLM 호출, 새로운 V2 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
+출처 참조 순서를 재검증하고 completed FeedAnswerV2 및 현재 request의 결과만 전달한다.
+다른 LLM 호출, 추가 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
 정상 empty Feed는 허용한다. 실패 status/invalid output/출처 오류는 Handoff를 호출하지 않는다.
 Recoverable Tool error 뒤 Runner가 검증된 completed 결과를 반환하면 기존 의미대로 전달하며
 execution.errors를 보존한다. tool_timeout 등의 failed 결과는 전달하지 않는다.
@@ -816,10 +816,10 @@ sanitize하거나 완전한 비식별화를 보장하지 않는다. 실제 CareL
 LLM이 일반화된 query를 만들고 실제 Evidence를 본 뒤 충분하면 중단하거나 후속 검색한다.
 정적 Topic Catalog/fixed query/alias matching/priority/greedy selection 및 별도 Plan DTO는 없다.
 
-**Structured Output.** Wrapper는 공용 `run_structured(..., output_model=FeedAnswerV1)` 결과를
+**Structured Output.** Wrapper는 공용 `run_structured(..., output_model=FeedAnswerV2)` 결과를
 변환 없이 반환한다. Runner의 validate_final_output/evidence reference resolution을 그대로 사용하며
 없는 call/index는 거부한다. 서버 provenance는 successful search Tool Call → EvidencePackage의
-0-based evidence_index → FeedAnswerV1.source_ref → ResolvedEvidence다. Query가 특정 profile
+0-based evidence_index → FeedAnswerV2.source_ref → ResolvedEvidence다. Query가 특정 profile
 signal에서 나왔는지, personal_reason의 의미적 정확성까지 증명하지 않는다.
 
 **Failure.** Wrapper는 Runner의 limit_reached/provider_error/invalid_response/failed status를
@@ -1294,10 +1294,10 @@ deterministic하게 수행할 책임이다. 해당 Workflow와 DB persistence는
 `generate(messages, tools) -> ModelTurn`도 그대로다.
 
 ```python
-from app.ai.agent.outputs import ChatAnswerV1, FeedAnswerV1
+from app.ai.agent.outputs import ChatAnswerV1, FeedAnswerV2
 
 chat = engine.run_structured(user_input, context, output_model=ChatAnswerV1)
-feed = engine.run_structured(user_input, context, output_model=FeedAnswerV1)
+feed = engine.run_structured(user_input, context, output_model=FeedAnswerV2)
 ```
 
 `run_structured()`만 서버가 선택한 최종 JSON Schema/콘텐츠 정책을 system message로
@@ -1311,7 +1311,7 @@ Tool Call이 없는 마지막 `ModelTurn.text`를 단일 JSON object로 검증�
 Provider native response_format/strict schema 기능은 연결하지 않았다. 모델이 프롬프트를
 따르지 않으면 서버 검증에서 거부한다. 자동 JSON 수정/markdown 추출/재요청은 하지 않는다.
 
-반환 `StructuredAgentResult`는 `execution: AgentResult`, `output: ChatAnswerV1 | FeedAnswerV1 | None`,
+반환 `StructuredAgentResult`는 `execution: AgentResult`, `output: ChatAnswerV1 | FeedAnswerV2 | None`,
 `sources: list[ResolvedEvidence]`의 별도 wrapper다. Chat 성공 시 `execution.final_answer`는
 검증된 `output.answer`에서만 파생한다. Feed 성공 시 `execution.final_answer=None`이며,
 JSON을 문자열 답변에 넣지 않는다. 실패 시 output=None, sources=[], final_answer=None이다.
@@ -1321,6 +1321,12 @@ Tool 오류 후 참조 없는 Chat 설명은 가능하며, `completed`는 의료
 
 ### 콘텐츠 모델과 제한
 
+Feed 출력 클래스는 `FeedAnswerV2`이며 JSON의 `schema_version="2"`를 필수로 요구한다.
+공용 Runner와 구조화 Prompt도 공식 FeedAnswerV2 모델을 직접 참조하며 과거 Feed 모델 별칭은 제공하지 않는다.
+과거 headline/summary_bullets payload를 허용하는 별도 V1 모델은 없으며 두 필드는 extra로 거부한다.
+Paper Detail의 SummaryBullet/SummaryBullets와 summary_bullets 계약은 그대로 유지한다.
+추천 API DTO의 기존 Optional headline/summary_bullets는 제거하지 않으며 Handoff가 값을 생성하지 않는다.
+
 모든 아래 모델은 `AgentModel`의 extra 금지/비유한 수 금지 정책을 상속한다.
 콘텐츠 문자열은 strict string이며 빈 문자열/공백만 있는 문자열을 거부하고 원문을 보존한다.
 `schema_version`과 `response_type`은 기본값 없이 명시적으로 제출해야 한다.
@@ -1329,18 +1335,18 @@ Tool 오류 후 참조 없는 Chat 설명은 가능하며, `completed`는 의료
 |---|---|
 | `EvidenceReference` | `tool_call_id`: 1..256자, `evidence_index`: strict int >=0, 0-based |
 | `ChatAnswerV1` | `schema_version="1"`, `response_type="chat"`, `answer`: 1..12,000자, `citation_refs`: 0..20개 고유 참조 |
-| `FeedContentItemV1` | `source_ref`, `headline`: 1..200자, `summary_bullets`: 1..5개/각 1..500자, `personal_reason`: 1..1,000자, `category`: 단일 treatment/care/prevention/diagnosis |
-| `FeedAnswerV1` | `schema_version="1"`, `response_type="feed"`, `items`: 0..5개, 동일 source_ref 중복 금지 |
+| `FeedContentItemV2` | `source_ref`, `personal_reason`: 1..1,000자, `category`: 단일 treatment/care/prevention/diagnosis. 세 필드 모두 필수 |
+| `FeedAnswerV2` | `schema_version="2"`, `response_type="feed"`, `items`: 0..5개, 동일 source_ref 중복 금지 |
 | `PaperParagraphV1` | `text`: 1..2,000자 |
 | `PaperBodyV1` | `easy`, `detail`: 각각 1..10개 PaperParagraphV1 |
 | `GlossaryEntryV1` | `term`: 1..100자, `meaning`: 1..500자 |
-| `PaperDetailContentV1` | `schema_version="1"`, `response_type="paper_detail"`, `source_ref`, summary_bullets(Feed와 동일), body, `personal_meaning`: null 또는 1..2,000자, `limitations`: 0..5개/각 1..500자, `glossary`: 0..10개 |
+| `PaperDetailContentV1` | `schema_version="1"`, `response_type="paper_detail"`, `source_ref`, summary_bullets: 1..5개/각 1..500자, body, `personal_meaning`: null 또는 1..2,000자, `limitations`: 0..5개/각 1..500자, `glossary`: 0..10개 |
 
 빈 Feed는 검색/필터링 후 결과가 없거나 개인화 근거가 부족한 정상 콘텐츠다.
 정확히 5개를 강제하거나 없는 근거를 채우지 않는다. 순위는 생성된 items 순서이며,
 최신성/Top-K 선택 정책 자체를 구현하거나 검증한 것은 아니다.
 최종 Chat/Feed JSON 문자열은 파싱 전에 65,536자로 제한한다. 중복 JSON key,
-NaN/Infinity, 잘못된 version/type, metadata/미래 V2 필드도 거부한다.
+NaN/Infinity, 잘못된 version/type, metadata/미정의 확장 필드도 거부한다.
 
 Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 계약만 추가했다.
 독립 실행 모델로 `run_structured()`에 전달할 수 없고 Workflow/API/저장은 없다.
@@ -1363,14 +1369,14 @@ ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검
 publication_year/study_type/organization/source_url/full_text_available만 원본에서 복사한다.
 없던 metadata는 null 그대로 유지하고 abstract/ai_summary/전체 환자 기록은 반환하지 않는다.
 LLM이 이 metadata를 반환하는 schema는 없다. 이 클래스와 StructuredAgentResult는 서버용이며
-LLM 최종 출력 모델은 ChatAnswerV1/FeedAnswerV1뿐이다.
+LLM 최종 출력 모델은 ChatAnswerV1/FeedAnswerV2뿐이다.
 
 | AI 콘텐츠 | 현재 Frontend 매핑 | 신뢰 가능한 서버 조립 |
 |---|---|---|
 | Chat `answer` | ChatMessage.text | message id/role은 Backend가 생성 |
 | Chat `citation_refs` | ChatMessage.citations의 별도 출처 영역 | 서버가 원본 title/source_url/type을 조립. 표시 번호는 UI/Assembler 책임이며 answer 안 번호와 연결하지 않음. evidence_level mapping은 미확정 |
-| Feed `headline` | FeedItem.title | AI 헤드라인과 원본 논문 title을 구분 |
-| Feed `summary_bullets` | FeedItem.summary_bullets | 그대로 |
+| Backend/DB 논문 제목 | Feed 카드 제목 | 제품 정책은 title_ko 우선·없으면 원래 title. Agent는 제목을 생성하지 않으며 이 작업에서 DB/API DTO의 제목 배선을 바꾸지 않음 |
+| Backend/DB 사전 생성 3분할 요약 | 논문 요약 | Agent Feed는 summary_bullets를 생성하지 않음. 기존 DB 요약 전달은 유지 |
 | Feed `personal_reason` | FeedItem.personal_reason | 실제 제공된 patient/care context와 근거에 한정 |
 | Feed `category` | FeedItem.category | 단일 category 유지 |
 | Feed `source_ref` | metadata lookup | id/journal/published_at/evidence_level/read_minutes/is_bookmarked는 LLM 생성 금지 |
@@ -1391,12 +1397,13 @@ Assembler/Frontend DTO 생성은 구현하지 않았다. 현재 RAG는 DB paper 
 않도록 안내한다. new_research와 guideline을 구분하고, 현재 1..6 → A/B/C/D/guideline의
 미확정 변환을 LLM이 결정하지 않게 한다. disclaimer는 현재 UI 고정 책임이다.
 
-### V2 확장 및 남은 합의
+### 출력 확장 및 남은 합의
 
-V1에는 easy_summary/finding/comparison/limitation/복수 category를 넣지 않았다.
-팀 합의 후 FeedAnswerV2/PaperDetailContentV2와 명시적 schema_version="2"를 정의하고,
-서버가 허용 버전을 선택하며 소비자도 해당 버전을 지원하도록 한다. extra 금지인 V1에
-필드를 조용히 추가하거나 V2 payload를 V1로 강제 파싱하지 않는다.
+FeedAnswerV2는 schema_version="2"이며 source_ref/personal_reason/category만 생성한다.
+논문 제목과 사전 생성 3분할 요약은 Backend/DB 책임이며 Feed 출력에 추가하지 않는다.
+Paper Detail의 후속 버전 및 추가 출력 필드는 별도 팀 합의가 필요하다.
+서버와 소비자가 합의한 명시적 버전을 사용하며, extra 금지 계약에 필드를 조용히 추가하거나
+서로 다른 버전의 payload를 강제 파싱하지 않는다.
 paper_analysis의 summary_finding/summary_comparison/summary_limitation은 그대로이며,
 easy_summary migration이나 새 dependency는 없다.
 
