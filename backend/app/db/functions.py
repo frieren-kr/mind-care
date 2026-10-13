@@ -18,6 +18,7 @@ from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
 from app.schemas import (
+    SUMMARY_TEXT_FIELDS,
     EMBEDDING_DIM,
     AnalysisIn,
     EmbeddingIn,
@@ -123,6 +124,7 @@ def get_new_papers(
 
     ★ 2026-10-09 계약 변경: 기준이 "paper_analysis 줄이 없다"에서
       "줄이 없거나 summary_finding이 비어 있다"로 바뀌었다.
+      (2026-10-13: 공백만 들어 있는 summary_finding도 "비어 있다"로 본다 — btrim)
       근거 등급(save_evidence())이 먼저 들어가 줄이 생겨도 요약 대상에서 빠지지 않는다.
       (등급 대상을 고르는 함수는 get_papers_without_evidence()다.)
 
@@ -151,7 +153,7 @@ def get_new_papers(
                p.abstract, p.published_date, p.url, p.collected_at
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
-         WHERE coalesce(a.summary_finding, '') = ''
+         WHERE btrim(coalesce(a.summary_finding, '')) = ''
            AND (%(since)s::timestamptz IS NULL OR p.collected_at >= %(since)s::timestamptz)
            AND (%(source)s::text IS NULL OR p.source = %(source)s::text)
          ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
@@ -433,6 +435,14 @@ def save_summary(analysis: AnalysisIn) -> UUID:
     Returns:
         저장된 paper_analysis row의 id (UUID).
     """
+    # AnalysisIn이 만들 때 한 번 검사하지만, 만든 뒤 값을 바꾸면 검사를 지나칠 수 있어 저장 직전에 다시 본다.
+    blank = [
+        name for name in SUMMARY_TEXT_FIELDS
+        if (value := getattr(analysis, name)) is not None and not value.strip()
+    ]
+    if blank:
+        raise ValueError(f"save_summary: 공백뿐인 요약 칸은 저장하지 않습니다: {blank} (paper_id={analysis.paper_id})")
+
     # EXCLUDED = INSERT 하려던 새 값. 충돌하면 요약 칸은 새 값으로 덮어쓴다.
     # study_type / evidence_level은 등급 담당(save_evidence())의 칸이라, 값을 보냈을 때만
     # 바꾸고 비워 보내면(NULL) 기존 값을 유지한다 (COALESCE).

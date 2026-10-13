@@ -239,6 +239,39 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 `papers 1000 / embeddings 1000`이면 완료입니다.
 (덤프 파일은 `.env`처럼 **레포에 커밋하지 않습니다.**)
 
+#### 요약·근거 등급 데이터 받기 (`paper_analysis`)
+
+논문별 **쉬운 3칸 요약 + 한국어 제목(`title_ko`) + 근거 등급**도 덤프로 공유합니다
+(`paper_analysis_YYYYMMDD.sql`, 일반 SQL 형식·`paper_analysis` 데이터만, 노션에서 받습니다).
+각자 요약 배치를 돌리면 LLM 비용이 들고 문장도 사람마다 달라지므로, 이 덤프로 맞춥니다.
+
+> **위의 논문 덤프를 먼저 복원한 상태여야 합니다.** `paper_analysis.paper_id`가 `papers.id`를 가리키기 때문에,
+> 논문 `id`가 다르면 복원이 실패합니다. 또 논문 덤프 복원(`TRUNCATE papers CASCADE`)을 다시 하면
+> `paper_analysis`도 같이 비워지므로, **순서는 항상 논문 덤프 → 이 덤프**입니다.
+
+1. `007_paper_analysis_title_ko.sql`을 적용합니다 (위의 "007도 직접 적용해야 합니다" 참고. 이미 했으면 건너뜁니다).
+2. 기존 `paper_analysis`를 비우고 덤프를 복원합니다. 한글이 깨지지 않게 **`docker cp`로 컨테이너에 넣고
+   그 안에서 `psql -f`** 로 실행하세요 (PowerShell 파이프로 넘기면 한글이 `?`로 바뀔 수 있습니다).
+
+```powershell
+# Windows PowerShell — 덤프 경로와 날짜는 각자 받은 파일로 바꾸세요 (macOS / Linux도 경로만 바꾸면 같습니다)
+docker cp "$HOME\Desktop\paper_analysis_20261013.sql" mindcare-db:/tmp/paper_analysis.sql
+docker exec mindcare-db psql -U mindcare -d mindcare -v ON_ERROR_STOP=1 --single-transaction -c "TRUNCATE paper_analysis;" -f /tmp/paper_analysis.sql
+docker exec mindcare-db rm /tmp/paper_analysis.sql
+```
+
+`--single-transaction`이라 중간에 실패하면 비우기까지 전부 되돌아갑니다 (기존 데이터가 그대로 남습니다).
+Git Bash에서는 `/tmp/...` 경로가 Windows 경로로 바뀌므로 명령 앞에 `MSYS_NO_PATHCONV=1`을 붙이세요.
+
+3. 확인:
+
+```powershell
+docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT count(*) AS rows, count(summary_finding) AS summarized, count(title_ko) AS titled, count(study_type) AS graded FROM paper_analysis;"
+```
+
+`paper_analysis_20261013.sql` 기준으로 `rows 1000 / summarized 996 / titled 996 / graded 1000`이면 완료입니다.
+(요약이 없는 4편은 자동 검사를 통과하지 못해 저장하지 않은 논문입니다.)
+
 ### 개발용 샘플 사용자 넣기
 
 피드·추천·챗봇을 개발할 때 쓸 예시 간병인 4명(환자 5명)을 넣습니다. 실제 사람 정보가 아닙니다.

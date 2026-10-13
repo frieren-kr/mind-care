@@ -149,9 +149,12 @@ POLISH_PROMPT = f"""\
 
 
 class Summary(BaseModel):
-    """LLM이 돌려줘야 하는 형식. 빈 칸이나 모르는 칸이 있으면 검증에서 걸린다."""
+    """LLM이 돌려줘야 하는 형식. 빈 칸이나 모르는 칸이 있으면 검증에서 걸린다.
 
-    model_config = ConfigDict(extra="forbid")
+    앞뒤 공백을 지운 뒤 길이를 본다 — 공백뿐인 칸(" ", 줄바꿈만 등)도 형식 오류라서 다시 시도한다.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     title_ko: str = Field(min_length=1)
     summary_background: str = Field(min_length=1)
@@ -224,7 +227,15 @@ _STAT = re.compile(r"(?<![A-Za-z])(?:[pP]\s*[=<>≤≥]|CI(?![A-Za-z])|OR\s*=|SD
 # 본문에서 허용하는 영어: 한글 바로 뒤 괄호 안의 영어 — 아우벨리티(Auvelity).
 # ponytail: 괄호 안이 약 이름인지는 구분하지 못한다 (인공지능(AI), 척도 이름(영어)도 통과한다).
 # 약 이름만 허용해야 하면 초록에서 뽑은 약 이름 목록과 대조하는 식으로 바꾼다.
-_ALLOWED_ENGLISH = re.compile(r"(?<=[가-힣])\([A-Za-z][A-Za-z0-9 .\-]*\)")
+# 괄호 안은 여러 단어·성분명도 된다: 아우벨리티(Auvelity), 약 이름(dextromethorphan-bupropion), 약(donepezil, memantine)
+_ALLOWED_ENGLISH = re.compile(r"(?<=[가-힣])\([A-Za-z][A-Za-z0-9 .,;/+&'’®™\-]*\)")
+# 단위는 영어 단어로 보지 않는다: 숫자에 바로 붙은 짧은 단위(10mg, 40Hz, 5mg/kg)와 흔한 단위 낱말(mg, kg, mL …).
+# 숫자와 띄어 쓴 경우는 흔한 단위 낱말만 본다 ("3 APOE" 같은 약자가 단위로 새지 않게).
+_UNIT = re.compile(
+    r"(?<=\d)[A-Za-zμµ]{1,4}(?:/[A-Za-z]{1,4})?(?![A-Za-z])"
+    r"|(?<![A-Za-z])(?:mg|mcg|kg|ml|dl|cm|mm|km|kcal|mmHg|mmol|IU|Hz)(?:/(?:kg|dl|ml|l|day))?(?![A-Za-z])",
+    re.IGNORECASE,
+)
 _ENGLISH_WORD = re.compile(r"[A-Za-z]{2,}")
 _BROKEN_WORD = re.compile(r"[가-힣]+[A-Za-z]+[가-힣]+")  # 한글 사이에 영문자가 낀 단어
 # 제목과 본문 어디에도 나오면 안 되는 말 (프롬프트의 [바꿔 쓸 말] 왼쪽 단어 + "초록"). 띄어쓰기는 무시하고 찾는다.
@@ -248,6 +259,7 @@ def check(summary: Summary, drugs: list["Drug"] | tuple = (), source: str = "") 
             problems.append(f"{name}: 통계 표기 {sorted(set(found))}")
         # 제목은 괄호 안 영어도 허용하지 않는다.
         plain = text if name == "title_ko" else _ALLOWED_ENGLISH.sub("", text)
+        plain = _UNIT.sub("", plain)
         if found := _BROKEN_WORD.findall(plain):
             problems.append(f"{name}: 깨진 단어 {sorted(set(found))}")
         elif found := _ENGLISH_WORD.findall(plain):

@@ -187,6 +187,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **AnalysisIn** (`paper_analysis`): `paper_id, study_type?, evidence_level?, guideline_relation?, title_ko?, summary_background?, summary_finding?, summary_limitation?, tags, model_name?`
   — ★2026-10-12 `embedding?` / `embedding_model?` **제거**. 임베딩 저장은 `save_embeddings()`로만 한다.
   - `study_type` / `evidence_level`은 **비워 보내면 기존 값을 유지한다** (등급 저장은 `save_evidence()`).
+  - ★2026-10-13 `title_ko` / `summary_background` / `summary_finding` / `summary_limitation`에 **빈 문자열이나
+    공백뿐인 값을 주면 `ValueError`** (비워 두려면 `None`). `save_summary()`도 저장 직전에 같은 검사를 한다.
+    공백만 든 요약이 "요약 있음"으로 읽히던 문제 때문이다 (허웅 님 제보).
 - **EvidenceIn** (`save_evidence` 입력): `paper_id, study_type`(필수, 빈 값 불가), `evidence_level?`(int 1~6, 등급 없음은 `None`)
 - **SaveEvidenceResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
 - **SearchResult** (`search_similar` 반환): `paper_id, score` — ★2026-10-01 축소. 제목·요약 등은 `get_papers_by_ids()`로 붙인다.
@@ -246,7 +249,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   건너뛴다(기존 행은 갱신하지 않는다). 배치 안의 중복도 먼저 제거해 집계를 맞춘다.
 - **★ 계약 변경 (2026-10-09)** `get_new_papers()` = `papers` 중 **`paper_analysis` 줄이 없거나
   `summary_finding`이 비어 있는** 논문. (이전: "줄이 없는 논문". 근거 등급이 먼저 들어가 줄이 생기면
-  요약 대상에서 빠지던 문제 때문에 바꿨다.) 이제 "요약이 아직 없는 논문"이라는 뜻이고,
+  요약 대상에서 빠지던 문제 때문에 바꿨다.) **(2026-10-13)** 공백만 들어 있는 `summary_finding`도 비어 있는 것으로
+  본다(`btrim`). 이제 "요약이 아직 없는 논문"이라는 뜻이고,
   등급이 있는지는 보지 않는다.
   정렬은 `published_date DESC NULLS LAST` → `collected_at DESC` → `id`. 한 배치는 `collected_at`이
   모두 같아서, 마지막 `id` 키가 있어야 `limit`을 준 결과 순서가 호출마다 흔들리지 않는다.
@@ -370,6 +374,9 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   영어 이름이 제목·초록에 실제로 있는 약만 검사하고, LLM이 `drugs`에서 빠뜨린 약은 잡지 못한다). 걸리면 그 논문만 이유를 알려 주고
   **한 번만** 다시 생성하고, 또 걸리면 저장하지 않고 실패 목록에 이유와 함께 남긴다.
   괄호 안이 약 이름인지는 구분하지 못한다(`인공지능(AI)`처럼 한글 뒤 괄호 안 영어는 모두 통과).
+  **(2026-10-13 완화)** 단위(`mg`, `ml`, `kg` 등)와 숫자에 붙은 단위(`10mg`, `5mg/kg`)는 영어 단어로 보지 않고,
+  한글 바로 뒤 괄호 안의 영어는 성분명·여러 단어(`(dextromethorphan-bupropion)`, `(donepezil, memantine)`)도 허용한다.
+  LLM 응답의 네 칸은 앞뒤 공백을 지운 뒤 비어 있으면 형식 오류로 보고 다시 시도한다.
   `--out` 결과 파일 맨 위에 칸별 글자 수 통계, 토큰 사용량, 검사에 걸린 논문 번호와 재생성 결과,
   "치매"·"알츠하이머병" 뒤에 괄호 설명이 붙은 곳의 개수, 금지 단어·약 이름 괄호 검사 결과가 적힌다.
 - 테스트: `python -m unittest tests.test_summarize_papers` (가짜 LLM, 실 DB 필요).
@@ -543,8 +550,16 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `summary_comparison` → `summary_background`(연구 배경) 이름 변경.
   ※ `app/ai/agent/README.md`에 옛 이름(`summary_comparison`)이 한 군데 남아 있다 (AI 담당 문서라 건드리지 않음).
   가짜 LLM으로 정상 저장·초록 없는 논문 건너뛰기·형식 오류 미저장·dry-run 미저장·기존 등급 유지를
-  `tests/test_summarize_papers.py`(12건, 다듬기·자동 검사·재생성 포함)로 확인했다. **실제 OpenAI 호출과 1,000편 생성은 아직 하지 않았다**
-  (`paper_analysis`의 요약은 0건).
+  `tests/test_summarize_papers.py`(15건, 다듬기·자동 검사·재생성·공백 거부 포함)로 확인했다.
+- **팀 기준 요약·근거 등급 데이터** (2026-10-13, 실 DB). `paper_analysis` 1,000행:
+  **요약 + `title_ko` 996편**(`gpt-5.6-luna`), **근거 등급 판단 1,000편**(현서 님 `scripts/classify_papers.py` —
+  A 112 / B 84 / C 408 / D 144 / 등급 없음 252). 등급 배치를 요약 뒤에 돌려도 요약 칸이 그대로인 것을 확인했다.
+  요약이 없는 4편(PMID 42302487, 42257639, 41677635, 41114286)은 자동 검사를 두 번 통과하지 못해 저장하지 않았다
+  (약 코드명 `DSP-2342`·`MW073`처럼 한글 이름이 없는 영어, 약 이름 영어 괄호 누락).
+  덤프(`paper_analysis_20261013.sql`)는 레포에 없고 노션에서 받는다 — 복원 방법은 `README.md`의 "팀원 데이터 맞추기".
+- **공백 요약 버그 수정** (2026-10-13, 허웅 님 제보). 공백뿐인 요약 칸은 LLM 응답 검증·`AnalysisIn`·`save_summary()`
+  세 곳에서 거부하고, `get_new_papers()`는 공백만 든 `summary_finding`도 "요약 없음"으로 본다(**계약 변경**).
+  수정 시점에 DB에는 공백·빈 문자열 행이 0건이었다.
 - **추천 응답에서 `headline`·`summary_bullets` 제거** (2026-10-13). **응답 계약 변경**: 허웅 님 `FeedAnswerV2`에서
   AI 결과의 두 칸이 빠진 데 맞춰 `RecommendationItem`에서도 지웠다. AI 결과에서 오는 칸은 `personal_reason`·`category`뿐이고,
   제목(`title_ko`)과 요약 3칸은 DB에서 온다. `frontend/`의 타입·목업에는 아직 `summary_bullets`가 남아 있다(프론트 담당 영역).

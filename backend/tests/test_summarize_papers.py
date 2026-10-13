@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from app.db import functions
 from app.db.connection import get_connection
-from app.schemas import PaperIn
+from app.schemas import AnalysisIn, PaperIn
 from scripts import summarize_papers
 from scripts.summarize_papers import BANNED_WORDS, MAX_RETRIES, Drug, Summary, check, run
 
@@ -101,6 +101,8 @@ class SummarizePapersTest(unittest.TestCase):
         bad_clients = [
             FakeClient("JSON이 아님"),
             FakeClient(json.dumps({**GOOD, "summary_limitation": ""})),
+            FakeClient(json.dumps({**GOOD, "summary_finding": "   "})),      # 공백뿐인 칸
+            FakeClient(json.dumps({**GOOD, "title_ko": "\n\t "})),
             FakeClient(json.dumps({"title_ko": "칸 부족"})),
             FakeClient(json.dumps(GOOD), finish_reason="length"),  # 토큰 한도에서 잘린 응답
         ]
@@ -130,6 +132,49 @@ class SummarizePapersTest(unittest.TestCase):
         ]:
             with self.subTest(text=text):
                 self.assertTrue(problems(**{field: text}))
+
+    def test_check_allows_units_and_english_in_parentheses_after_drug_name(self):
+        def problems(text):
+            return check(Summary(**{**GOOD, "summary_finding": text}))
+
+        for ok in [
+            "하루 10mg을 12주 동안 먹었습니다.",
+            "2.5 mL씩, 몸무게 1kg당 5mg/kg을 썼습니다.",
+            "용량은 mg 단위로 적었습니다.",
+            "아우벨리티(dextromethorphan-bupropion)를 썼습니다.",
+            "두 약(donepezil, memantine)을 함께 썼습니다.",
+            "나멘다(Namenda XR)를 썼습니다.",
+        ]:
+            with self.subTest(ok=ok):
+                self.assertEqual(problems(ok), [])
+        for bad in ["donepezil 10mg을 먹었습니다.", "MMSE 점수가 올랐습니다.", "(Auvelity)를 썼습니다."]:
+            with self.subTest(bad=bad):
+                self.assertTrue(problems(bad))
+        # 제목은 괄호 안 영어도 여전히 안 된다.
+        self.assertTrue(check(Summary(**{**GOOD, "title_ko": "아우벨리티(Auvelity)의 효과"})))
+
+    def test_blank_summary_cells_are_rejected_by_analysis_in_and_save_summary(self):
+        for value in ("", "   ", "\n"):
+            for name in ("title_ko", "summary_background", "summary_finding", "summary_limitation"):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(ValueError):
+                        AnalysisIn(paper_id=self.paper_id, **{name: value})
+        analysis = AnalysisIn(paper_id=self.paper_id, **GOOD)
+        analysis.summary_finding = "  "  # 만든 뒤에 바꾼 값도 저장 직전에 걸린다
+        with self.assertRaises(ValueError):
+            functions.save_summary(analysis)
+        self.assertIsNone(functions.get_paper_detail(self.paper_id).summary_finding)
+
+    def test_whitespace_only_row_is_returned_by_get_new_papers_again(self):
+        def pending():
+            return [p.id for p in functions.get_new_papers(limit=10, source=SOURCE)]
+
+        functions.save_summary(AnalysisIn(paper_id=self.paper_id, **GOOD))
+        self.assertNotIn(self.paper_id, pending())
+        # 예전 버그로 공백만 들어간 행 (지금은 save_summary가 막으므로 직접 만든다).
+        with get_connection() as conn:
+            conn.execute("UPDATE paper_analysis SET summary_finding = '  ' WHERE paper_id = %s", (self.paper_id,))
+        self.assertIn(self.paper_id, pending())
 
     def test_check_flags_banned_words_in_title_and_body(self):
         for word in BANNED_WORDS:

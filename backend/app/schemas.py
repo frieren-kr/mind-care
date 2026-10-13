@@ -30,8 +30,15 @@ class PaperOut(BaseModel):
     collected_at: datetime = Field(description="수집 시각")
 
 
+# 요약 배치가 채우는 글 칸. 값이 있는데 공백뿐이면 "요약이 있다"로 잘못 읽히므로 저장을 막는다.
+SUMMARY_TEXT_FIELDS = ("title_ko", "summary_background", "summary_finding", "summary_limitation")
+
+
 class AnalysisIn(BaseModel):
     """save_summary()가 받는 논문 분석 결과. (paper_analysis 테이블)
+
+    ★ 2026-10-13 변경: title_ko / summary_* 칸에 빈 문자열이나 공백뿐인 값을 주면 ValueError.
+      (비워 두려면 None을 보낸다.)
 
     ★ 2026-10-12 변경: embedding / embedding_model 필드를 없앴다.
       save_summary()는 paper_analysis만 저장하고, 임베딩 저장은
@@ -56,6 +63,13 @@ class AnalysisIn(BaseModel):
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
     tags: list[str] = Field(default_factory=list, description="매칭용 태그 (수면장애, 배회 등)")
     model_name: Optional[str] = Field(default=None, description="분석에 쓴 LLM 이름")
+
+    @field_validator(*SUMMARY_TEXT_FIELDS)
+    @classmethod
+    def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("빈 문자열이나 공백뿐인 값은 저장할 수 없습니다 (비워 두려면 None)")
+        return value
 
 
 class SearchResult(BaseModel):
