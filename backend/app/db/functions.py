@@ -231,7 +231,7 @@ def list_papers(limit: int = 20, offset: int = 0) -> PaperListResponse:
 
     sql = """
         SELECT p.id, p.title, p.published_date AS published_at, p.journal,
-               a.evidence_level, a.summary_finding
+               a.evidence_level, a.title_ko, a.summary_finding
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
          ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
@@ -264,7 +264,7 @@ def get_paper_detail(paper_id: UUID) -> Optional[PaperDetailResponse]:
         SELECT p.id, p.title, p.abstract, p.published_date AS published_at, p.journal,
                p.url AS pubmed_url, p.doi, p.publication_types, p.mesh_terms,
                a.study_type, a.evidence_level,
-               a.summary_finding, a.summary_comparison, a.summary_limitation
+               a.title_ko, a.summary_background, a.summary_finding, a.summary_limitation
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
          WHERE p.id = %s
@@ -300,7 +300,7 @@ def get_paper_details_by_pmids(pmids: list[str]) -> dict[str, PaperDetailRespons
                p.id, p.title, p.abstract, p.published_date AS published_at, p.journal,
                p.url AS pubmed_url, p.doi, p.publication_types, p.mesh_terms,
                a.study_type, a.evidence_level,
-               a.summary_finding, a.summary_comparison, a.summary_limitation
+               a.title_ko, a.summary_background, a.summary_finding, a.summary_limitation
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
          WHERE p.source = 'pubmed' AND p.external_id = ANY(%s::text[])
@@ -418,7 +418,7 @@ def save_summary(analysis: AnalysisIn) -> UUID:
     summary_finding을 채워 저장하면 그 논문은 get_new_papers() 목록에서 빠진다.
 
     ★ 2026-10-09: study_type / evidence_level은 값을 보냈을 때만 바꾼다. 비워 보내면
-      save_evidence()가 넣어 둔 기존 값을 유지한다. 요약 칸·guideline_relation·tags·
+      save_evidence()가 넣어 둔 기존 값을 유지한다. 요약 칸·title_ko·guideline_relation·tags·
       model_name은 예전처럼 보낸 값으로 덮어쓴다.
 
     ★ 2026-10-12: 이 함수는 paper_embeddings를 전혀 건드리지 않는다. AnalysisIn의
@@ -428,7 +428,7 @@ def save_summary(analysis: AnalysisIn) -> UUID:
 
     Args:
         analysis: 근거분류(study_type/evidence_level/guideline_relation) +
-            구조화 요약(finding/comparison/limitation) + 태그. (schemas.AnalysisIn)
+            구조화 요약(background/finding/limitation) + 태그. (schemas.AnalysisIn)
 
     Returns:
         저장된 paper_analysis row의 id (UUID).
@@ -440,22 +440,24 @@ def save_summary(analysis: AnalysisIn) -> UUID:
     analysis_sql = """
         INSERT INTO paper_analysis (
             paper_id, study_type, evidence_level, guideline_relation,
-            summary_finding, summary_comparison, summary_limitation, tags, model_name
+            summary_background, summary_finding, summary_limitation, tags, model_name,
+            title_ko
         )
         VALUES (
             %(paper_id)s, %(study_type)s, %(evidence_level)s, %(guideline_relation)s,
-            %(summary_finding)s, %(summary_comparison)s, %(summary_limitation)s,
-            %(tags)s, %(model_name)s
+            %(summary_background)s, %(summary_finding)s, %(summary_limitation)s,
+            %(tags)s, %(model_name)s, %(title_ko)s
         )
         ON CONFLICT (paper_id) DO UPDATE
            SET study_type         = COALESCE(EXCLUDED.study_type, paper_analysis.study_type),
                evidence_level     = COALESCE(EXCLUDED.evidence_level, paper_analysis.evidence_level),
                guideline_relation = EXCLUDED.guideline_relation,
+               summary_background = EXCLUDED.summary_background,
                summary_finding    = EXCLUDED.summary_finding,
-               summary_comparison = EXCLUDED.summary_comparison,
                summary_limitation = EXCLUDED.summary_limitation,
                tags               = EXCLUDED.tags,
                model_name         = EXCLUDED.model_name,
+               title_ko           = EXCLUDED.title_ko,
                generated_at       = now()
         RETURNING id
     """
@@ -464,11 +466,12 @@ def save_summary(analysis: AnalysisIn) -> UUID:
         "study_type": analysis.study_type,
         "evidence_level": analysis.evidence_level,
         "guideline_relation": analysis.guideline_relation,
+        "summary_background": analysis.summary_background,
         "summary_finding": analysis.summary_finding,
-        "summary_comparison": analysis.summary_comparison,
         "summary_limitation": analysis.summary_limitation,
         "tags": analysis.tags,
         "model_name": analysis.model_name,
+        "title_ko": analysis.title_ko,
     }
 
     with get_connection() as conn:

@@ -215,7 +215,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
                 "symptoms": [f"signal {identifier.int}"], "interests": []}) for identifier in self.patient_ids])
         self.papers = {pmid: PaperDetailResponse(id=UUID(int=100+i), title=f"DB title {i}",
             pubmed_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", study_type="rct", evidence_level="2",
-            summary_finding=f"DB finding {i}", summary_comparison=f"DB comparison {i}",
+            summary_background=f"DB background {i}", summary_finding=f"DB finding {i}",
             summary_limitation=f"DB limitation {i}") for i, pmid in enumerate(DB_PMIDS)}
         guards = {
             "psycopg.connect": {"side_effect": AssertionError("Offline tests must not connect to DB")},
@@ -264,8 +264,8 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         for i, item in enumerate(items):
             self.assertEqual(item.id, self.papers[DB_PMIDS[i]].id)
             self.assertEqual(item.title, f"DB title {i}")
-            self.assertEqual((item.summary_finding, item.summary_comparison, item.summary_limitation),
-                             (f"DB finding {i}", f"DB comparison {i}", f"DB limitation {i}"))
+            self.assertEqual((item.summary_background, item.summary_finding, item.summary_limitation),
+                             (f"DB background {i}", f"DB finding {i}", f"DB limitation {i}"))
             self.assertEqual((item.category, item.evidence_grade), ("care", "B"))
             self.assertIsNone(item.headline)
             self.assertIsNone(item.summary_bullets)

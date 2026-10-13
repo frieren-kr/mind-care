@@ -59,9 +59,12 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - `backend/app/db/functions.py` — **데이터 접근 함수 (팀 공용 계약, 데이터 담당).**
 - `backend/app/db/migrations/` — **DB 스키마 정본.** `001_init.sql`(테이블 정의, 팀 리뷰 후 확정)
   + `002_add_paper_metadata.sql`(논문 메타데이터 컬럼) + `003_embedding_dim_1024.sql`(임베딩 `vector(1024)` + HNSW)
-  + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE).
+  + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE)
+  + `007_paper_analysis_title_ko.sql`(`paper_analysis.title_ko` — 논문 제목의 한국어 번역,
+    `summary_comparison` → `summary_background` 이름 변경).
 - `backend/app/schemas.py` — 함수 입출력 스키마(pydantic). 이 계약의 단일 출처.
 - `backend/app/collectors/pubmed.py` — PubMed 수집(주 1회 배치).
+- `backend/scripts/summarize_papers.py` — 논문 3칸 요약(연구 배경·새로 밝혀진 것·한계) + 한국어 제목 생성 배치 (OpenAI, 담당 박주현).
 - `backend/app/api/` — API 라우터. 기능별 파일(`papers.py` …)에 `router`를 두고 `main.py`에서 등록.
 
 ---
@@ -146,7 +149,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `paper_analysis` 칸 | 채우는 사람 | 저장 함수 | 대상 고르는 함수 |
 |---|---|---|---|
 | `study_type`, `evidence_level` | 김현서 (근거 등급) | `save_evidence()` | `get_papers_without_evidence()` |
-| `summary_finding` / `summary_comparison` / `summary_limitation`, `guideline_relation`, `tags` | 허웅 (요약) | `save_summary()` | `get_new_papers()` |
+| `title_ko`, `summary_background` / `summary_finding` / `summary_limitation` | 박주현 (요약 배치 `scripts/summarize_papers.py`) | `save_summary()` | `get_new_papers()` |
+| `guideline_relation`, `tags` | 허웅 — **지금은 채우는 배치가 없다.** `save_summary()`가 보낸 값으로 덮어쓰므로 요약 배치를 돌리면 비워진다 | `save_summary()` | |
 
 **함수를 추가·변경한 사람이 위 "데이터 접근 계약" 표(와 `schemas.py`)도 같이 고친다.**
 (계약 표를 바꾸기 전에는 팀에 공지한다 — "담당 영역" 규칙과 동일.)
@@ -180,7 +184,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
 - **SavePapersResult**: `total, inserted, skipped, inserted_ids`
 - **PaperOut** (`papers`): `id, source, external_id, title, abstract?, published_date?, url?, collected_at`
-- **AnalysisIn** (`paper_analysis`): `paper_id, study_type?, evidence_level?, guideline_relation?, summary_finding?, summary_comparison?, summary_limitation?, tags, model_name?`
+- **AnalysisIn** (`paper_analysis`): `paper_id, study_type?, evidence_level?, guideline_relation?, title_ko?, summary_background?, summary_finding?, summary_limitation?, tags, model_name?`
   — ★2026-10-12 `embedding?` / `embedding_model?` **제거**. 임베딩 저장은 `save_embeddings()`로만 한다.
   - `study_type` / `evidence_level`은 **비워 보내면 기존 값을 유지한다** (등급 저장은 `save_evidence()`).
 - **EvidenceIn** (`save_evidence` 입력): `paper_id, study_type`(필수, 빈 값 불가), `evidence_level?`(int 1~6, 등급 없음은 `None`)
@@ -190,11 +194,15 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **UpdateMetadataResult**: `total, updated, not_found`(papers에 없던 `external_id` 목록)
 - **EmbeddingIn** (`paper_embeddings` 입력): `paper_id, embedding` — `embedding` 길이는 반드시 `EMBEDDING_DIM`(=1024).
 - **SaveEmbeddingsResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
-- **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, evidence_grade?, summary_finding?` — 초록 없음.
+- **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, evidence_grade?, title_ko?, summary_finding?` — 초록 없음.
 - **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
-- **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, evidence_grade?, summary_finding?, summary_comparison?, summary_limitation?`
+- **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, evidence_grade?, title_ko?, summary_background?, summary_finding?, summary_limitation?`
+  - **summary_background** (★2026-10-13 이름 변경, `007`) = 예전 `summary_comparison`. 뜻도 "기존 권고와 비교"에서
+    **"연구 배경"**(왜 이 연구를 했는지)으로 바뀌었다. 세 칸 순서는 `summary_background` → `summary_finding` → `summary_limitation`.
+  - **title_ko** (★2026-10-13 추가, `007`) = 논문 제목의 한국어 번역. 요약 배치가 채우고, 요약 전이면 `None`.
+    목록·상세·추천 항목 응답에 모두 들어간다. 원제는 `title`에 그대로 있다.
   - 이 세 모델은 **화면 이름**(`frontend/src/types/index.ts`)을 쓴다: `papers.id`→`id`, `published_date`→`published_at`, `url`→`pubmed_url`.
-- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, evidence_grade?, summary_finding?, summary_comparison?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
+- **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, evidence_grade?, title_ko?, summary_background?, summary_finding?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
   - `relevance_score?`(float) — `mode="search"`일 때만. **`ai`면 `None`** (AI 결과에는 점수가 없다).
   - `headline?, summary_bullets?`(`list[str]`), `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — `mode="ai"`일 때만. `search`면 모두 `None`.
 - **RecommendationResponse**: `user_id`, `patient_id?`(**요청에 준 값 그대로**, 안 줬으면 `None` = 관리 환자 전체 기준),
@@ -242,7 +250,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `since`/`source`는 `None`이면 해당 조건을 적용하지 않고, `limit <= 0`이면 빈 목록을 돌려준다.
 - `save_summary()`는 `paper_analysis`에만 upsert 한다. `paper_embeddings`는 건드리지 않는다.
   **(2026-10-09 변경)** `study_type` / `evidence_level`은 값을 보냈을 때만 바꾸고, 비워 보내면 기존 값을
-  유지한다(`COALESCE`). 요약 칸·`guideline_relation`·`tags`·`model_name`은 예전처럼 보낸 값으로 덮어쓴다.
+  유지한다(`COALESCE`). 요약 칸·`title_ko`·`guideline_relation`·`tags`·`model_name`은 예전처럼 보낸 값으로 덮어쓴다.
 - **근거 등급 전용 함수 2개는 요약 칸을 전혀 건드리지 않는다.** 등급 배치와 요약 배치는 어느 쪽을
   먼저 돌려도 서로의 값을 지우지 않는다.
   - `save_evidence(items)`는 줄이 없으면 `study_type` / `evidence_level`만 채운 줄을 새로 만들고,
@@ -322,6 +330,46 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `(user_id, period_start, period_end)` UNIQUE 인덱스를 `ON CONFLICT` 대상으로 쓴다.
 - 개발용 샘플: `python -m scripts.seed_dev_care_logs` (최근 30일 돌봄 기록 + 지난달 요약. 재실행 안전).
   테스트: `python -m unittest tests.test_feed_read`.
+
+요약 배치 (`backend/scripts/summarize_papers.py`, 담당 박주현, 2026-10-13):
+- 요약이 없는 논문(`get_new_papers(limit)`)마다 OpenAI로 `title_ko` + 요약 3칸을 만들어
+  `save_summary()`로 저장한다. `study_type` / `evidence_level`은 보내지 않으므로 기존 등급이 유지된다.
+  저장된 논문은 대상에서 빠지므로 중간에 끊겨도 다시 실행하면 이어서 한다.
+- **`.env`에 `OPENAI_API_KEY`와 `OPENAI_SUMMARY_MODEL`이 둘 다 있어야 한다.** 모델은 기본값이 없고,
+  비어 있으면 안내 메시지를 내고 멈춘다. `paper_analysis.model_name`에 이 모델 이름이 남는다.
+- 실행 (`backend/`에서, `007` 적용 후):
+  ```bash
+  python -m scripts.summarize_papers --limit 20 --dry-run --out ../../summaries.md  # 저장 없이 결과만 파일로
+  python -m scripts.summarize_papers --limit 20                                     # 20편 저장
+  python -m scripts.summarize_papers --paper-ids <uuid> <uuid>                      # 지정한 논문만 (다시 만들기 포함)
+  ```
+  `--limit` 기본 20. `--dry-run`은 `--out`(마크다운 결과 파일)이 필요하다 — 결과 파일은 레포 밖에 둔다.
+- 초록이 없는 논문은 건너뛰고 건수만 보고한다. 응답은 JSON 형식으로 강제하고(structured output),
+  형식이 틀리거나 API가 실패하면 논문당 최대 2번 다시 시도한 뒤 **저장하지 않고 실패로 보고**한다.
+  응답이 토큰 한도에서 잘린 경우도 실패로 본다. 요청마다 timeout 120초·최대 4,000 토큰,
+  끝나면 총 토큰 사용량과 요청당 최대 출력 토큰(한도 여유 확인용)을 출력한다.
+- 작성 규칙의 정본은 스크립트의 `SYSTEM_PROMPT`다. 칸 순서는 ① 연구 배경 → ② 새로 밝혀진 것 → ③ 한계.
+  독자 기준은 **의학 지식이 없는 50~60대 부모님께 말로 설명하듯**, 어조는 일반 신문 기사처럼 차분하게.
+  치매·알츠하이머병에는 설명을 붙이지 않고, 덜 알려진 병 이름만 논문 하나에서 처음 한 번 짧은 괄호 설명을 붙인다.
+  일반 신문에 나오는 말(진단·임상시험·요양시설 등)은 그대로 쓰고, 그 밖의 전문용어는 일상어로 바꾼다.
+  통계 수치(오즈비·신뢰구간·p값 등)는 말로 풀어 쓰며, 영어는 약 이름을 처음 쓸 때 괄호 안에 한 번만 쓴다.
+  `title_ko`는 30자 안팎, 괄호 설명·영어 없음. ② 칸에는 결과만 쓰고 "더 연구가 필요하다"류는 ③ 한계에 쓴다.
+- **두 번째 다듬기는 기본으로 끈다** (2026-10-13). `--polish`를 줄 때만 LLM을 한 번 더 불러(`POLISH_PROMPT`)
+  모를 만한 단어를 쉬운 말로 바꾼다(내용·수치·비교 대상은 그대로). 두 프롬프트는 쉬운 말 규칙(`EASY_WORD_RULES`)을 같이 쓴다.
+  다듬기에는 초록을 주지 않고 처음 쓴 글만 준다. 다듬기가 적어 준 "바뀐 표현(전 → 후)" 목록은 다듬기를 한 실행의
+  `--out` 결과 파일에만 논문마다 실리고, 실제 글에서 찾지 못한 항목에는 "(글에서 확인 안 됨)"이 붙는다.
+  시험 20편 기준으로 다듬기를 켜면 토큰이 약 2배(64,518 → 124,155)였고 제목·문장이 과하게 풀어지는 경향이 있었다.
+- **자동 검사 `check()`** — 다듬기까지 끝난 뒤, 저장 전에 네 칸을 검사한다: 통계 표기(`p =`, `p<`, `CI`, `OR =`, `β`, `SD`),
+  한글 뒤 괄호 밖의 영어 단어(2글자 이상), 한글 사이에 영문자가 낀 깨진 단어,
+  **금지 단어**(`BANNED_WORDS`: 초조·항정신병·인지 기능·인지 저하·낙상·상호작용·위약·망상·일차의료·초록 — 제목 포함,
+  띄어쓰기 무시, 단순 포함 검사라 "초조해하다"·"초록색" 같은 일상어도 걸린다),
+  **약 이름 영어 괄호 빠짐**(LLM이 `drugs`에 적어 준 약 이름이 본문 ①→②→③에 처음 나오는 곳에 `(영어)`가 없을 때.
+  영어 이름이 제목·초록에 실제로 있는 약만 검사하고, LLM이 `drugs`에서 빠뜨린 약은 잡지 못한다). 걸리면 그 논문만 이유를 알려 주고
+  **한 번만** 다시 생성하고, 또 걸리면 저장하지 않고 실패 목록에 이유와 함께 남긴다.
+  괄호 안이 약 이름인지는 구분하지 못한다(`인공지능(AI)`처럼 한글 뒤 괄호 안 영어는 모두 통과).
+  `--out` 결과 파일 맨 위에 칸별 글자 수 통계, 토큰 사용량, 검사에 걸린 논문 번호와 재생성 결과,
+  "치매"·"알츠하이머병" 뒤에 괄호 설명이 붙은 곳의 개수, 금지 단어·약 이름 괄호 검사 결과가 적힌다.
+- 테스트: `python -m unittest tests.test_summarize_papers` (가짜 LLM, 실 DB 필요).
 
 수집기(`collectors/pubmed.py`) 쪽 함수:
 - `fetch_papers_by_pmids(pmids, require_abstract=True)` — PMID 목록으로 논문을 받아온다(검색 단계 없음).
@@ -486,6 +534,13 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   이름·이메일·전화번호·병원명·raw id 없음), 가짜 `feed_execution`으로 FeedWorkflow가 `mode="ai"`로 끝까지 도는 것을
   `tests/test_recommendations.py`(12건) · `tests/test_feed_read.py`(44건)로 확인했다.
   **실제 `feed_execution`은 아직 없어서 지금 응답은 항상 `mode="search"`다.**
+- **논문 요약 배치 + `title_ko` 추가** (2026-10-13, `007_paper_analysis_title_ko.sql`). **응답 계약 변경**:
+  `/papers` 목록·상세와 `/recommendations` 항목에 `title_ko` 추가, `AnalysisIn`에 `title_ko` 추가,
+  `summary_comparison` → `summary_background`(연구 배경) 이름 변경.
+  ※ `app/ai/agent/README.md`에 옛 이름(`summary_comparison`)이 한 군데 남아 있다 (AI 담당 문서라 건드리지 않음).
+  가짜 LLM으로 정상 저장·초록 없는 논문 건너뛰기·형식 오류 미저장·dry-run 미저장·기존 등급 유지를
+  `tests/test_summarize_papers.py`(12건, 다듬기·자동 검사·재생성 포함)로 확인했다. **실제 OpenAI 호출과 1,000편 생성은 아직 하지 않았다**
+  (`paper_analysis`의 요약은 0건).
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**

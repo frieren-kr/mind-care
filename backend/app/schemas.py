@@ -50,8 +50,9 @@ class AnalysisIn(BaseModel):
         description='근거 등급 "1"~"6" (evidence.py 기준). 비워 보내면 기존 값을 유지한다 — 등급 저장은 save_evidence()',
     )
     guideline_relation: Optional[str] = Field(default=None, description="기존 가이드라인과 일치/보완/상충")
-    summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
-    summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
+    title_ko: Optional[str] = Field(default=None, description="논문 제목의 한국어 번역 (007)")
+    summary_background: Optional[str] = Field(default=None, description="① 연구 배경 (왜 이 연구를 했나)")
+    summary_finding: Optional[str] = Field(default=None, description="② 새로 밝혀진 것")
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
     tags: list[str] = Field(default_factory=list, description="매칭용 태그 (수면장애, 배회 등)")
     model_name: Optional[str] = Field(default=None, description="분석에 쓴 LLM 이름")
@@ -196,6 +197,7 @@ class PaperListItem(BaseModel):
         default=None,
         description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
     )
+    title_ko: Optional[str] = Field(default=None, description="한국어 제목. 요약 전이면 null")
     summary_finding: Optional[str] = Field(default=None, description="요약 첫 칸. 요약 전이면 null")
 
 
@@ -221,6 +223,7 @@ class PaperListResponse(BaseModel):
                         "journal": "Alzheimer's & Dementia",
                         "evidence_level": "2",
                         "evidence_grade": "B",
+                        "title_ko": "치매 환자의 수면 문제와 보호자 부담",
                         "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
                     }
                 ],
@@ -248,8 +251,9 @@ class PaperDetailResponse(BaseModel):
         default=None,
         description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
     )
-    summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
-    summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
+    title_ko: Optional[str] = Field(default=None, description="한국어 제목. 요약 전이면 null")
+    summary_background: Optional[str] = Field(default=None, description="① 연구 배경 (왜 이 연구를 했나)")
+    summary_finding: Optional[str] = Field(default=None, description="② 새로 밝혀진 것")
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
 
     model_config = ConfigDict(
@@ -267,8 +271,9 @@ class PaperDetailResponse(BaseModel):
                 "study_type": "rct",
                 "evidence_level": "2",
                 "evidence_grade": "B",
+                "title_ko": "치매 환자의 수면 문제와 보호자 부담",
+                "summary_background": "치매 환자의 수면 문제가 보호자에게 주는 영향은 잘 알려져 있지 않았다.",
                 "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
-                "summary_comparison": "기존 권고(수면 위생 교육)와 방향이 같다.",
                 "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
             }
         }
@@ -308,8 +313,9 @@ class RecommendationItem(BaseModel):
         default=None,
         description="화면 표시용 근거 등급 A~D (evidence_level 1~6을 묶은 값). 등급이 없으면 null",
     )
-    summary_finding: Optional[str] = Field(default=None, description="① 무엇이 새로 밝혀졌나")
-    summary_comparison: Optional[str] = Field(default=None, description="② 기존 권고와 비교")
+    title_ko: Optional[str] = Field(default=None, description="한국어 제목. 요약 전이면 null")
+    summary_background: Optional[str] = Field(default=None, description="① 연구 배경 (왜 이 연구를 했나)")
+    summary_finding: Optional[str] = Field(default=None, description="② 새로 밝혀진 것")
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
 
 
@@ -355,8 +361,9 @@ class RecommendationResponse(BaseModel):
                         "study_type": "rct",
                         "evidence_level": "2",
                         "evidence_grade": "B",
+                        "title_ko": "치매 환자의 수면 문제와 보호자 부담",
+                        "summary_background": "치매 환자의 수면 문제가 보호자에게 주는 영향은 잘 알려져 있지 않았다.",
                         "summary_finding": "수면 문제가 심할수록 보호자 부담이 커졌다.",
-                        "summary_comparison": "기존 권고(수면 위생 교육)와 방향이 같다.",
                         "summary_limitation": "참여자 수가 적고 추적 기간이 짧다.",
                     }
                 ],

@@ -41,7 +41,7 @@ Get-Content app\db\migrations\002_add_paper_metadata.sql -Raw -Encoding UTF8 | d
 docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/002_add_paper_metadata.sql
 ```
 
-`ADD COLUMN IF NOT EXISTS`라서 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
+칸이 이미 있거나 이름이 이미 바뀌어 있으면 건너뛰므로 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
 
 ```bash
 docker exec mindcare-db psql -U mindcare -d mindcare -c "\d papers"
@@ -180,6 +180,33 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "\d profile_summaries"
 > ```bash
 > docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT user_id, period_start, period_end, count(*) FROM profile_summaries GROUP BY 1,2,3 HAVING count(*) > 1;"
 > ```
+
+### ⚠️ 이미 DB를 띄워 둔 사람은 007도 직접 적용해야 합니다
+
+위와 같은 이유로 `007_paper_analysis_title_ko.sql`도 자동 반영되지 않습니다.
+요약 테이블 `paper_analysis`에 `title_ko`(논문 제목의 한국어 번역) 칸을 추가하고,
+`summary_comparison` 칸의 이름을 `summary_background`(연구 배경)로 바꾸는 마이그레이션입니다.
+**적용하지 않으면 `/papers`, `/recommendations`와 `save_summary()`가 "column ... does not exist"로 실패합니다.**
+
+`backend/` 에서 아래 명령으로 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\007_paper_analysis_title_ko.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/007_paper_analysis_title_ko.sql
+```
+
+칸이 이미 있거나 이름이 이미 바뀌어 있으면 건너뛰므로 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d paper_analysis"
+```
+
+`title_ko`와 `summary_background` 컬럼이 보이고 `summary_comparison`이 없으면 완료입니다. (기존 요약·등급 데이터는 건드리지 않습니다.)
 
 ### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
 
