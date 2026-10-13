@@ -197,7 +197,11 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **RecommendationItem** (`GET /recommendations` 항목 한 줄): `id, title, published_at?, journal?, pubmed_url?` + 요약 `study_type?, evidence_level?, evidence_grade?, summary_finding?, summary_comparison?, summary_limitation?` (여기까지는 두 `mode` 모두 DB에서 온다)
   - `relevance_score?`(float) — `mode="search"`일 때만. **`ai`면 `None`** (AI 결과에는 점수가 없다).
   - `headline?, summary_bullets?`(`list[str]`), `personal_reason?, category?`(`treatment`/`care`/`prevention`/`diagnosis`) — `mode="ai"`일 때만. `search`면 모두 `None`.
-- **RecommendationResponse**: `user_id, patient_id, mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지), `query?`(이번에 쓴 검색어. `search`일 때만, `ai`면 `None`), `items`(`RecommendationItem` 목록, 최대 5개. `search`면 관련도 높은 순, `ai`면 AI가 정한 순)
+- **RecommendationResponse**: `user_id`, `patient_id?`(**요청에 준 값 그대로**, 안 줬으면 `None` = 관리 환자 전체 기준),
+  `mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지),
+  `queries?`(`list[str]` — 이번에 쓴 검색어 목록. `search`일 때만, `ai`면 `None`. ★2026-10-13 `query: str` → `queries: list[str]`),
+  `items`(`RecommendationItem` 목록, 최대 5개. `search`면 검색어(환자)별 상위 논문을 번갈아 뽑은 순 —
+  검색어가 하나면 관련도 높은 순, `ai`면 AI가 정한 순)
 - **evidence_grade** (위 세 응답 모델 공통) = 화면 표시용 근거 등급 `"A"`~`"D"`. 등급이 없으면 `None`.
   DB의 `evidence_level`(문자 `"1"`~`"6"`)을 **묶은 값**이고, `evidence_level`은 그대로 함께 돌려준다.
   변환 규칙의 정본은 AI 쪽 `app/ai/retrieval/evidence.py`의 `to_grade()` (`1→A, 2→B, 3·4→C, 5·6→D`).
@@ -294,12 +298,18 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   | 관리 환자 | `caregiver_id = user_id` 전부 | `created_at, id` | **없음** (20명 초과면 예외. `total_count == len(items)`) |
   | 평가 | `assessed_at` ∈ `[reference_date - 365일, reference_date]` | `assessed_at DESC, created_at DESC, id` | 환자당 20 |
   | 안전 | `event_date` 최근 180일 **AND** `has_fall`/`has_wandering`/`has_missing` 중 하나라도 true | `event_date DESC` | 환자당 50 |
-  | 복약 | `is_taking = true` **또는** `end_date >= reference_date - 90일` | `is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id` | 환자당 30 |
-  | 방문 | `visit_date` ∈ `[reference_date - 365일, reference_date + 90일]` | `visit_date DESC, created_at DESC, id` | 환자당 20 |
+  | 복약 | 복용 중(`is_taking = true`) **또는** 최근 중단(`is_taking = false` AND `end_date` ∈ `[reference_date - 90일, reference_date]`) | `is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id` | 환자당 30 |
+  | 방문 | 지난 진료(`is_visited = true` AND `visit_date` ∈ `[reference_date - 365일, reference_date]`) **또는** 예정 진료(`is_visited = false` AND `visit_date` ∈ `[reference_date, reference_date + 90일]`) | `visit_date DESC, created_at DESC, id` | 환자당 20 |
   | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
   | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
 - **안전 이벤트: 플래그가 전부 false인 날(= 확인했고 사건 없음)은 적격이 아니다** (`total_count`에도 안 들어간다).
-- **방문 선정은 두 갈래다**: 앞으로의 예약(`visit_date > reference_date`)을 **가까운 순으로 최대 5건** 먼저
+- **★ 조건 변경 (2026-10-13) — 진료·복약은 상태와 날짜가 맞는 기록만 적격이다.** 허웅 님
+  `ProductionFeedContextSource`는 아래 조합이 하나라도 오면 **스냅샷 전체를 거부**한다. 그래서 조회와
+  건수(`total_count`) 양쪽에서 똑같이 뺀다.
+  - 진료: **미래 + 방문 완료**, **과거 + 미방문**은 적격이 아니다. **오늘 날짜**는 미방문이면 예정 진료,
+    방문 완료면 지난 진료다.
+  - 복약: **중단인데 `end_date`가 미래이거나 `NULL`**이면 적격이 아니다. 복용 중인 약은 날짜와 무관하게 적격이다.
+- **방문 선정은 두 갈래다**: 예정 진료(`is_visited = false`)를 **가까운 순으로 최대 5건** 먼저
   잡고, 남은 자리를 지난 진료가 최근 순으로 채운다. 한쪽이 모자라면 다른 쪽이 그 자리를 쓴다.
   최종 반환 순서는 `visit_date DESC, created_at DESC, id`.
 - **돌봄 기록의 `patient_id IS NULL`은 그대로 담는다** (간병인 본인 자기돌봄 기록).
@@ -334,7 +344,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   - `get_paper_detail()`은 없는 id면 예외 없이 `None`을 돌려준다 (API가 404로 바꾼다).
     `get_papers_by_ids()`(AI용 계약, url·요약 없음)는 그대로 두고 따로 만든 함수다.
 - `get_paper_details_by_pmids()`는 `get_paper_detail()`과 같은 형식을 **PMID로 여러 건** 받는다
-  (`search()`의 Evidence Package에 `paper_id`가 없고 PMID만 있어서 둔 함수, `/recommendations`가
+  (검색 결과 Evidence Package에 `paper_id`가 없고 PMID만 있어서 둔 함수, `/recommendations`가
   검색 방식과 AI 방식의 `backend_handoff()` 양쪽에서 쓴다).
   읽기만 하고, 요약이 없으면 요약 쪽 필드가 `None`이다. **`papers`에 없는 PMID는 예외 없이 결과에 키가 없다.**
   순서는 보장하지 않으므로 호출한 쪽이 PMID로 찾아 쓴다.
@@ -353,23 +363,35 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
 | `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
-| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | 환자 프로필에 맞는 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). `k` 1~5(기본 5), 범위를 벗어나면 422. 환자가 1명이면 `patient_id` 생략 가능, 2명 이상인데 생략하면 400. 없는 사용자·이 사용자의 환자가 아니면 404 | `RecommendationResponse` |
+| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 **간병인·환자 정보 조회(피드·챗봇 개인화 입력용)**다. 이름은 feed지만
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
 - 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
 - `/recommendations`(담당: 박주현)는 **두 방식**으로 응답하고, 어느 쪽인지 응답의 `mode`에 적는다.
-  프로필은 두 방식 모두 `user_functions.get_user_profile_context(user_id)` 한 번으로 읽는다.
-  - **`mode="ai"`** — 허웅 님 `FeedWorkflow` 3단계. `AgentContext(request_id=uuid4, user_id, patient_id)`를 만들어
-    `context_prepare()`(`prepare_demo_feed_input()`을 감싼 함수, 시간대는 `user_schemas.APP_TIMEZONE`)
-    → `feed_execution`(LLM + 검색) → `backend_handoff()` 순서로 돈다.
+  **★ 2026-10-13 정식(간병인 기준) 경로로 전환** — 추천 기준은 환자 한 명이 아니라 간병인의 관리 환자 전체다.
+  사용자·환자 확인(404 판정)과 검색어 재료는 `user_functions.get_user_profile_context(user_id)` 한 번으로 읽는다.
+  - **`mode="ai"`** — 허웅 님 `FeedWorkflow` 3단계. `AgentContext(request_id=uuid4, user_id, patient_id=None)`를 만들어
+    `context_prepare()` → `feed_execution`(LLM + 검색) → `backend_handoff()` 순서로 돈다.
+    - `context_prepare(context)`는 **정식 Stage 1**이다 (`app/ai/agent/README.md`의 Production 조립 예시 그대로):
+      `ProductionFeedContextSource(read_snapshot=get_feed_context_snapshot)` →
+      `DefaultFeedContextLoader(source, clock, service_timezone=APP_TIMEZONE)` → `prepare_production_feed_input(context, loader)`.
+      `clock`은 `datetime.now(APP_TIMEZONE)`(tz-aware)이다. 데모 경로(`prepare_demo_feed_input`)는 더 이상 쓰지 않는다.
+    - **`patient_id`를 줘도 AI 방식은 관리 환자 전체(0~20명)가 기준이다** (`feed_scope="caregiver_all"`).
+      환자가 0명이면 빈 환자 목록으로 그대로 돈다(cold start).
     - `backend_handoff(result)`는 순수 함수다. `result.output.items`와 `result.sources`를 짝지어
       `sources[].pmid`로 `get_paper_details_by_pmids()`를 한 번 부르고, `headline` / `summary_bullets` /
       `personal_reason` / `category`는 AI 결과에서, 나머지(`id`, `title`, … 요약 3칸)는 DB에서 채운다.
       **`pmid`가 없거나 DB에 없는 항목은 뺀다.** `relevance_score`는 `null`.
-  - **`mode="search"`** — `search_recommendations()`. `build_query()`로 검색어 한 줄 → `search(검색어, k)` →
-    `get_paper_details_by_pmids()`. `relevance_score`와 응답의 `query`(이번에 쓴 검색어, 데모·디버깅용)가 채워지고
-    AI 쪽 4칸은 `null`이다. `build_query()`는 환자 단계·증상·관심사를 문장에 끼워 넣는 검색 방식 전용 함수다.
+  - **`mode="search"`** — `search_recommendations()`. 환자마다 `build_query()`로 검색어를 하나씩 만들어
+    현서 님 `search_by_queries(검색어 목록, k)`로 합친다(검색어별 상위 논문을 번갈아 뽑고 중복은 한 번만) →
+    `get_paper_details_by_pmids()`. `relevance_score`와 응답의 `queries`(이번에 쓴 검색어 목록, 데모·디버깅용)가
+    채워지고 AI 쪽 4칸은 `null`이다.
+    - `patient_id`를 주면 **그 환자 검색어 하나만** 쓴다.
+    - 환자가 0명이면 일반 검색어 하나(`"치매 가족 돌봄에 도움이 되는 연구"`)를 쓴다.
+    - `build_query()`는 환자 단계·증상·관심사를 문장에 끼워 넣는 검색 방식 전용 함수다.
+  - **`patient_id`는 선택 값이다.** 주면 그 간병인의 환자인지 확인하고(아니면 404), 응답의 `patient_id`에 그대로 적는다.
+    안 주면 `null`. (이전: 환자가 2명 이상인데 생략하면 400, 환자 0명이면 404 → **둘 다 없앴다**.)
   - **폴백 규칙** — 아래 경우에는 `search` 방식으로 대신 응답한다(항상 200).
     - `get_feed_execution()`이 `None`일 때
     - `FeedWorkflowError`나 다른 예외가 났을 때 (`stage`와 예외 종류를 warning 로그로 남긴다. 메시지는 남기지 않는다)
@@ -377,8 +399,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   - **★ 교체 지점: `get_feed_execution()`** (`api/recommendations.py`의 FastAPI 의존성). **지금은 `None`을 돌려줘서
     실제 응답은 항상 `mode="search"`이고 `personal_reason` 등 AI 쪽 칸은 `null`이다.** 허웅 님 `search_evidence`
     핸들러·레지스트리·LLM 클라이언트가 나오면 이 함수만 `(AgentContext, str) -> StructuredAgentResult`를
-    돌려주도록 바꾼다. 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
-  - `k`는 1~5 (AI 결과가 최대 5개). 404/400 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
+    돌려주도록 바꾼다(입력은 정식 경로의 `caregiver_all` JSON). 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
+  - `k`는 1~5 (AI 결과가 최대 5개). 404 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
   - 서버를 띄운 뒤 **첫 요청은 bge-m3 모델을 불러오느라 오래 걸린다** (그 뒤로는 메모리에 남는다).
   - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요).
 
@@ -457,6 +479,13 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   가짜 `feed_execution`으로 `mode="ai"`(AI 칸 + DB 칸), 예외·0건일 때 `search` 폴백, 400·404·422를
   `tests/test_recommendations.py`(7건)로 확인했다. **실제 `feed_execution`은 아직 없어서(`get_feed_execution()`이
   `None`) 지금 응답은 항상 `mode="search"`다.**
+- **`/recommendations` 정식(간병인 기준) 경로 전환 + 실 DB 통합 검증 완료** (2026-10-13, 실 DB). **응답 계약 변경**:
+  `query` → `queries`(목록), `patient_id` null 가능, 환자 2명 이상 + `patient_id` 생략의 400과 환자 0명의 404 제거.
+  `feed_read.py`의 진료·복약 적격 조건을 허웅 님 adapter 정책에 맞췄다(위 "조건 변경").
+  샘플 간병인 4명(환자 5명) 전부 실 DB로 정식 Stage 1을 통과했고(관리 환자 전원·돌봄 기록 9건·월간 요약 1건 포함,
+  이름·이메일·전화번호·병원명·raw id 없음), 가짜 `feed_execution`으로 FeedWorkflow가 `mode="ai"`로 끝까지 도는 것을
+  `tests/test_recommendations.py`(12건) · `tests/test_feed_read.py`(44건)로 확인했다.
+  **실제 `feed_execution`은 아직 없어서 지금 응답은 항상 `mode="search"`다.**
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**

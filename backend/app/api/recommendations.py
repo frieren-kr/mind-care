@@ -1,13 +1,15 @@
 """논문 추천 API (박주현 담당).
 
-GET /recommendations/{user_id}?patient_id=&k=5   환자 프로필에 맞는 논문 최대 5편
+GET /recommendations/{user_id}?patient_id=&k=5   간병인(관리 환자 전체)에 맞는 논문 최대 5편
 
 흐름:
-  ① get_user_profile_context()로 간병인·환자 정보 읽기      [한슬님 함수]
-  ② AI 방식 (mode="ai") — 웅 님 FeedWorkflow 3단계
+  ① get_user_profile_context()로 사용자·환자 확인 (404 판정, 검색어 재료)   [한슬님 함수]
+  ② AI 방식 (mode="ai") — 웅 님 FeedWorkflow 3단계, 정식(간병인 기준) 경로
        context_prepare → feed_execution → backend_handoff
+       context_prepare = get_feed_context_snapshot() → ProductionFeedContextSource
+                         → DefaultFeedContextLoader → prepare_production_feed_input()
   ③ AI 방식을 못 쓰면 검색 방식 (mode="search")으로 대신 응답
-       build_query() → search() → get_paper_details_by_pmids()   [현서님 함수]
+       환자마다 build_query() → search_by_queries() → get_paper_details_by_pmids()   [현서님 함수]
 
 로그인이 아직 없어서 user_id를 경로로 받는다 (api/users.py와 같은 방식).
 """
@@ -21,12 +23,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.feed import FeedWorkflow, FeedWorkflowError
-from app.ai.agent.workflows.feed_context_prepare import prepare_demo_feed_input
-from app.ai.retrieval.search import search
+from app.ai.agent.workflows.feed_context_backend_source import ProductionFeedContextSource
+from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader
+from app.ai.agent.workflows.feed_context_prepare import prepare_production_feed_input
+from app.ai.retrieval.search import search_by_queries
 from app.api.evidence_grade import with_grades
 from app.db import functions, user_functions
+from app.db.feed_read import get_feed_context_snapshot
 from app.schemas import RecommendationItem, RecommendationResponse
-from app.user_schemas import APP_TIMEZONE, PatientOut, UserProfileContext
+from app.user_schemas import APP_TIMEZONE, PatientOut
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +39,9 @@ router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
 _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."
-_PATIENT_REQUIRED = "patient_id를 지정해주세요"
+
+# 관리 환자가 0명일 때 검색 방식이 쓰는 일반 검색어.
+GENERAL_QUERY = "치매 가족 돌봄에 도움이 되는 연구"
 
 FeedExecution = Callable[[AgentContext, str], StructuredAgentResult]
 
@@ -49,6 +56,8 @@ def get_feed_execution() -> Optional[FeedExecution]:
 
     ★ 웅 님 search_evidence 핸들러·레지스트리·LLM 클라이언트 함수로 교체 예정 ★
     지금은 None을 돌려주고, None이면 엔드포인트가 검색 방식으로 대신 응답한다.
+    1단계가 정식(간병인 기준) 경로이므로, 교체할 함수는 feed_scope="caregiver_all"
+    입력(관리 환자 0~20명)을 받는다. context.patient_id는 항상 None이다.
     테스트에서는 app.dependency_overrides[get_feed_execution]으로 바꿔 끼운다.
     """
     return None
@@ -70,10 +79,17 @@ def build_query(patient: PatientOut) -> str:
     return f"{subject}의 {'과 '.join(parts)}에 도움이 되는 연구"
 
 
-def search_recommendations(user_id: UUID, patient: PatientOut, k: int) -> RecommendationResponse:
-    """검색 방식 (mode="search"). AI 방식을 못 쓸 때의 대신 응답이기도 하다."""
-    query = build_query(patient)
-    evidence = search(query, k).evidence
+def search_recommendations(
+    user_id: UUID, patient_id: Optional[UUID], patients: list[PatientOut], k: int
+) -> RecommendationResponse:
+    """검색 방식 (mode="search"). AI 방식을 못 쓸 때의 대신 응답이기도 하다.
+
+    환자마다 검색어를 하나씩 만들어 search_by_queries()로 합친다 (환자별로 골고루 뽑힌다).
+    환자가 0명이면 일반 검색어 하나를 쓴다.
+    """
+    # 프로필이 같은 환자는 검색어도 같으므로 한 번만 쓴다 (순서 유지).
+    queries = list(dict.fromkeys(build_query(p) for p in patients)) or [GENERAL_QUERY]
+    evidence = search_by_queries(queries, k).evidence
     details = functions.get_paper_details_by_pmids([e.pmid for e in evidence])
 
     items = []
@@ -84,17 +100,25 @@ def search_recommendations(user_id: UUID, patient: PatientOut, k: int) -> Recomm
         # 이름이 같은 필드만 옮겨진다 (초록 등 나머지는 버려진다).
         items.append(RecommendationItem(**paper.model_dump(), relevance_score=e.relevance_score))
     return RecommendationResponse(
-        user_id=user_id, patient_id=patient.id, mode="search", query=query,
+        user_id=user_id, patient_id=patient_id, mode="search", queries=queries,
         # 근거 등급 A~D는 응답을 만드는 이 계층에서 붙인다 (evidence_grade.py 설명 참고).
         items=with_grades(items),
     )
 
 
-def context_prepare(context: AgentContext, profile: UserProfileContext) -> str:
-    """FeedWorkflow 1단계. 이미 읽어 둔 프로필을 LLM 입력(JSON 문자열)으로 바꾼다."""
-    return prepare_demo_feed_input(
-        context, profile, reference_time=datetime.now(APP_TIMEZONE), service_timezone=APP_TIMEZONE
-    )
+# 정식 Stage 1 조립 (app/ai/agent/README.md의 Production 조립 예시 그대로).
+# clock은 호출할 때마다 tz-aware 현재 시각을 돌려준다. 조회 함수는 이 시각만 기준으로 쓴다.
+_feed_context_loader = DefaultFeedContextLoader(
+    source=ProductionFeedContextSource(read_snapshot=get_feed_context_snapshot),
+    clock=lambda: datetime.now(APP_TIMEZONE),
+    service_timezone=APP_TIMEZONE,
+)
+
+
+def context_prepare(context: AgentContext) -> str:
+    """FeedWorkflow 1단계 (정식 경로). 간병인의 관리 환자 전체를 한 스냅샷으로 읽어
+    LLM 입력(JSON 문자열)으로 바꾼다. context.patient_id로 환자를 거르지 않는다."""
+    return prepare_production_feed_input(context, _feed_context_loader)
 
 
 def backend_handoff(result: StructuredAgentResult) -> list[RecommendationItem]:
@@ -126,25 +150,26 @@ def backend_handoff(result: StructuredAgentResult) -> list[RecommendationItem]:
 @router.get(
     "/{user_id}",
     response_model=RecommendationResponse,
-    summary="환자 맞춤 논문 추천",
-    responses={
-        400: _example(_PATIENT_REQUIRED),
-        404: _example(_USER_NOT_FOUND),
-    },
+    summary="간병인 맞춤 논문 추천",
+    responses={404: _example(_USER_NOT_FOUND)},
 )
 def get_recommendations(
     user_id: UUID,
-    patient_id: Optional[UUID] = Query(None, description="추천 기준 환자. 환자가 1명이면 생략 가능"),
+    patient_id: Optional[UUID] = Query(
+        None, description="선택. 주면 검색 방식 응답만 그 환자 기준으로 좁힌다 (AI 방식은 항상 환자 전체)"
+    ),
     k: int = Query(5, ge=1, le=5, description="추천 논문 수 (최대 5)"),
     feed_execution: Optional[FeedExecution] = Depends(get_feed_execution),
 ) -> RecommendationResponse:
-    """환자 프로필에 맞는 논문을 최대 `k`편 돌려준다.
+    """간병인의 관리 환자 전체를 기준으로 논문을 최대 `k`편 돌려준다.
 
     - `mode="ai"`: AI가 고른 논문 + `headline` / `summary_bullets` / `personal_reason` / `category`.
-    - `mode="search"`: 검색어(`query`)와 가까운 논문 + `relevance_score`. AI 방식을 아직 못 쓰거나
-      실패했거나 결과가 0건일 때의 대신 응답이다.
-    - 환자가 2명 이상인데 `patient_id`를 생략하면 400.
-    - 없는 사용자, 이 사용자의 환자가 아닌 `patient_id`(없는 환자 포함)는 404.
+      `patient_id`와 관계없이 관리 환자 전체가 기준이다.
+    - `mode="search"`: 검색어(`queries`)와 가까운 논문 + `relevance_score`. AI 방식을 아직 못 쓰거나
+      실패했거나 결과가 0건일 때의 대신 응답이다. 환자마다 검색어를 하나씩 만들고,
+      `patient_id`를 주면 그 환자 검색어 하나만 쓴다. 환자가 0명이면 일반 검색어 하나.
+    - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
+    - 없는 사용자는 404.
     - 서버를 띄운 뒤 첫 요청은 임베딩 모델(bge-m3)을 불러오느라 오래 걸린다.
     """
     profile = user_functions.get_user_profile_context(user_id)
@@ -152,20 +177,15 @@ def get_recommendations(
         raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
 
     patients = {row.patient.id: row.patient for row in profile.patients}
-    if patient_id is None:
-        if len(patients) > 1:
-            raise HTTPException(status_code=400, detail=_PATIENT_REQUIRED)
-        if not patients:
-            raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
-        patient_id = next(iter(patients))
-    elif patient_id not in patients:
+    if patient_id is not None and patient_id not in patients:
         raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
 
     if feed_execution is not None:
         try:
-            context = AgentContext(request_id=str(uuid4()), user_id=user_id, patient_id=patient_id)
+            # 정식 경로는 간병인 기준이라 patient_id를 넘기지 않는다.
+            context = AgentContext(request_id=str(uuid4()), user_id=user_id, patient_id=None)
             items = FeedWorkflow(
-                context_prepare=lambda ctx: context_prepare(ctx, profile),
+                context_prepare=context_prepare,
                 feed_execution=feed_execution,
                 backend_handoff=lambda _ctx, result: backend_handoff(result),
             ).run(context)[:k]
@@ -181,4 +201,5 @@ def get_recommendations(
         except Exception as exc:
             logger.warning("추천 AI 실패 → 검색 방식으로 응답 (stage=없음, %s)", type(exc).__name__)
 
-    return search_recommendations(user_id, patients[patient_id], k)
+    selected = [patients[patient_id]] if patient_id is not None else list(patients.values())
+    return search_recommendations(user_id, patient_id, selected, k)

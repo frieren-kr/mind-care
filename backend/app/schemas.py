@@ -317,22 +317,29 @@ class RecommendationResponse(BaseModel):
     """GET /recommendations/{user_id} 응답."""
 
     user_id: UUID
-    patient_id: UUID = Field(description="추천 기준이 된 환자 (patient_profiles.id)")
+    patient_id: Optional[UUID] = Field(
+        default=None,
+        description="요청에 준 patient_id 그대로. 안 줬으면 null (= 간병인의 관리 환자 전체 기준)",
+    )
     mode: Literal["ai", "search"] = Field(
         description="어느 방식으로 만들었는지. ai = FeedWorkflow, search = 검색 방식(폴백)"
     )
-    query: Optional[str] = Field(
-        default=None, description="이번 추천에 쓴 검색어 (데모·디버깅용). mode='search'일 때만, ai면 null"
+    queries: Optional[list[str]] = Field(
+        default=None,
+        description="이번 추천에 쓴 검색어 목록 (데모·디버깅용). 환자마다 하나, patient_id를 주면 그 환자 것 하나, "
+        "환자가 0명이면 일반 검색어 하나. mode='search'일 때만, ai면 null",
     )
-    items: list[RecommendationItem] = Field(description="search면 관련도 높은 순, ai면 AI가 정한 순")
+    items: list[RecommendationItem] = Field(description="search면 검색어(환자)별 상위 논문을 번갈아 뽑은 순 (검색어가 하나면 관련도 높은 순), "
+        "ai면 AI가 정한 순"
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "user_id": "593bb66f-148d-481e-9537-00473b147d26",
-                "patient_id": "1e89c282-59a8-4036-a006-803e4644dc7a",
+                "patient_id": None,
                 "mode": "search",
-                "query": "치매 환자(경도인지장애)의 수면장애, 기억력 저하 증상과 수면 위생, 운동에 도움이 되는 연구",
+                "queries": ["치매 환자(경도인지장애)의 수면장애, 기억력 저하 증상과 수면 위생, 운동에 도움이 되는 연구"],
                 "items": [
                     {
                         "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",

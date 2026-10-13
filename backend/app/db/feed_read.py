@@ -159,10 +159,12 @@ _SAFETY_COUNT = f"""
 """
 
 # 복용 중이거나, 최근에 끊은 약 (최근 중단은 임상적으로 의미가 있다).
+# 중단인데 end_date가 미래이거나 NULL인 약은 적격이 아니다 (AI adapter가 스냅샷 전체를 거부한다).
 _MEDICATION_WHERE = """
      WHERE patient_id = ANY(%(patient_ids)s)
        AND (is_taking = true
-            OR end_date >= %(reference_date)s - make_interval(days => %(window_days)s))
+            OR (end_date >= %(reference_date)s - make_interval(days => %(window_days)s)
+                AND end_date <= %(reference_date)s))
 """
 _MEDICATIONS = f"""
     SELECT patient_id, drug_name, is_taking, start_date, end_date, note, dosage, frequency
@@ -184,12 +186,20 @@ _MEDICATIONS_COUNT = f"""
      GROUP BY patient_id
 """
 
+# 지난 진료 = 방문 완료 + [reference_date - past_days, reference_date]
+# 예정 진료 = 미방문   + [reference_date, reference_date + future_days]
+# 그 외 조합(미래 + 방문 완료, 과거 + 미방문)은 적격이 아니다. 조회와 건수가 이 조건을 같이 쓴다
+# (AI adapter가 그런 기록이 하나라도 있으면 스냅샷 전체를 거부한다).
 _VISIT_WHERE = """
      WHERE patient_id = ANY(%(patient_ids)s)
-       AND visit_date >= %(reference_date)s - make_interval(days => %(past_days)s)
-       AND visit_date <= %(reference_date)s + make_interval(days => %(future_days)s)
+       AND ((is_visited
+             AND visit_date >= %(reference_date)s - make_interval(days => %(past_days)s)
+             AND visit_date <= %(reference_date)s)
+            OR (NOT is_visited
+                AND visit_date >= %(reference_date)s
+                AND visit_date <= %(reference_date)s + make_interval(days => %(future_days)s)))
 """
-# 방문 선정은 두 갈래다: 앞으로의 예약을 가까운 순으로 최대 upcoming_cap건 먼저 잡고,
+# 방문 선정은 두 갈래다: 예정 진료(미방문)를 가까운 순으로 최대 upcoming_cap건 먼저 잡고,
 # 남은 자리를 지난 진료로 최근 순으로 채운다. 한쪽이 모자라면 다른 쪽이 그 자리를 쓴다.
 #   upcoming_quota = min(n_upcoming, upcoming_cap)
 #   past_take      = min(n_past,     cap - upcoming_quota)
@@ -201,7 +211,7 @@ _VISITS = f"""
                visit_reason, diagnosis, treatment_content, test_summary,
                medication_change, doctor_note, follow_up_plan,
                created_at, id,
-               (visit_date > %(reference_date)s) AS is_upcoming
+               (NOT is_visited) AS is_upcoming
           FROM medical_visits
           {_VISIT_WHERE}
     ), ranked AS (
