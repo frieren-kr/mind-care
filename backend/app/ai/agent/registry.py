@@ -42,6 +42,8 @@ TOOL_CONTRACTS = {
                      c.RecentCareLogsInput, c.RecentCareLogsOutput),
         ToolContract(ToolName.SEARCH_EVIDENCE,
                      "연구·의학적 근거가 필요할 때 현재 corpus에서 치매/MCI 및 인지건강 관련 연구 근거 후보를 검색한다. "
+                     "관련 의학·연구 용어를 사용한 영어 query를 가능한 한 우선 작성하도록 권장한다. "
+                     "한국어 query도 허용하지만 영어보다 우선순위가 낮으며, 영어로 검색 의도를 정확하게 표현하기 어려울 때 사용할 수 있다. "
                      "검색 결과나 relevance_score만으로 의료 주장 진위 또는 evidence level을 판단하지 않는다.",
                      c.EvidenceSearchInput, c.EvidencePackage),
     )

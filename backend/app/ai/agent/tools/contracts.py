@@ -86,6 +86,8 @@ class RecentCareLogsOutput(AgentModel):
 class EvidenceSearchInput(AgentModel):
     query: str = Field(min_length=1, max_length=2000, description=(
         "연구 근거 검색용 query. 사용자 원문 또는 검색 목적에 맞게 재구성한 질문을 허용한다. "
+        "가능한 한 임상·돌봄 의미를 유지한 간결한 영어 검색어를 우선 작성하도록 권장한다. "
+        "한국어 검색어도 허용하되 영어보다 우선순위가 낮으며, 영어 표현이 불명확하거나 검색 의도를 왜곡할 우려가 있으면 사용할 수 있다. "
         "필요한 임상/돌봄 맥락은 포함할 수 있으나 검색에 불필요한 직접 식별정보(UUID, 이름, 전화번호, 주소 등)는 포함하지 않는다. "
         "whitespace-only는 거부하며 nonblank 원문은 그대로 보존한다."
     ))

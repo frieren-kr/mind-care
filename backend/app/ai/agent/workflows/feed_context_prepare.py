@@ -1,13 +1,10 @@
 """Production Stage 1 minimization and serialization for all managed patients.
 
 Trusted callers inject authorized reads and time configuration. Loader errors
-retain their codes. The legacy recommendations API shim is isolated and lazy;
-it is not an alternative official Stage 1 or a Production fallback.
+retain their codes.
 """
-from datetime import datetime, tzinfo
+from datetime import tzinfo
 import json
-
-from app.user_schemas import UserProfileContext
 
 from ..schemas import AgentContext
 from .feed_context import FeedPersonalizationContextV1
@@ -77,15 +74,3 @@ def prepare_production_feed_input(context: AgentContext, loader: DefaultFeedCont
     """
     value = loader(context, recent_days=30)
     return build_production_feed_provider_input(value, service_timezone=loader.service_timezone)
-
-
-def prepare_demo_feed_input(context: AgentContext, profile: UserProfileContext, *,
-                            reference_time: datetime, service_timezone: tzinfo) -> str:
-    """Temporary import-compatible entry point for recommendations.py only.
-
-    Remove together with feed_demo_compat after the API owner switches its read
-    and Stage 1 to the Production Snapshot/Loader contract. Never use internally.
-    """
-    from .feed_demo_compat import prepare_demo_feed_input as prepare_legacy
-    return prepare_legacy(context, profile, reference_time=reference_time,
-                          service_timezone=service_timezone)
