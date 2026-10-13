@@ -208,16 +208,50 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "\d paper_analysis"
 
 `title_ko`와 `summary_background` 컬럼이 보이고 `summary_comparison`이 없으면 완료입니다. (기존 요약·등급 데이터는 건드리지 않습니다.)
 
+### ⚠️ 이미 DB를 띄워 둔 사람은 008도 직접 적용해야 합니다
+
+위와 같은 이유로 `008_guideline_embedding.sql`도 자동 반영되지 않습니다.
+가이드라인 테이블 `guideline_knowledge`를 **"가이드라인 문서의 조각 + 임베딩"** 으로 넓히는 마이그레이션입니다.
+
+- 칸 추가: `doc_title`, `section`, `chunk_index`, `source_url`, `published_year`, `language`,
+  `embedding`(`vector(1024)`), `embedding_model`, `created_at`
+- `(source_url, chunk_index)` UNIQUE 인덱스 — 같은 조각을 다시 저장하면 갱신됩니다.
+- `embedding` HNSW 인덱스(코사인) — 논문 임베딩과 같은 방식입니다.
+
+`backend/` 에서 아래 명령으로 적용하세요.
+
+```powershell
+# Windows PowerShell
+Get-Content app\db\migrations\008_guideline_embedding.sql -Raw -Encoding UTF8 | docker exec -i mindcare-db psql -U mindcare -d mindcare
+```
+
+```bash
+# macOS / Linux / Git Bash
+docker exec -i mindcare-db psql -U mindcare -d mindcare < app/db/migrations/008_guideline_embedding.sql
+```
+
+모든 문장이 `IF NOT EXISTS`라서 **여러 번 실행해도 안전합니다.** 적용됐는지 확인:
+
+```bash
+docker exec mindcare-db psql -U mindcare -d mindcare -c "\d guideline_knowledge"
+```
+
+`doc_title`부터 `created_at`까지 새 칸과 `guideline_knowledge_source_chunk_key`, `idx_guideline_knowledge_hnsw`
+인덱스가 보이면 완료입니다. (논문·요약 데이터는 건드리지 않습니다.)
+
+> `guideline_knowledge`에 이미 행이 있으면 "기존 행이 있어 NOT NULL 칸을 추가할 수 없습니다"라며 멈춥니다.
+> 지금까지 이 테이블에 저장하는 기능이 없었으므로 보통은 비어 있습니다.
+
 ### 팀원 데이터 맞추기 (팀 기준 논문 1,000편 + 임베딩)
 
 팀은 **같은 논문 1,000편 + bge-m3 임베딩 1,000개**를 기준 데이터로 공유합니다.
-논문 덤프는 용량이 커서 **레포에 넣지 않고 노션에서 받습니다**
+논문 덤프는 용량이 커서 **레포에 넣지 않고 팀 단톡(카톡)에서 받습니다**
 (`mindcare_papers_bge-m3.dump`, custom 형식·데이터만).
 
 > 같은 덤프로 복원하면 모든 팀원의 `papers.id`(= AI가 쓰는 `paper_id`)가 **똑같아집니다.**
 > 그래서 임베딩·요약·검색 결과를 팀원끼리 그대로 주고받을 수 있습니다.
 
-1. 노션에서 `mindcare_papers_bge-m3.dump`를 받습니다. (레포 밖, 예: 바탕화면)
+1. 팀 단톡(카톡)에서 `mindcare_papers_bge-m3.dump`를 받습니다. (레포 밖, 예: 바탕화면)
 2. DB를 띄웁니다: `docker compose up -d` (STATUS가 healthy인지 `docker compose ps`로 확인).
 3. 기존 논문을 비우고 덤프를 복원합니다. PowerShell은 `<` 입력 리다이렉트가 안 되므로
    **`docker cp`로 컨테이너에 넣고 그 안에서 `pg_restore`** 하세요.
@@ -242,7 +276,7 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 #### 요약·근거 등급 데이터 받기 (`paper_analysis`)
 
 논문별 **쉬운 3칸 요약 + 한국어 제목(`title_ko`) + 근거 등급**도 덤프로 공유합니다
-(`paper_analysis_YYYYMMDD.sql`, 일반 SQL 형식·`paper_analysis` 데이터만, 노션에서 받습니다).
+(`paper_analysis_YYYYMMDD.sql`, 일반 SQL 형식·`paper_analysis` 데이터만, 팀 단톡(카톡)에서 받습니다).
 각자 요약 배치를 돌리면 LLM 비용이 들고 문장도 사람마다 달라지므로, 이 덤프로 맞춥니다.
 
 > **위의 논문 덤프를 먼저 복원한 상태여야 합니다.** `paper_analysis.paper_id`가 `papers.id`를 가리키기 때문에,
@@ -255,7 +289,7 @@ docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT (SELECT count(*)
 
 ```powershell
 # Windows PowerShell — 덤프 경로와 날짜는 각자 받은 파일로 바꾸세요 (macOS / Linux도 경로만 바꾸면 같습니다)
-docker cp "$HOME\Desktop\paper_analysis_20261013.sql" mindcare-db:/tmp/paper_analysis.sql
+docker cp "$HOME\Desktop\paper_analysis_20261014.sql" mindcare-db:/tmp/paper_analysis.sql
 docker exec mindcare-db psql -U mindcare -d mindcare -v ON_ERROR_STOP=1 --single-transaction -c "TRUNCATE paper_analysis;" -f /tmp/paper_analysis.sql
 docker exec mindcare-db rm /tmp/paper_analysis.sql
 ```
@@ -269,8 +303,8 @@ Git Bash에서는 `/tmp/...` 경로가 Windows 경로로 바뀌므로 명령 앞
 docker exec mindcare-db psql -U mindcare -d mindcare -c "SELECT count(*) AS rows, count(summary_finding) AS summarized, count(title_ko) AS titled, count(study_type) AS graded FROM paper_analysis;"
 ```
 
-`paper_analysis_20261013.sql` 기준으로 `rows 1000 / summarized 996 / titled 996 / graded 1000`이면 완료입니다.
-(요약이 없는 4편은 자동 검사를 통과하지 못해 저장하지 않은 논문입니다.)
+`paper_analysis_20261014.sql` 기준으로 `rows 1000 / summarized 998 / titled 998 / graded 1000`이면 완료입니다.
+(요약이 없는 2편은 자동 검사를 통과하지 못해 저장하지 않은 논문입니다.)
 
 ### 개발용 샘플 사용자 넣기
 

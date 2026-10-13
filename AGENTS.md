@@ -61,7 +61,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `002_add_paper_metadata.sql`(논문 메타데이터 컬럼) + `003_embedding_dim_1024.sql`(임베딩 `vector(1024)` + HNSW)
   + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE)
   + `007_paper_analysis_title_ko.sql`(`paper_analysis.title_ko` — 논문 제목의 한국어 번역,
-    `summary_comparison` → `summary_background` 이름 변경).
+    `summary_comparison` → `summary_background` 이름 변경)
+  + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장).
 - `backend/app/schemas.py` — 함수 입출력 스키마(pydantic). 이 계약의 단일 출처.
 - `backend/app/collectors/pubmed.py` — PubMed 수집(주 1회 배치).
 - `backend/scripts/summarize_papers.py` — 논문 3칸 요약(연구 배경·새로 밝혀진 것·한계) + 한국어 제목 생성 배치 (OpenAI, 담당 박주현).
@@ -141,6 +142,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | 도메인 | 다루는 테이블 | 담당 |
 |---|---|---|
 | 논문·임베딩·요약·검색 | `papers`, `paper_embeddings`, `paper_analysis` | 박주현 |
+| 가이드라인(기반 지식층) 저장·검색 | `guideline_knowledge` | 박주현 (조각 나누기·임베딩 생성은 김현서) |
 | 사용자·환자 관련 | `users`, `patient_profiles`, `caregiver_profiles`, `clinical_assessments`, `safety_events`, `medications`, `medical_visits` | 김한슬 |
 
 `paper_analysis`는 논문당 한 줄인데 **칸마다 채우는 사람이 다르다** (2026-10-09, 김현서 님과 합의).
@@ -172,6 +174,15 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
 | `get_paper_details_by_pmids(pmids: list[str])` | `pmids`: PubMed PMID 목록 (`papers.external_id`, `source='pubmed'`) | `dict[str, PaperDetailResponse]` — 키가 PMID |
 
+**가이드라인(기반 지식층)** — `backend/app/db/functions.py` (담당 박주현, 2026-10-14 추가, `008`).
+**역할: 조각 나누기와 임베딩 생성은 AI(김현서), 저장·검색 함수는 DB(박주현).**
+
+| 함수 | 입력 | 반환 |
+|------|------|------|
+| `save_guidelines(items: list[GuidelineChunkIn])` | 조각(본문 + 메타 + 임베딩) 목록. 같은 `(source_url, chunk_index)`면 **갱신(upsert)** | 저장·갱신한 조각 수 (`int`) |
+| `search_similar_guidelines(query_embedding, k=5)` | `query_embedding`: `list[float]`(길이=`EMBEDDING_DIM`=**1024**), `k`: int | `list[GuidelineSearchResult]` — `id` + `score`만 |
+| `get_guidelines_by_ids(ids: list[UUID])` | `guideline_knowledge.id` 목록 (`search_similar_guidelines()`가 돌려주는 `id`) | `list[GuidelineChunkOut]` — **입력 순서 그대로** |
+
 **피드 개인화 조회·쓰기** — `backend/app/db/feed_read.py` (담당 박주현, 입출력 정본은 `app/feed_schemas.py`):
 
 | 함수 | 입력 | 반환 |
@@ -197,6 +208,13 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - **UpdateMetadataResult**: `total, updated, not_found`(papers에 없던 `external_id` 목록)
 - **EmbeddingIn** (`paper_embeddings` 입력): `paper_id, embedding` — `embedding` 길이는 반드시 `EMBEDDING_DIM`(=1024).
 - **SaveEmbeddingsResult**: `total, saved, not_found`(papers에 없던 `paper_id` 목록)
+- **GuidelineChunkIn** (`save_guidelines` 입력, 가이드라인 문서의 한 조각): `doc_title`(가이드라인 이름), `section?`(장·절 제목),
+  `chunk_index`(문서 안 조각 순서, 0 이상), `content`(조각 본문, **공백뿐이면 거부**), `topic`(주제), `source?`(발행 기관),
+  `source_url`(원문 링크), `published_year?`, `language?`(`"ko"`/`"en"`), `tags`, `embedding`(길이 반드시 1024), `embedding_model`
+  — `id`/`created_at`/`updated_at`은 DB가 채운다. **`(source_url, chunk_index)`가 조각을 가리키는 키다.**
+- **GuidelineSearchResult** (`search_similar_guidelines` 반환): `id, score` — 논문의 `SearchResult`와 같은 모양.
+- **GuidelineChunkOut** (`get_guidelines_by_ids` 반환): `id, doc_title, section?, chunk_index, content, source?, source_url,
+  published_year?, language?, topic, tags` — 임베딩은 돌려주지 않는다.
 - **PaperListItem** (`list_papers` 목록 한 줄): `id, title, published_at?, journal?, evidence_level?, evidence_grade?, title_ko?, summary_finding?` — 초록 없음.
 - **PaperListResponse**: `total`(전체 논문 수), `limit, offset, items`(`PaperListItem` 목록)
 - **PaperDetailResponse** (`get_paper_detail` 반환): `id, title, abstract?, published_at?, journal?, pubmed_url?, doi?, publication_types, mesh_terms` + 요약 `study_type?, evidence_level?, evidence_grade?, title_ko?, summary_background?, summary_finding?, summary_limitation?`
@@ -295,6 +313,20 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     배치 안에 한 건이라도 섞여 있으면 **아무것도 저장하지 않는다**(다른 모델 벡터 혼입 방지).
     배치 내 중복 `paper_id`는 첫 건만 쓴다. `papers`에 없는 `paper_id`는 외래키 위반으로 배치가 통째로
     실패하지 않게 건너뛰고 `not_found`로 보고한다.
+
+가이드라인 함수 동작 (2026-10-14):
+- `guideline_knowledge`의 한 줄 = 가이드라인 문서의 **한 조각(장·절 단위) + 그 조각의 임베딩**. 논문과 달리 본문과 임베딩을
+  한 테이블에 두고 항상 같이 저장한다. 임베딩 모델·차원은 논문과 같다(bge-m3 / 1024).
+- `save_guidelines()`는 INSERT 한 번(= 한 트랜잭션)으로 넣는다. `(source_url, chunk_index)`가 같으면 본문·메타·임베딩을
+  모두 새 값으로 갱신하고 `id`는 그대로 둔다(`updated_at`만 다시 찍는다). 임베딩이 1024차원이 아니거나 본문이 공백뿐이면
+  **DB에 가기 전에** `ValueError`(`GuidelineChunkIn`을 만들 때)가 나고, 그 배치는 아무것도 저장되지 않는다.
+  배치 안의 중복 키는 첫 건만 쓴다. **조각을 지우지는 않는다** — 문서를 다시 나눠 조각 수가 줄면 뒤쪽 `chunk_index`의
+  옛 조각이 남는다(지우는 함수는 아직 없다).
+- `search_similar_guidelines()`는 코사인 유사도(`1 - 코사인 거리`) 내림차순으로 **`id`와 `score`만** 돌려준다.
+  임베딩이 없는 줄은 빠진다. 질의 벡터가 1024차원이 아니면 `ValueError`, `k <= 0`이면 빈 목록.
+  받은 `id`를 순서대로 `get_guidelines_by_ids()`에 넣으면 유사도 순서가 보존된 본문·출처가 나온다.
+- `get_guidelines_by_ids()`는 **입력 순서를 유지**하고, DB에 없는 `id`는 예외 없이 빠진다(`get_papers_by_ids()`와 같은 규칙).
+- 테스트: `python -m unittest tests.test_guidelines` (가짜 1024차원 임베딩, 실 DB + `008` 필요).
 
 `feed_read.py` 정책 (2026-10-12, AI 담당과 확정):
 - `get_feed_context_snapshot()`은 **사용자 확인부터 모든 조회·건수까지를 읽기 전용
@@ -524,7 +556,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `backend/app/db/seed/team_pmids_1000.txt`, 라벨링 후보 60편도 모두 포함된다.
   검증: `papers`/`paper_embeddings` 각 1,000건, 임베딩 전부 `bge-m3`·1024차원,
   `get_papers_without_embedding('bge-m3')` 0건, `search_similar()`가 질의 논문을 score 1.0 1위로 반환.
-  **같은 덤프로 복원하면 팀원 모두 `paper_id`가 동일해진다.** 덤프는 레포에 없고 노션에서 받는다
+  **같은 덤프로 복원하면 팀원 모두 `paper_id`가 동일해진다.** 덤프는 레포에 없고 팀 단톡(카톡)에서 받는다
   (복원 방법은 `README.md`의 "팀원 데이터 맞추기").
 - **근거 등급·요약 저장 경로 분리 완료** (2026-10-09, 실 DB). `save_evidence()` /
   `get_papers_without_evidence()` 추가, `get_new_papers()` 기준 변경(**계약 변경**), `save_summary()`가
@@ -560,14 +592,19 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   요약이 없는 4편(PMID 42302487, 42257639, 41677635, 41114286)은 자동 검사를 두 번 통과하지 못해 저장하지 않았다.
   **(2026-10-14)** 코드명 허용 뒤 2편(42302487, 41677635)을 더 저장해 **로컬 DB는 998편**이다. 남은 2편은
   42257639(본문에 영어 `Botulinum toxin`)와 41114286(본문에 생쥐 모델 이름 `APP`)이다.
-  아래 덤프(`20261013`)는 그 전에 뜬 것이라 996편이다.
-  덤프(`paper_analysis_20261013.sql`)는 레포에 없고 노션에서 받는다 — 복원 방법은 `README.md`의 "팀원 데이터 맞추기".
+  덤프(`paper_analysis_20261014.sql`)는 이 998편 기준이다 (이전 `20261013` 덤프는 996편).
+  덤프는 레포에 없고 팀 단톡(카톡)에서 받는다 — 복원 방법은 `README.md`의 "팀원 데이터 맞추기".
 - **공백 요약 버그 수정** (2026-10-13, 허웅 님 제보). 공백뿐인 요약 칸은 LLM 응답 검증·`AnalysisIn`·`save_summary()`
   세 곳에서 거부하고, `get_new_papers()`는 공백만 든 `summary_finding`도 "요약 없음"으로 본다(**계약 변경**).
   수정 시점에 DB에는 공백·빈 문자열 행이 0건이었다.
 - **추천 응답에서 `headline`·`summary_bullets` 제거** (2026-10-13). **응답 계약 변경**: 허웅 님 `FeedAnswerV2`에서
   AI 결과의 두 칸이 빠진 데 맞춰 `RecommendationItem`에서도 지웠다. AI 결과에서 오는 칸은 `personal_reason`·`category`뿐이고,
   제목(`title_ko`)과 요약 3칸은 DB에서 온다. `frontend/`의 타입·목업에는 아직 `summary_bullets`가 남아 있다(프론트 담당 영역).
+- **가이드라인 저장·검색 함수 3개 구현·검증 완료** (2026-10-14, 실 DB, `008_guideline_embedding.sql`).
+  `save_guidelines()` / `search_similar_guidelines()` / `get_guidelines_by_ids()`. 가짜 1024차원 임베딩으로 저장 →
+  같은 키 재저장 시 갱신(줄 수·`id` 유지) → 유사도 순 검색 → 입력 순서 유지 조회 → 768·1536차원과 공백 본문 거부를
+  `tests/test_guidelines.py`(8건)로 확인하고 테스트 조각은 지웠다. **실제 가이드라인 데이터는 아직 없다**
+  (`guideline_knowledge` 0건 — 조각 나누기·임베딩 생성은 현서 님 담당).
 - **팀 협업 규칙(위 섹션)은 초안 — 팀 합의 대기 중.**
 
 **해결됨 (2026-10-01) — 임베딩 차원은 1024(bge-m3)로 확정.**
