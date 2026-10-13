@@ -403,7 +403,7 @@ class ProductionStageOneTests(unittest.TestCase):
                 execution={"status": "completed", "request_id": context.request_id,
                            "final_answer": None, "tool_rounds": 0, "total_tool_calls": 0,
                            "called_tools": [], "errors": []},
-                output={"schema_version": "1", "response_type": "feed", "items": []}, sources=[],
+                output={"schema_version": "2", "response_type": "feed", "items": []}, sources=[],
             )
         receipt = object()
         def handoff(context, result):
@@ -461,7 +461,7 @@ class ProductionStageOneTests(unittest.TestCase):
                 execution={"status": "completed", "request_id": context.request_id,
                            "final_answer": None, "tool_rounds": 0, "total_tool_calls": 0,
                            "called_tools": [], "errors": []},
-                output={"schema_version": "1", "response_type": "feed", "items": []}, sources=[],
+                output={"schema_version": "2", "response_type": "feed", "items": []}, sources=[],
             ))
             receipt = object()
             handoff = Mock(return_value=receipt)

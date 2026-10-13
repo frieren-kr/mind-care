@@ -5,7 +5,7 @@ import traceback
 import unittest
 from unittest.mock import patch
 
-from ..outputs import FeedAnswerV1, StructuredAgentResult
+from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..prompts import DefaultPromptBuilder
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec, production_registry
 from ..schemas import ModelTurn, ToolCall
@@ -36,10 +36,9 @@ def search_call(identifier="search_1", query="Dementia sleep research"):
 
 
 def final_turn(call_id="search_1", index=0, *, empty=False):
-    return ModelTurn(text=json.dumps({"schema_version": "1", "response_type": "feed",
+    return ModelTurn(text=json.dumps({"schema_version": "2", "response_type": "feed",
         "items": [] if empty else [{
             "source_ref": {"tool_call_id": call_id, "evidence_index": index},
-            "headline": "Synthetic dementia research", "summary_bullets": ["Synthetic public finding"],
             "personal_reason": "Synthetic care interest", "category": "care",
         }]}))
 
@@ -127,9 +126,9 @@ class IterativeResearchTests(unittest.TestCase):
         self.assertIs(run.call_args.args[0], prepared)
         self.assertIs(result, returned[0])
         self.assertIs(run.call_args.args[1], CONTEXT)
-        self.assertIs(run.call_args.kwargs["output_model"], FeedAnswerV1)
+        self.assertIs(run.call_args.kwargs["output_model"], FeedAnswerV2)
         self.assertIsInstance(result, StructuredAgentResult)
-        self.assertIsInstance(result.output, FeedAnswerV1)
+        self.assertIsInstance(result.output, FeedAnswerV2)
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.execution.total_tool_calls, 1)
         self.assertEqual(result.execution.errors, [])

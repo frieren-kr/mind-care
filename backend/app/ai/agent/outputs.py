@@ -1,4 +1,4 @@
-"""V1 AI 콘텐츠 계약과 서버용 출처 해석. Frontend DTO/DB 계약이 아니다."""
+"""AI 콘텐츠 계약과 서버용 출처 해석. Frontend DTO/DB 계약이 아니다."""
 import json
 import unicodedata
 from collections.abc import Mapping
@@ -50,19 +50,17 @@ class ChatAnswerV1(AgentModel):
         return self
 
 
-class FeedContentItemV1(AgentModel):
+class FeedContentItemV2(AgentModel):
     source_ref: EvidenceReference
-    headline: ContentText = Field(max_length=200)
-    summary_bullets: SummaryBullets
     personal_reason: ContentText = Field(max_length=1000)
     category: Category
 
 
-class FeedAnswerV1(AgentModel):
-    schema_version: Literal["1"]
+class FeedAnswerV2(AgentModel):
+    schema_version: Literal["2"]
     response_type: Literal["feed"]
     # 0개도 정상: 검색/필터링/개인화 근거 부족은 효과 없음이라는 뜻이 아니다.
-    items: list[FeedContentItemV1] = Field(max_length=5)
+    items: list[FeedContentItemV2] = Field(max_length=5)
 
     @model_validator(mode="after")
     def check_refs(self):
@@ -98,8 +96,8 @@ class PaperDetailContentV1(AgentModel):
     glossary: list[GlossaryEntryV1] = Field(max_length=10)
 
 
-FinalAnswerV1 = Annotated[ChatAnswerV1 | FeedAnswerV1, Field(discriminator="response_type")]
-FinalOutputModel = type[ChatAnswerV1] | type[FeedAnswerV1]
+FinalAnswerV1 = Annotated[ChatAnswerV1 | FeedAnswerV2, Field(discriminator="response_type")]
+FinalOutputModel = type[ChatAnswerV1] | type[FeedAnswerV2]
 
 
 class ResolvedEvidence(AgentModel):
@@ -162,7 +160,7 @@ class StructuredAgentResult(AgentModel):
 
 
 def resolve_evidence_references(
-    output: ChatAnswerV1 | FeedAnswerV1 | PaperDetailContentV1,
+    output: ChatAnswerV1 | FeedAnswerV2 | PaperDetailContentV1,
     evidence_by_call: Mapping[str, EvidencePackage],
 ) -> list[ResolvedEvidence]:
     """호출자가 제공하는 성공한 검색 snapshot만 사용. 누락/범위 초과는 거부한다.
@@ -170,12 +168,12 @@ def resolve_evidence_references(
     Orchestrator는 검증된 성공 search_evidence만 이 mapping에 넣는다.
     직접 사용할 경우에도 동일한 신뢰 경계를 유지해야 한다.
     """
-    if type(output) not in (ChatAnswerV1, FeedAnswerV1, PaperDetailContentV1):
+    if type(output) not in (ChatAnswerV1, FeedAnswerV2, PaperDetailContentV1):
         raise ValueError("Unsupported output model")
     output = type(output).model_validate(output.model_dump(warnings=False))
     if isinstance(output, ChatAnswerV1):
         refs = output.citation_refs
-    elif isinstance(output, FeedAnswerV1):
+    elif isinstance(output, FeedAnswerV2):
         refs = [item.source_ref for item in output.items]
     else:
         refs = [output.source_ref]
@@ -209,9 +207,9 @@ def _reject_constant(value):
 
 def validate_final_output(
     text: str, output_model: FinalOutputModel, evidence_by_call: Mapping[str, EvidencePackage],
-) -> tuple[ChatAnswerV1 | FeedAnswerV1, list[ResolvedEvidence]]:
+) -> tuple[ChatAnswerV1 | FeedAnswerV2, list[ResolvedEvidence]]:
     """단일 JSON object를 검증한다. markdown 추출/자동 수정/Provider 재호출 없음."""
-    if output_model not in (ChatAnswerV1, FeedAnswerV1):
+    if output_model not in (ChatAnswerV1, FeedAnswerV2):
         raise ValueError("Unsupported final output model")
     if not isinstance(text, str) or len(text) > 65536:
         raise ValueError("Invalid structured response size")

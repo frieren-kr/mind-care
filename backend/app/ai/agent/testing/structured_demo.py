@@ -1,8 +1,8 @@
-"""Chat/Feed V1 오프라인 예시. 합성 데이터만 사용: python -m app.ai.agent.testing.structured_demo."""
+"""Chat V1/Feed V2 오프라인 예시. 합성 데이터만 사용: python -m app.ai.agent.testing.structured_demo."""
 from uuid import UUID
 
 from ..agent_loop_runner import AgentLoopRunner
-from ..outputs import ChatAnswerV1, EvidenceReference, FeedAnswerV1, FeedContentItemV1
+from ..outputs import ChatAnswerV1, EvidenceReference, FeedAnswerV2, FeedContentItemV2
 from ..registry import ToolName
 from ..schemas import AgentContext, ModelTurn, ToolCall
 from .fake_llm import FakeLLMClient
@@ -15,9 +15,8 @@ def main():
     chat = ChatAnswerV1(schema_version="1", response_type="chat",
         answer="[FAKE 데모] 합성 수면 기록과 관련된 합성 근거입니다. 실제 의료 판단이 아닙니다.",
         citation_refs=[reference])
-    feed = FeedAnswerV1(schema_version="1", response_type="feed", items=[FeedContentItemV1(
-        source_ref=reference, headline="[FAKE] 수면 변화 관련 합성 연구",
-        summary_bullets=["[FAKE] 실제 연구를 설명하지 않는 테스트 콘텐츠입니다."],
+    feed = FeedAnswerV2(schema_version="2", response_type="feed", items=[FeedContentItemV2(
+        source_ref=reference,
         personal_reason="[FAKE] 제공된 합성 수면 기록과 관련 있어요.", category="care")])
     for output in (chat, feed):
         client = FakeLLMClient([

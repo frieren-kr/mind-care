@@ -9,7 +9,8 @@ from pydantic import ValidationError
 
 from .._execution import RequestTimeout, request_deadline
 from ..agent_loop_runner import AgentLoopRunner
-from ..outputs import (ChatAnswerV1, EvidenceReference, FeedAnswerV1, PaperDetailContentV1,
+from .. import outputs as output_models
+from ..outputs import (ChatAnswerV1, EvidenceReference, FeedAnswerV2, FeedContentItemV2, PaperDetailContentV1,
                        StructuredAgentResult, resolve_evidence_references, validate_final_output)
 from ..prompts import DefaultPromptBuilder
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
@@ -30,14 +31,21 @@ def chat(refs=None):
 
 
 def feed_item(identifier="search_1", index=0):
-    return {"source_ref": ref(identifier, index), "headline": "[FAKE] 수면 변화 관련 합성 연구",
-            "summary_bullets": ["[FAKE] 합성 요약"],
+    return {"source_ref": ref(identifier, index),
             "personal_reason": "[FAKE] 제공된 합성 수면 기록과 관련 있어요.", "category": "care"}
 
 
 def feed(count=1):
-    return {"schema_version": "1", "response_type": "feed",
+    return {"schema_version": "2", "response_type": "feed",
             "items": [feed_item(index=i) for i in range(count)]}
+
+
+def paper_detail():
+    return {"schema_version": "1", "response_type": "paper_detail", "source_ref": ref(),
+            "summary_bullets": ["[FAKE] 요약"],
+            "body": {"easy": [{"text": "[FAKE] 쉬운 설명"}],
+                     "detail": [{"text": "[FAKE] 상세 설명"}]},
+            "personal_meaning": None, "limitations": [], "glossary": []}
 
 
 def package(title="[FAKE] 원본 논문 제목", evidence_type="new_research"):
@@ -55,11 +63,12 @@ class OutputContractTests(TestCase):
             with self.subTest(text=repr(text)):
                 with self.assertRaises(ValidationError):
                     ChatAnswerV1.model_validate({**chat(), "answer": text})
-                for field in ("headline", "summary_bullets", "personal_reason"):
-                    payload = feed()
-                    payload["items"][0][field] = [text] if field == "summary_bullets" else text
-                    with self.subTest(field=field), self.assertRaises(ValidationError):
-                        FeedAnswerV1.model_validate(payload)
+                payload = feed()
+                payload["items"][0]["personal_reason"] = text
+                with self.assertRaises(ValidationError):
+                    FeedAnswerV2.model_validate(payload)
+                with self.assertRaises(ValidationError):
+                    PaperDetailContentV1.model_validate({**paper_detail(), "summary_bullets": [text]})
 
     def test_unicode_content_preserves_original_text(self):
         for text in ("  한글 문장입니다.\n", "English", "123", "!?", "👩‍⚕️", "中文", "العربية",
@@ -67,9 +76,34 @@ class OutputContractTests(TestCase):
             with self.subTest(text=text):
                 self.assertEqual(ChatAnswerV1.model_validate({**chat(), "answer": text}).answer, text)
                 payload = feed()
-                payload["items"][0].update(headline=text, summary_bullets=[text], personal_reason=text)
-                item = FeedAnswerV1.model_validate(payload).items[0]
-                self.assertEqual((item.headline, item.summary_bullets, item.personal_reason), (text, [text], text))
+                payload["items"][0].update(personal_reason=text)
+                item = FeedAnswerV2.model_validate(payload).items[0]
+                self.assertEqual(item.personal_reason, text)
+                self.assertEqual(PaperDetailContentV1.model_validate(
+                    {**paper_detail(), "summary_bullets": [text]}).summary_bullets, [text])
+
+    def test_feed_v2_has_only_reference_reason_and_category(self):
+        self.assertEqual(FeedAnswerV2.__name__, "FeedAnswerV2")
+        self.assertEqual(FeedAnswerV2.model_validate(feed()).schema_version, "2")
+        self.assertFalse(hasattr(output_models, "FeedAnswerV1"))
+        self.assertEqual(FeedContentItemV2.__name__, "FeedContentItemV2")
+        self.assertEqual(set(FeedContentItemV2.model_fields), {"source_ref", "personal_reason", "category"})
+        schema = FeedContentItemV2.model_json_schema()
+        self.assertEqual(set(schema["required"]), {"source_ref", "personal_reason", "category"})
+        self.assertEqual(FeedAnswerV2.model_validate(feed()).model_dump(mode="json"), feed())
+        for field in ("source_ref", "personal_reason", "category"):
+            payload = feed()
+            del payload["items"][0][field]
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                FeedAnswerV2.model_validate(payload)
+
+    def test_feed_rejects_retired_headline_and_summary_fields(self):
+        for extra in ({"headline": "Old AI title"}, {"summary_bullets": ["Old AI summary"]},
+                      {"headline": "Old AI title", "summary_bullets": ["Old AI summary"]}):
+            payload = feed()
+            payload["items"][0].update(extra)
+            with self.subTest(extra=extra), self.assertRaises(ValidationError):
+                FeedAnswerV2.model_validate(payload)
 
     def test_chat_with_and_without_citations(self):
         for refs in ([], [ref()]):
@@ -92,42 +126,41 @@ class OutputContractTests(TestCase):
                 payload = feed()
                 payload["items"][0][name] = "invented"
                 with self.assertRaises(ValidationError):
-                    FeedAnswerV1.model_validate(payload)
+                    FeedAnswerV2.model_validate(payload)
         with self.assertRaises(ValidationError):
-            FeedAnswerV1.model_validate({**feed(), "extra": True})
+            FeedAnswerV2.model_validate({**feed(), "extra": True})
 
     def test_feed_accepts_zero_through_five_items(self):
         for count in range(6):
             with self.subTest(count=count):
-                self.assertEqual(len(FeedAnswerV1.model_validate(feed(count)).items), count)
+                self.assertEqual(len(FeedAnswerV2.model_validate(feed(count)).items), count)
         with self.assertRaises(ValidationError):
-            FeedAnswerV1.model_validate(feed(6))
+            FeedAnswerV2.model_validate(feed(6))
 
     def test_feed_category_is_single_and_fixed(self):
         for category in ("treatment", "care", "prevention", "diagnosis"):
             payload = feed()
             payload["items"][0]["category"] = category
-            FeedAnswerV1.model_validate(payload)
+            FeedAnswerV2.model_validate(payload)
         for category in ("sleep", ["care", "prevention"], "", None):
             payload = feed()
             payload["items"][0]["category"] = category
             with self.subTest(category=category), self.assertRaises(ValidationError):
-                FeedAnswerV1.model_validate(payload)
+                FeedAnswerV2.model_validate(payload)
 
     def test_feed_content_bounds(self):
-        invalid = {"headline": ["", " \n", "x" * 201],
-                   "personal_reason": ["", " \n", "x" * 1001],
-                   "summary_bullets": [[], [""], [" \n"], ["x" * 501], ["x"] * 6, [1]]}
+        invalid = {"personal_reason": ["", " \n", "x" * 1001, 1, None]}
         for field, values in invalid.items():
             for value in values:
                 payload = feed()
                 payload["items"][0][field] = value
                 with self.subTest(field=field), self.assertRaises(ValidationError):
-                    FeedAnswerV1.model_validate(payload)
+                    FeedAnswerV2.model_validate(payload)
 
     def test_version_type_and_required_fields(self):
-        for model, payload in ((ChatAnswerV1, chat()), (FeedAnswerV1, feed())):
-            for field, value in (("schema_version", "2"), ("schema_version", 1),
+        for model, payload in ((ChatAnswerV1, chat()), (FeedAnswerV2, feed())):
+            wrong_version = "1" if model is FeedAnswerV2 else "2"
+            for field, value in (("schema_version", wrong_version), ("schema_version", 1),
                                  ("response_type", "paper_detail"),
                                  ("response_type", "feed" if model is ChatAnswerV1 else "chat")):
                 with self.subTest(model=model.__name__, field=field), self.assertRaises(ValidationError):
@@ -153,14 +186,10 @@ class OutputContractTests(TestCase):
         payload = feed(2)
         payload["items"][1]["source_ref"] = deepcopy(payload["items"][0]["source_ref"])
         with self.assertRaises(ValidationError):
-            FeedAnswerV1.model_validate(payload)
+            FeedAnswerV2.model_validate(payload)
 
     def test_paper_detail_content_has_only_ai_content_and_reference(self):
-        payload = {"schema_version": "1", "response_type": "paper_detail", "source_ref": ref(),
-                   "summary_bullets": ["[FAKE] 요약"],
-                   "body": {"easy": [{"text": "[FAKE] 쉬운 설명"}],
-                            "detail": [{"text": "[FAKE] 상세 설명"}]},
-                   "personal_meaning": None, "limitations": [], "glossary": []}
+        payload = paper_detail()
         output = PaperDetailContentV1.model_validate(payload)
         self.assertEqual(output.model_dump(mode="json"), payload)
         self.assertEqual(resolve_evidence_references(output, {"search_1": package()})[0].title,
@@ -174,13 +203,22 @@ class OutputContractTests(TestCase):
             with self.assertRaises(ValidationError):
                 PaperDetailContentV1.model_validate(changed)
 
+    def test_paper_detail_shared_summary_bounds_remain_unchanged(self):
+        for bullets in ([], [""], [" \n"], ["x" * 501], ["x"] * 6, [1]):
+            with self.subTest(bullets=bullets), self.assertRaises(ValidationError):
+                PaperDetailContentV1.model_validate({**paper_detail(), "summary_bullets": bullets})
+        for bullets in (["x" * 500], ["x"] * 5):
+            output = PaperDetailContentV1.model_validate({**paper_detail(), "summary_bullets": bullets})
+            self.assertEqual(output.summary_bullets, bullets)
+
     def test_schema_exposes_limits_and_extra_forbid(self):
-        for model in (ChatAnswerV1, FeedAnswerV1, PaperDetailContentV1):
+        for model in (ChatAnswerV1, FeedAnswerV2, PaperDetailContentV1):
             schema = model.model_json_schema()
             self.assertFalse(schema["additionalProperties"])
-            self.assertEqual(schema["properties"]["schema_version"]["const"], "1")
+            self.assertEqual(schema["properties"]["schema_version"]["const"],
+                             "2" if model is FeedAnswerV2 else "1")
             self.assertTrue(all(not definition["additionalProperties"] for definition in schema["$defs"].values()))
-        self.assertEqual(FeedAnswerV1.model_json_schema()["properties"]["items"]["maxItems"], 5)
+        self.assertEqual(FeedAnswerV2.model_json_schema()["properties"]["items"]["maxItems"], 5)
 
 
 class ReferenceValidationTests(TestCase):
@@ -237,12 +275,12 @@ class NestedResultValidationTests(TestCase):
     def test_constructed_versions_and_blank_answers_are_rejected(self):
         for output in (ChatAnswerV1.model_construct(**{**chat(), "schema_version": "2"}),
                        ChatAnswerV1.model_construct(**{**chat(), "answer": " "}),
-                       FeedAnswerV1.model_construct(**{**feed(0), "schema_version": "2"})):
+                       FeedAnswerV2.model_construct(**{**feed(0), "schema_version": "1"})):
             with self.subTest(output=type(output).__name__), self.assertRaises(ValidationError):
                 StructuredAgentResult(execution=self.execution(output), output=output, sources=[])
 
     def test_mutated_output_references_are_revalidated(self):
-        for model, data in ((ChatAnswerV1, chat([ref()])), (FeedAnswerV1, feed())):
+        for model, data in ((ChatAnswerV1, chat([ref()])), (FeedAnswerV2, feed())):
             for index in (-1, True, "0"):
                 wrapper = self.wrapper(model.model_validate(data))
                 reference = (wrapper.output.citation_refs[0] if model is ChatAnswerV1
@@ -281,8 +319,8 @@ class NestedResultValidationTests(TestCase):
         execution = AgentResult.model_construct(**{**self.execution(output).model_dump(), "status": "invented"})
         with self.assertRaises(ValidationError):
             StructuredAgentResult(execution=execution, output=output, sources=[])
-        wrapper = self.wrapper(FeedAnswerV1.model_validate(feed()))
-        wrapper.output.items[0].headline = "\u200b"
+        wrapper = self.wrapper(FeedAnswerV2.model_validate(feed()))
+        wrapper.output.items[0].personal_reason = "\u200b"
         with self.assertRaises(ValidationError):
             StructuredAgentResult(execution=wrapper.execution, output=wrapper.output, sources=wrapper.sources)
 
@@ -352,16 +390,16 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual(len(client.requests), 2)
 
     def test_feed_has_no_legacy_json_answer(self):
-        result, _ = self.run_output(feed(), FeedAnswerV1, [tool_turn(call()), self.search()])
+        result, _ = self.run_output(feed(), FeedAnswerV2, [tool_turn(call()), self.search()])
         self.assertEqual(result.execution.status, "completed")
-        self.assertIsInstance(result.output, FeedAnswerV1)
+        self.assertIsInstance(result.output, FeedAnswerV2)
         self.assertIsNone(result.execution.final_answer)
         self.assertEqual(result.sources[0].source_ref, result.output.items[0].source_ref)
 
     def test_empty_feed_after_empty_search_is_valid(self):
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
             lambda context, args: EvidencePackage(query=args.query, evidence=[])),))
-        result, _ = self.run_output(feed(0), FeedAnswerV1, [self.search()], registry)
+        result, _ = self.run_output(feed(0), FeedAnswerV2, [self.search()], registry)
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.output.items, [])
         self.assertEqual(result.sources, [])
@@ -417,7 +455,7 @@ class StructuredWorkflowTests(TestCase):
         feed_payload["items"][0]["source_ref"] = ref("search_2", 1)
         feed_payload["items"][1]["source_ref"] = ref("search_1", 0)
         for model, payload in ((ChatAnswerV1, chat([ref("search_2", 1), ref("search_1")])),
-                               (FeedAnswerV1, feed_payload)):
+                               (FeedAnswerV2, feed_payload)):
             with self.subTest(model=model.__name__):
                 builder = DefaultPromptBuilder()
                 with patch.object(builder, "build_final_response_context",
@@ -478,7 +516,7 @@ class StructuredWorkflowTests(TestCase):
         evidence.evidence = [package(f"[FAKE] source {index}").evidence[0] for index in range(5)]
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
                                           lambda context, args: evidence),))
-        result, _ = self.run_output(feed(5), FeedAnswerV1,
+        result, _ = self.run_output(feed(5), FeedAnswerV2,
                                     [tool_turn(call()), self.search()], registry)
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual([source.title for source in result.sources],
@@ -493,7 +531,7 @@ class StructuredWorkflowTests(TestCase):
                  (feed(), [self.search()], failing_registry),
                  (chat([ref(index=1)]), [self.search()], fake_registry())]
         for payload, preceding, registry in cases:
-            model = FeedAnswerV1 if payload["response_type"] == "feed" else ChatAnswerV1
+            model = FeedAnswerV2 if payload["response_type"] == "feed" else ChatAnswerV1
             result, _ = self.run_output(payload, model, preceding, registry)
             self.assertEqual(result.execution.status, "invalid_response")
             self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")

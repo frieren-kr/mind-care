@@ -1,4 +1,6 @@
-"""/recommendations 테스트. 실 DB가 떠 있어야 한다.
+"""/recommendations 테스트. 기존 DB 통합 테스트는 실 DB/샘플 데이터가 필요하다.
+
+OfflineFeedHandoffTests는 DB/RAG read를 Mock으로 대체하여 Handoff와 HTTP를 검증한다.
 
 실행 (backend/ 에서):  python -m unittest tests.test_recommendations
 
@@ -19,6 +21,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 from uuid import UUID, uuid4
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -32,6 +35,8 @@ from app.api.recommendations import (
     get_feed_execution,
 )
 from app.db.connection import get_connection
+from app.schemas import PaperDetailResponse
+from app.user_schemas import PatientContext, UserProfileContext
 from main import app
 
 # 시드 스크립트(scripts/seed_dev_profiles.py)가 만드는 샘플 간병인 이메일.
@@ -166,9 +171,8 @@ def make_result(request_id: str, pmids: list) -> StructuredAgentResult:
     return StructuredAgentResult(
         execution={"status": "completed", "request_id": request_id, "final_answer": None,
                    "tool_rounds": 1, "total_tool_calls": 1, "called_tools": [], "errors": []},
-        output={"schema_version": "1", "response_type": "feed", "items": [
-            {"source_ref": ref, "headline": f"제목 {i}", "summary_bullets": [f"요약 {i}"],
-             "personal_reason": f"이유 {i}", "category": "care"}
+        output={"schema_version": "2", "response_type": "feed", "items": [
+            {"source_ref": ref, "personal_reason": f"이유 {i}", "category": "care"}
             for i, ref in enumerate(refs)]},
         sources=[
             {"source_ref": ref, "evidence_type": "new_research", "title": "AI가 본 제목", "pmid": pmid,
@@ -186,8 +190,7 @@ class BackendHandoffTests(unittest.TestCase):
 
         self.assertEqual(len(items), 3)
         # AI 결과에서 온 칸 — 빠진 항목(1, 3번) 때문에 번호가 밀리지 않아야 한다.
-        self.assertEqual([i.headline for i in items], ["제목 0", "제목 2", "제목 4"])
-        self.assertEqual([i.summary_bullets for i in items], [["요약 0"], ["요약 2"], ["요약 4"]])
+        self.assertTrue(all(i.headline is None and i.summary_bullets is None for i in items))
         self.assertEqual([i.personal_reason for i in items], ["이유 0", "이유 2", "이유 4"])
         for item, pmid in zip(items, DB_PMIDS):
             self.assertEqual(item.category, "care")
@@ -196,6 +199,167 @@ class BackendHandoffTests(unittest.TestCase):
             self.assertIn(pmid, item.pubmed_url)
             self.assertNotEqual(item.title, "AI가 본 제목")
             self.assertTrue(item.id)
+
+
+class OfflineFeedHandoffTests(unittest.TestCase):
+    """Actual Handoff/HTTP/Production Stage 1 with mocked reads, no DB or RAG I/O."""
+
+    def setUp(self):
+        from app.ai.agent.tests.test_feed_context_production_source import NOW, USER, P1, P2, patient, snapshot
+        self.user, self.patient_ids = USER, (P1, P2)
+        self.snapshot = snapshot
+        rows = [patient(identifier) for identifier in self.patient_ids]
+        self.profile = UserProfileContext(user_id=USER, name="Synthetic caregiver", generated_at=NOW,
+            patients=[PatientContext(patient={"id": identifier, "caregiver_id": USER,
+                "name": "Synthetic patient", "created_at": NOW, "updated_at": NOW,
+                "symptoms": [f"signal {identifier.int}"], "interests": []}) for identifier in self.patient_ids])
+        self.papers = {pmid: PaperDetailResponse(id=UUID(int=100+i), title=f"DB title {i}",
+            pubmed_url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", study_type="rct", evidence_level="2",
+            summary_finding=f"DB finding {i}", summary_comparison=f"DB comparison {i}",
+            summary_limitation=f"DB limitation {i}") for i, pmid in enumerate(DB_PMIDS)}
+        guards = {
+            "psycopg.connect": {"side_effect": AssertionError("Offline tests must not connect to DB")},
+            "app.api.recommendations.user_functions.get_user_profile_context": {"return_value": self.profile},
+            "app.api.recommendations.functions.get_paper_details_by_pmids": {"return_value": self.papers},
+            "app.api.recommendations.search_by_queries": {},
+        }
+        mocks = {}
+        for target, options in guards.items():
+            patcher = patch(target, **options)
+            mocks[target] = patcher.start()
+            self.addCleanup(patcher.stop)
+        self.details = mocks["app.api.recommendations.functions.get_paper_details_by_pmids"]
+        self.search = mocks["app.api.recommendations.search_by_queries"]
+        from app.ai.retrieval.search import EvidenceItem, EvidencePackage
+        self.search.return_value = EvidencePackage(query="Synthetic search", evidence=[
+            EvidenceItem(evidence_type="new_research", pmid=DB_PMIDS[0], title="Synthetic evidence",
+                         relevance_score=0.7)])
+        read = patch.object(_feed_context_loader.source, "read_snapshot", return_value=snapshot(rows))
+        self.read_snapshot = read.start()
+        self.addCleanup(read.stop)
+        clock = patch.object(_feed_context_loader, "clock", return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+        previous_overrides = app.dependency_overrides.copy()
+        self.addCleanup(lambda: (app.dependency_overrides.clear(),
+                                 app.dependency_overrides.update(previous_overrides)))
+        app.dependency_overrides[get_feed_execution] = lambda: None
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
+
+    def get(self, **params):
+        return self.client.get(f"/recommendations/{self.user}", params=params)
+
+    def use(self, execution):
+        app.dependency_overrides[get_feed_execution] = lambda: execution
+
+    def test_handoff_keeps_db_title_summaries_grades_order_and_agent_reasons(self):
+        pmids = [DB_PMIDS[0], None, DB_PMIDS[1], MISSING_PMID, DB_PMIDS[2]]
+        result = make_result("offline", pmids)
+        self.assertEqual(set(result.output.items[0].model_dump()), {"source_ref", "personal_reason", "category"})
+        before = result.model_dump()
+        items = backend_handoff(result)
+        self.details.assert_called_once_with([DB_PMIDS[0], DB_PMIDS[1], MISSING_PMID, DB_PMIDS[2]])
+        self.assertEqual([item.personal_reason for item in items], ["이유 0", "이유 2", "이유 4"])
+        for i, item in enumerate(items):
+            self.assertEqual(item.id, self.papers[DB_PMIDS[i]].id)
+            self.assertEqual(item.title, f"DB title {i}")
+            self.assertEqual((item.summary_finding, item.summary_comparison, item.summary_limitation),
+                             (f"DB finding {i}", f"DB comparison {i}", f"DB limitation {i}"))
+            self.assertEqual((item.category, item.evidence_grade), ("care", "B"))
+            self.assertIsNone(item.headline)
+            self.assertIsNone(item.summary_bullets)
+            self.assertIsNone(item.relevance_score)
+        self.assertEqual(result.model_dump(), before)
+
+    def test_empty_feed_handoff_is_empty(self):
+        self.assertEqual(backend_handoff(make_result("offline", [])), [])
+        self.details.assert_called_once_with([])
+
+    def test_http_ai_v2_retains_all_patient_scope_reason_and_category(self):
+        received = []
+        def execution(context, provider_input):
+            received.append((context, json.loads(provider_input)))
+            return make_result(context.request_id, DB_PMIDS)
+        self.use(execution)
+        response = self.get(patient_id=str(self.patient_ids[0]))
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "ai")
+        self.assertIsNone(body["queries"])
+        self.assertEqual(body["patient_id"], str(self.patient_ids[0]))
+        self.assertIsNone(received[0][0].patient_id)
+        self.assertEqual(received[0][1]["feed_scope"], "caregiver_all")
+        self.assertEqual(len(received[0][1]["patients"]), 2)
+        self.read_snapshot.assert_called_once()
+        self.assertEqual([item["personal_reason"] for item in body["items"]], ["이유 0", "이유 1", "이유 2"])
+        for i, item in enumerate(body["items"]):
+            self.assertEqual(item["title"], f"DB title {i}")
+            self.assertEqual(item["summary_finding"], f"DB finding {i}")
+            self.assertEqual(item["category"], "care")
+            self.assertEqual(item["evidence_grade"], "B")
+            self.assertIsNone(item["headline"])
+            self.assertIsNone(item["summary_bullets"])
+        self.search.assert_not_called()
+
+    def test_http_k_preserves_recommendation_order(self):
+        self.use(lambda context, _: make_result(context.request_id, DB_PMIDS))
+        body = self.get(k=2).json()
+        self.assertEqual(body["mode"], "ai")
+        self.assertEqual([item["title"] for item in body["items"]], ["DB title 0", "DB title 1"])
+
+    def test_http_failed_execution_keeps_search_fallback(self):
+        self.use(Mock(side_effect=RuntimeError("PRIVATE execution failure")))
+        with self.assertLogs("app.api.recommendations", "WARNING") as logs:
+            body = self.get().json()
+        self.assertEqual(body["mode"], "search")
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))
+        self.assertIsNone(body["items"][0]["personal_reason"])
+        self.assertIsNone(body["items"][0]["category"])
+        self.search.assert_called_once()
+
+    def test_http_unusable_ai_papers_keep_search_fallback(self):
+        self.use(lambda context, _: make_result(context.request_id, [None, MISSING_PMID]))
+        with self.assertLogs("app.api.recommendations", "WARNING"):
+            body = self.get().json()
+        self.assertEqual(body["mode"], "search")
+        self.search.assert_called_once()
+
+    def test_http_retired_feed_fields_are_rejected_then_use_search_fallback(self):
+        def execution(context, _):
+            payload = make_result(context.request_id, DB_PMIDS).model_dump()
+            payload["output"]["items"][0].update(headline="Old title", summary_bullets=["Old summary"])
+            return StructuredAgentResult.model_validate(payload)
+        self.use(execution)
+        with self.assertLogs("app.api.recommendations", "WARNING"):
+            body = self.get().json()
+        self.assertEqual(body["mode"], "search")
+        self.assertIsNone(body["items"][0]["headline"])
+        self.assertIsNone(body["items"][0]["summary_bullets"])
+        self.search.assert_called_once()
+
+    def test_http_default_search_is_unchanged(self):
+        body = self.get().json()
+        self.assertEqual(body["mode"], "search")
+        self.assertEqual(len(body["queries"]), 2)
+        self.assertIsNone(body["items"][0]["headline"])
+        self.assertIsNone(body["items"][0]["summary_bullets"])
+        self.read_snapshot.assert_not_called()
+
+    def test_http_zero_patients_keeps_ai_cold_start_and_general_search(self):
+        self.profile.patients = []
+        self.read_snapshot.return_value = self.snapshot([], full=False)
+        received = []
+        def execution(context, provider_input):
+            received.append(json.loads(provider_input))
+            return make_result(context.request_id, DB_PMIDS)
+        self.use(execution)
+        self.assertEqual(self.get().json()["mode"], "ai")
+        self.assertEqual(received[0]["patients"], [])
+        self.use(None)
+        body = self.get().json()
+        self.assertEqual(body["mode"], "search")
+        self.assertEqual(body["queries"], [GENERAL_QUERY])
 
 
 class EndpointTests(unittest.TestCase):
@@ -270,7 +434,8 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(provider_input["feed_scope"], "caregiver_all")
         self.assertEqual(len(provider_input["patients"]), 1)
         for item, pmid in zip(body["items"], DB_PMIDS):
-            self.assertTrue(item["headline"])
+            self.assertIsNone(item["headline"])
+            self.assertIsNone(item["summary_bullets"])
             self.assertTrue(item["personal_reason"])
             self.assertEqual(item["category"], "care")
             self.assertIsNone(item["relevance_score"])

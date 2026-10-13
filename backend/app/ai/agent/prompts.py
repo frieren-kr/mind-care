@@ -2,7 +2,7 @@
 import json
 from typing import Protocol, Sequence
 
-from .outputs import FeedAnswerV1, FinalOutputModel
+from .outputs import FeedAnswerV2, FinalOutputModel
 from .schemas import AgentContext, Message, ModelTurn, ToolOutcome
 from .tools.contracts import EvidencePackage, ToolResultEnvelope
 
@@ -34,7 +34,7 @@ Chat citation_refs가 비어 있어도 된다. answer에는 [1], [2] 같은 인�
 citation_refs만 출처 연결의 기준이며 Frontend는 서버가 해석한 sources를 별도 출처 영역에 표시한다.
 서버 참조 검증은 문장과 근거의 의학적 일치까지 보장하지 않는다.
 """
-    if output_model is FeedAnswerV1:
+    if output_model is FeedAnswerV2:
         policy += """Feed의 personal_reason은 실제 제공된 개인화 Context와 검색 근거에 기반한다.
 Cold Start(개인화 정보 없음)에서도 일반 치매·인지건강·간병 연구 뉴스를 탐색하고 생성할 수 있다.
 개인화 정보가 없으면 검색 근거의 일반적인 정보적 관련성을 설명하고 사용자/환자 사실을 만들지 않는다.

@@ -5,7 +5,7 @@ from typing import cast
 from ._execution import RequestTimeout, bounded_call, check_deadline, positive_seconds, request_deadline
 from .clients.base import LLMClient
 from .executor import ToolExecutor
-from .outputs import (ChatAnswerV1, FeedAnswerV1, FinalOutputModel, ResolvedEvidence,
+from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
 from .registry import ToolName, ToolRegistry
@@ -35,8 +35,8 @@ class AgentLoopRunner:
     def run_structured(self, user_input: str, context: AgentContext, *,
                        output_model: FinalOutputModel) -> StructuredAgentResult:
         """명시적 opt-in. 기존 Client/Tool Loop로 실행하고 마지막 text만 검증한다."""
-        if output_model not in (ChatAnswerV1, FeedAnswerV1):
-            raise ValueError("Only ChatAnswerV1 and FeedAnswerV1 are supported")
+        if output_model not in (ChatAnswerV1, FeedAnswerV2):
+            raise ValueError("Only ChatAnswerV1 and FeedAnswerV2 are supported")
         return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model))
 
     def _run(self, user_input: str, context: AgentContext, *,
@@ -44,7 +44,7 @@ class AgentLoopRunner:
         state = AgentState(request_id=context.request_id)
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
-        structured_output: ChatAnswerV1 | FeedAnswerV1 | None = None
+        structured_output: ChatAnswerV1 | FeedAnswerV2 | None = None
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
         deadline = monotonic() + self.request_timeout_seconds
