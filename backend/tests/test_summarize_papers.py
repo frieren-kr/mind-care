@@ -7,6 +7,7 @@ OpenAI를 부르지 않는다. 임시 논문(source='test-summarize')을 넣고 
 """
 import json
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -144,10 +145,13 @@ class SummarizePapersTest(unittest.TestCase):
             "아우벨리티(dextromethorphan-bupropion)를 썼습니다.",
             "두 약(donepezil, memantine)을 함께 썼습니다.",
             "나멘다(Namenda XR)를 썼습니다.",
+            "새 약 DSP-2342를 쥐에게 썼습니다.",   # 약·물질 코드명 (대문자 + 숫자)
+            "MW073은 공격적인 행동을 줄였습니다.",
         ]:
             with self.subTest(ok=ok):
                 self.assertEqual(problems(ok), [])
-        for bad in ["donepezil 10mg을 먹었습니다.", "MMSE 점수가 올랐습니다.", "(Auvelity)를 썼습니다."]:
+        for bad in ["donepezil 10mg을 먹었습니다.", "MMSE 점수가 올랐습니다.", "(Auvelity)를 썼습니다.",
+                    "DSP 계열 약을 썼습니다."]:  # 숫자가 없는 약자는 코드명이 아니다
             with self.subTest(bad=bad):
                 self.assertTrue(problems(bad))
         # 제목은 괄호 안 영어도 여전히 안 된다.
@@ -198,6 +202,10 @@ class SummarizePapersTest(unittest.TestCase):
         # 처음 나오는 곳(①)에 괄호가 없으면 뒤(②)에 있어도 걸린다.
         self.assertIn("약 이름 영어 괄호 빠짐", problems("아우벨리티가 나왔습니다.", "아우벨리티(Auvelity)는 줄였습니다.")[0])
         self.assertTrue(problems("배경", "아우벨리티는 증상을 줄였습니다."))
+        # 코드명처럼 본문에도 영문 그대로 쓴 이름은 괄호를 요구하지 않는다.
+        self.assertEqual(
+            check(Summary(**{**GOOD, "summary_finding": "MW073은 행동을 줄였습니다."}),
+                  [Drug(ko="MW073", en="MW073")], "The antagonist MW073 mitigates aggressive behavior"), [])
         # 초록에 없는 영어 이름(LLM이 지어낸 것)은 검사하지 않는다.
         self.assertEqual(problems("배경", "아우벨리티는 줄였습니다.", [Drug(ko="아우벨리티", en="Madeupname")]), [])
 
@@ -275,6 +283,12 @@ class SummarizePapersTest(unittest.TestCase):
 
         self.assertIn("뒤에 괄호 설명이 붙은 곳: 1개", markdown)
         self.assertIn("번: 치매(기억력이 떨어지는 병)", markdown)
+
+    def test_summary_api_key_prefers_dedicated_key(self):
+        with mock.patch.multiple(summarize_papers.settings, openai_summary_api_key="전용", openai_api_key="공용"):
+            self.assertEqual(summarize_papers.summary_api_key(), ("OPENAI_SUMMARY_API_KEY", "전용"))
+        with mock.patch.multiple(summarize_papers.settings, openai_summary_api_key="", openai_api_key="공용"):
+            self.assertEqual(summarize_papers.summary_api_key(), ("OPENAI_API_KEY", "공용"))
 
     def test_dry_run_does_not_write(self):
         report = run(self.papers, FakeClient(json.dumps(GOOD)), "fake-model", dry_run=True)
