@@ -494,7 +494,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     핸들러·레지스트리·LLM 클라이언트가 나오면 이 함수만 `(AgentContext, str) -> StructuredAgentResult`를
     돌려주도록 바꾼다(입력은 정식 경로의 `caregiver_all` JSON). 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
   - `k`는 1~5 (AI 결과가 최대 5개). 404 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
-  - 서버를 띄운 뒤 **첫 요청은 bge-m3 모델을 불러오느라 오래 걸린다** (그 뒤로는 메모리에 남는다).
+  - bge-m3는 **서버 시작 때 미리 불러온다**(`main.py` lifespan, 걸린 시간은 시작 로그에). `PRELOAD_EMBEDDING_MODEL=0`이면 건너뛰고 첫 요청 때 불러온다(테스트는 `tests/__init__.py`가 끈다). 예열이 실패해도 서버는 뜨고 경고만 남긴다.
   - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.

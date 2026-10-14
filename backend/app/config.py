@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # 차원을 바꿀 때는 새 마이그레이션과 이 값을 함께 고친다.
     embedding_model: str = "bge-m3"
     embedding_dim: int = 1024
+    # 서버 시작 때 bge-m3를 미리 불러올지. 0이면 첫 검색 요청 때 불러온다 (테스트에서는 끈다).
+    preload_embedding_model: bool = True
 
     # Celery
     celery_broker_url: str = "redis://localhost:6379/0"
