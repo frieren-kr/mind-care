@@ -6,45 +6,39 @@ import { Card, EvidenceBadge } from '@/components/ui';
 import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { CategoryLabel } from '@/mocks/feed';
-import type { FeedItem } from '@/types';
+import { displayTitle, type FeedItem } from '@/types';
 
 /** 피드 카드. 💡 개인화 설명 줄이 마인드 케어의 핵심 차별점이라 눈에 띄게 둔다. */
 export function PaperCard({ item }: { item: FeedItem }) {
   const theme = useTheme();
   return (
     <Link href={{ pathname: '/paper/[id]', params: { id: item.id } }} asChild>
-      <Pressable accessibilityRole="button" accessibilityLabel={item.title}>
+      <Pressable accessibilityRole="button" accessibilityLabel={displayTitle(item)}>
         {({ pressed }) => (
           <Card style={pressed && styles.pressed}>
             <View style={styles.meta}>
               <ThemedText type="smallBold" themeColor="textSecondary">
                 {CategoryLabel[item.category]}
               </ThemedText>
-              <EvidenceBadge level={item.evidence_level} />
+              {item.evidence_grade ? <EvidenceBadge level={item.evidence_grade} /> : null}
             </View>
 
-            <ThemedText type="subtitle">{item.title}</ThemedText>
+            <ThemedText type="subtitle">{displayTitle(item)}</ThemedText>
 
-            {item.summary_bullets.map((b) => (
-              <ThemedText key={b} themeColor="textSecondary">
-                • {b}
-              </ThemedText>
-            ))}
+            {/* 카드에는 요약 3칸 중 '새로 밝혀진 것'만. 3칸 전체는 상세 화면에서 보여준다 */}
+            {item.summary_finding ? (
+              <ThemedText themeColor="textSecondary">{item.summary_finding}</ThemedText>
+            ) : null}
 
-            <View style={[styles.reason, { backgroundColor: theme.highlight }]}>
-              <ThemedText type="small">💡 {item.personal_reason}</ThemedText>
-            </View>
+            {item.personal_reason ? (
+              <View style={[styles.reason, { backgroundColor: theme.highlight }]}>
+                <ThemedText type="small">💡 {item.personal_reason}</ThemedText>
+              </View>
+            ) : null}
 
-            <View style={styles.meta}>
-              <ThemedText type="small" themeColor="textSecondary">
-                {item.journal} · {item.read_minutes}분
-              </ThemedText>
-              <ThemedText
-                type="small"
-                accessibilityLabel={item.is_bookmarked ? '저장됨' : '저장 안 됨'}>
-                {item.is_bookmarked ? '🔖 저장됨' : '🔖'}
-              </ThemedText>
-            </View>
+            <ThemedText type="small" themeColor="textSecondary">
+              {item.journal}
+            </ThemedText>
           </Card>
         )}
       </Pressable>

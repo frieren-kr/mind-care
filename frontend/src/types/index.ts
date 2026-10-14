@@ -8,24 +8,40 @@ export type EvidenceLevel = 'A' | 'B' | 'C' | 'D' | 'guideline';
 
 export type Category = 'treatment' | 'care' | 'prevention' | 'diagnosis';
 
+/** 화면에 보여줄 논문 제목. 한국어 제목이 없으면 원제 */
+export function displayTitle(paper: { title: string; title_ko: string | null }): string {
+  return paper.title_ko || paper.title;
+}
+
 /** 설명 난이도 (쉽게 / 자세하게) */
 export type ReadingLevel = 'easy' | 'detail';
 
 export type UserType = 'caregiver' | 'self';
 
-/** GET /feed 의 카드 한 장 */
-export type FeedItem = {
+/** 논문 요약 (paper_analysis). 요약 전이면 모두 null */
+export type PaperSummary = {
+  /** 한국어 제목. null이면 원제(title)를 보여준다 */
+  title_ko: string | null;
+  /** ① 연구 배경 (왜 이 연구를 했나) */
+  summary_background: string | null;
+  /** ② 새로 밝혀진 것 */
+  summary_finding: string | null;
+  /** ③ 한계 */
+  summary_limitation: string | null;
+};
+
+/** GET /recommendations 의 카드 한 장 */
+export type FeedItem = PaperSummary & {
   id: string;
+  /** 원제 */
   title: string;
-  summary_bullets: string[];
   category: Category;
-  evidence_level: EvidenceLevel;
-  /** 왜 이 사용자에게 관련 있는지 한 줄 (개인화 설명) */
-  personal_reason: string;
+  /** 화면 표시용 근거 등급 A~D. 등급이 없으면 null */
+  evidence_grade: EvidenceLevel | null;
+  /** 왜 이 사용자에게 관련 있는지 한 줄 (개인화 설명). AI 추천이 아니면 null */
+  personal_reason: string | null;
   journal: string;
   published_at: string;
-  read_minutes: number;
-  is_bookmarked: boolean;
 };
 
 export type Feed = {
@@ -41,18 +57,19 @@ export type Paragraph = {
 };
 
 /** GET /papers/{id}?level= */
-export type PaperDetail = {
+export type PaperDetail = PaperSummary & {
   id: string;
+  /** 원제 */
   title: string;
-  evidence_level: EvidenceLevel;
+  /** 화면 표시용 근거 등급 A~D. 등급이 없으면 null */
+  evidence_grade: EvidenceLevel | null;
   study_type: string;
   journal: string;
   published_at: string;
   authors: string;
-  summary_bullets: string[];
   body: Record<ReadingLevel, Paragraph[]>;
-  /** "우리 상황에서는?" 개인화 설명 */
-  personal_meaning: string;
+  /** "우리 상황에서는?" 개인화 설명. 추천 카드의 personal_reason을 그대로 쓴다 */
+  personal_reason: string | null;
   limitations: string[];
   glossary: { term: string; meaning: string }[];
   pubmed_url: string;
