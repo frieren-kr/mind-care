@@ -5,7 +5,7 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 반드시 이 모듈의 함수를 통해서만 데이터에 접근한다.
 함수 이름 / 입출력(JSON) 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
 
-테이블 정의는 `app/db/migrations/001_init.sql`(+ 002, 003 마이그레이션)이 정본이다.
+테이블 정의는 `app/db/migrations/001_init.sql`(+ 002 이후 마이그레이션)이 정본이다.
 이 모듈의 함수는 모두 구현·검증되어 있다.
 """
 import json
@@ -18,10 +18,14 @@ from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
 from app.schemas import (
+    SUMMARY_TEXT_FIELDS,
     EMBEDDING_DIM,
     AnalysisIn,
     EmbeddingIn,
     EvidenceIn,
+    GuidelineChunkIn,
+    GuidelineChunkOut,
+    GuidelineSearchResult,
     PaperDetail,
     PaperDetailResponse,
     PaperIn,
@@ -123,6 +127,7 @@ def get_new_papers(
 
     ★ 2026-10-09 계약 변경: 기준이 "paper_analysis 줄이 없다"에서
       "줄이 없거나 summary_finding이 비어 있다"로 바뀌었다.
+      (2026-10-13: 공백만 들어 있는 summary_finding도 "비어 있다"로 본다 — btrim)
       근거 등급(save_evidence())이 먼저 들어가 줄이 생겨도 요약 대상에서 빠지지 않는다.
       (등급 대상을 고르는 함수는 get_papers_without_evidence()다.)
 
@@ -151,7 +156,7 @@ def get_new_papers(
                p.abstract, p.published_date, p.url, p.collected_at
           FROM papers AS p
           LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
-         WHERE coalesce(a.summary_finding, '') = ''
+         WHERE btrim(coalesce(a.summary_finding, '')) = ''
            AND (%(since)s::timestamptz IS NULL OR p.collected_at >= %(since)s::timestamptz)
            AND (%(source)s::text IS NULL OR p.source = %(source)s::text)
          ORDER BY p.published_date DESC NULLS LAST, p.collected_at DESC, p.id
@@ -433,6 +438,14 @@ def save_summary(analysis: AnalysisIn) -> UUID:
     Returns:
         저장된 paper_analysis row의 id (UUID).
     """
+    # AnalysisIn이 만들 때 한 번 검사하지만, 만든 뒤 값을 바꾸면 검사를 지나칠 수 있어 저장 직전에 다시 본다.
+    blank = [
+        name for name in SUMMARY_TEXT_FIELDS
+        if (value := getattr(analysis, name)) is not None and not value.strip()
+    ]
+    if blank:
+        raise ValueError(f"save_summary: 공백뿐인 요약 칸은 저장하지 않습니다: {blank} (paper_id={analysis.paper_id})")
+
     # EXCLUDED = INSERT 하려던 새 값. 충돌하면 요약 칸은 새 값으로 덮어쓴다.
     # study_type / evidence_level은 등급 담당(save_evidence())의 칸이라, 값을 보냈을 때만
     # 바꾸고 비워 보내면(NULL) 기존 값을 유지한다 (COALESCE).
@@ -813,3 +826,147 @@ def search_similar(
             rows = cur.fetchall()
 
     return [SearchResult(**row) for row in rows]
+
+
+# ------------------------------------------------------------
+# 가이드라인(기반 지식층) — guideline_knowledge (008_guideline_embedding.sql)
+# 한 줄 = 가이드라인 문서의 한 조각 + 임베딩. 조각 나누기·임베딩 생성은 AI(김현서) 몫이고,
+# 여기서는 저장과 검색만 한다. 쓰는 방식은 논문 쪽과 같다:
+#   search_similar_guidelines() → id + score  →  get_guidelines_by_ids() → 본문·출처
+# ------------------------------------------------------------
+
+
+def save_guidelines(items: list[GuidelineChunkIn]) -> int:
+    """가이드라인 조각(본문 + 메타 + 임베딩)을 guideline_knowledge에 저장한다.
+
+    (source_url, chunk_index)가 같으면 **갱신**한다 (id는 그대로, updated_at만 다시 찍는다).
+    INSERT 한 번으로 넣으므로 배치 전체가 한 트랜잭션이다 — 중간에 실패하면 아무것도 저장되지 않는다.
+
+    차원·본문 검사는 GuidelineChunkIn을 만들 때(= DB에 가기 전에) 끝난다. 임베딩이
+    EMBEDDING_DIM(1024)이 아니거나 본문이 공백뿐이면 ValueError가 나고 저장은 일어나지 않는다.
+
+    Args:
+        items: GuidelineChunkIn 목록. 같은 (source_url, chunk_index)가 배치 안에 여러 번 있으면
+            **첫 건만** 쓰고 경고 로그를 남긴다 (save_embeddings()와 같은 규칙).
+
+    Returns:
+        저장하거나 갱신한 조각 수.
+
+    ※ 이 함수는 조각을 지우지 않는다. 문서를 다시 나눠 조각 수가 줄면, 뒤쪽 chunk_index의
+      옛 조각이 남는다 (지우는 함수는 아직 없다 — 필요해지면 추가한다).
+    """
+    unique: dict[tuple[str, int], GuidelineChunkIn] = {}
+    for item in items:
+        unique.setdefault((item.source_url, item.chunk_index), item)
+    if len(unique) < len(items):
+        logger.warning(
+            "save_guidelines: 배치 안에 중복 (source_url, chunk_index) %d건, 첫 건만 저장합니다.",
+            len(items) - len(unique),
+        )
+    rows = list(unique.values())
+    if not rows:
+        return 0
+
+    # 벡터는 JSON에 pgvector 리터럴 문자열로 담아 보내고 ::vector로 되돌린다 (save_embeddings()와 같은 방식).
+    sql = """
+        INSERT INTO guideline_knowledge (
+            doc_title, section, chunk_index, content, topic, source, source_url,
+            published_year, language, tags, embedding, embedding_model
+        )
+        SELECT x.doc_title, x.section, x.chunk_index, x.content, x.topic, x.source, x.source_url,
+               x.published_year, x.language, x.tags, x.embedding::vector, x.embedding_model
+          FROM jsonb_to_recordset(%s::jsonb) AS x(
+                 doc_title text, section text, chunk_index int, content text, topic text,
+                 source text, source_url text, published_year smallint, language text,
+                 tags text[], embedding text, embedding_model text)
+        ON CONFLICT (source_url, chunk_index) DO UPDATE
+           SET doc_title       = EXCLUDED.doc_title,
+               section         = EXCLUDED.section,
+               content         = EXCLUDED.content,
+               topic           = EXCLUDED.topic,
+               source          = EXCLUDED.source,
+               published_year  = EXCLUDED.published_year,
+               language        = EXCLUDED.language,
+               tags            = EXCLUDED.tags,
+               embedding       = EXCLUDED.embedding,
+               embedding_model = EXCLUDED.embedding_model,
+               updated_at      = now()
+        RETURNING id
+    """
+    payload = json.dumps(
+        [{**row.model_dump(exclude={"embedding"}), "embedding": _as_vector_literal(row.embedding)} for row in rows]
+    )
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (payload,))
+            saved = len(cur.fetchall())
+
+    logger.info("save_guidelines: %d건 저장/갱신", saved)
+    return saved
+
+
+def search_similar_guidelines(query_embedding: list[float], k: int = 5) -> list[GuidelineSearchResult]:
+    """질의 임베딩과 유사한 가이드라인 조각을 코사인 유사도 순으로 찾는다.
+
+    **id와 점수만** 돌려준다 (search_similar()와 같은 방식). 본문·출처는 받은 순서대로
+    get_guidelines_by_ids()에 넣으면 유사도 순서가 보존된 채로 나온다.
+    임베딩이 없는 줄은 결과에서 빠진다.
+
+    Args:
+        query_embedding: 질의 벡터. 길이는 반드시 EMBEDDING_DIM(= 1024, bge-m3).
+        k: 반환할 개수. 0 이하면 DB에 가지 않고 빈 목록.
+
+    Returns:
+        GuidelineSearchResult(id, score) 리스트, score 내림차순 (score = 1 - 코사인 거리).
+
+    Raises:
+        ValueError: 벡터 길이가 EMBEDDING_DIM과 다른 경우.
+    """
+    if len(query_embedding) != EMBEDDING_DIM:
+        raise ValueError(
+            f"질의 임베딩 차원이 맞지 않습니다: {len(query_embedding)} (기대값 {EMBEDDING_DIM}). "
+            "검색할 때는 조각을 저장할 때와 같은 모델(bge-m3)을 써야 합니다."
+        )
+    if k <= 0:
+        return []
+
+    # ORDER BY embedding <=> ... 형태라야 008의 HNSW 인덱스(vector_cosine_ops)를 탄다.
+    sql = """
+        SELECT g.id, 1 - (g.embedding <=> %(embedding)s) AS score
+          FROM guideline_knowledge AS g
+         WHERE g.embedding IS NOT NULL
+         ORDER BY g.embedding <=> %(embedding)s
+         LIMIT %(k)s
+    """
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, {"embedding": Vector(query_embedding), "k": k})
+            rows = cur.fetchall()
+
+    return [GuidelineSearchResult(**row) for row in rows]
+
+
+def get_guidelines_by_ids(ids: list[UUID]) -> list[GuidelineChunkOut]:
+    """guideline_knowledge.id 목록으로 조각 본문·출처를 받아온다. (입력 순서 그대로 반환)
+
+    search_similar_guidelines()가 돌려준 id를 그대로 넣는 용도다.
+    **DB에 없는 id는 예외 없이 결과에서 빠진다** (get_papers_by_ids()와 같은 규칙).
+    임베딩은 돌려주지 않는다.
+    """
+    if not ids:
+        return []
+
+    sql = """
+        SELECT g.id, g.doc_title, g.section, g.chunk_index, g.content, g.source, g.source_url,
+               g.published_year, g.language, g.topic, coalesce(g.tags, '{}') AS tags
+          FROM unnest(%s::uuid[]) WITH ORDINALITY AS q(id, ord)
+          JOIN guideline_knowledge AS g ON g.id = q.id
+         ORDER BY q.ord
+    """
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, ([str(i) for i in ids],))
+            rows = cur.fetchall()
+
+    return [GuidelineChunkOut(**row) for row in rows]

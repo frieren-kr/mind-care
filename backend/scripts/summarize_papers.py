@@ -10,7 +10,8 @@
 
 저장된 논문은 ①에서 빠지므로, 중간에 끊겨도 다시 실행하면 남은 것만 이어서 한다.
 
-실행 (backend/ 에서, Docker DB가 떠 있어야 함. .env에 OPENAI_API_KEY, OPENAI_SUMMARY_MODEL 필요):
+실행 (backend/ 에서, Docker DB가 떠 있어야 함. .env에 OPENAI_SUMMARY_MODEL과 키가 필요하다.
+키는 OPENAI_SUMMARY_API_KEY가 있으면 그것을, 없으면 OPENAI_API_KEY를 쓴다):
     python -m scripts.summarize_papers --limit 20 --dry-run --out ../../summaries.md   # 저장 없이 결과만 파일로
     python -m scripts.summarize_papers --limit 20                                      # 20편 저장
     python -m scripts.summarize_papers --paper-ids <uuid> <uuid>                       # 지정한 논문만 (다시 만들기 포함)
@@ -149,9 +150,12 @@ POLISH_PROMPT = f"""\
 
 
 class Summary(BaseModel):
-    """LLM이 돌려줘야 하는 형식. 빈 칸이나 모르는 칸이 있으면 검증에서 걸린다."""
+    """LLM이 돌려줘야 하는 형식. 빈 칸이나 모르는 칸이 있으면 검증에서 걸린다.
 
-    model_config = ConfigDict(extra="forbid")
+    앞뒤 공백을 지운 뒤 길이를 본다 — 공백뿐인 칸(" ", 줄바꿈만 등)도 형식 오류라서 다시 시도한다.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     title_ko: str = Field(min_length=1)
     summary_background: str = Field(min_length=1)
@@ -224,7 +228,17 @@ _STAT = re.compile(r"(?<![A-Za-z])(?:[pP]\s*[=<>≤≥]|CI(?![A-Za-z])|OR\s*=|SD
 # 본문에서 허용하는 영어: 한글 바로 뒤 괄호 안의 영어 — 아우벨리티(Auvelity).
 # ponytail: 괄호 안이 약 이름인지는 구분하지 못한다 (인공지능(AI), 척도 이름(영어)도 통과한다).
 # 약 이름만 허용해야 하면 초록에서 뽑은 약 이름 목록과 대조하는 식으로 바꾼다.
-_ALLOWED_ENGLISH = re.compile(r"(?<=[가-힣])\([A-Za-z][A-Za-z0-9 .\-]*\)")
+# 괄호 안은 여러 단어·성분명도 된다: 아우벨리티(Auvelity), 약 이름(dextromethorphan-bupropion), 약(donepezil, memantine)
+_ALLOWED_ENGLISH = re.compile(r"(?<=[가-힣])\([A-Za-z][A-Za-z0-9 .,;/+&'’®™\-]*\)")
+# 단위는 영어 단어로 보지 않는다: 숫자에 바로 붙은 짧은 단위(10mg, 40Hz, 5mg/kg)와 흔한 단위 낱말(mg, kg, mL …).
+# 숫자와 띄어 쓴 경우는 흔한 단위 낱말만 본다 ("3 APOE" 같은 약자가 단위로 새지 않게).
+_UNIT = re.compile(
+    r"(?<=\d)[A-Za-zμµ]{1,4}(?:/[A-Za-z]{1,4})?(?![A-Za-z])"
+    r"|(?<![A-Za-z])(?:mg|mcg|kg|ml|dl|cm|mm|km|kcal|mmHg|mmol|IU|Hz)(?:/(?:kg|dl|ml|l|day))?(?![A-Za-z])",
+    re.IGNORECASE,
+)
+# 약·물질 코드명(영문 대문자 + 숫자: DSP-2342, MW073)은 한글 이름이 없으므로 영어 단어로 보지 않는다.
+_CODE_NAME = re.compile(r"(?<![A-Za-z0-9])[A-Z]{1,6}-?\d+[A-Z0-9-]*(?![A-Za-z])")
 _ENGLISH_WORD = re.compile(r"[A-Za-z]{2,}")
 _BROKEN_WORD = re.compile(r"[가-힣]+[A-Za-z]+[가-힣]+")  # 한글 사이에 영문자가 낀 단어
 # 제목과 본문 어디에도 나오면 안 되는 말 (프롬프트의 [바꿔 쓸 말] 왼쪽 단어 + "초록"). 띄어쓰기는 무시하고 찾는다.
@@ -248,6 +262,7 @@ def check(summary: Summary, drugs: list["Drug"] | tuple = (), source: str = "") 
             problems.append(f"{name}: 통계 표기 {sorted(set(found))}")
         # 제목은 괄호 안 영어도 허용하지 않는다.
         plain = text if name == "title_ko" else _ALLOWED_ENGLISH.sub("", text)
+        plain = _UNIT.sub("", _CODE_NAME.sub("", plain))
         if found := _BROKEN_WORD.findall(plain):
             problems.append(f"{name}: 깨진 단어 {sorted(set(found))}")
         elif found := _ENGLISH_WORD.findall(plain):
@@ -258,6 +273,8 @@ def check(summary: Summary, drugs: list["Drug"] | tuple = (), source: str = "") 
         # ponytail: 약 이름은 LLM이 drugs에 적어 준 것만 검사한다 (목록에서 빠뜨린 약은 못 잡는다).
         # 영어 이름이 실제로 제목·초록에 있는 것만 믿는다 — 없는 이름을 지어낸 경우는 검사하지 않는다.
         if not drug.ko or not drug.en or drug.en.lower() not in source.lower() or drug.ko not in body:
+            continue
+        if not re.search("[가-힣]", drug.ko):  # 코드명처럼 본문에도 영문 그대로 쓴 이름은 괄호가 필요 없다
             continue
         after_name = body[body.index(drug.ko) + len(drug.ko):]
         match = _DRUG_ENGLISH.match(after_name)
@@ -473,6 +490,16 @@ def to_markdown(report: Report, model: str) -> str:
     return "\n".join(parts)
 
 
+def summary_api_key() -> tuple[str, str]:
+    """요약 배치가 쓸 OpenAI 키를 고른다. 돌려주는 것은 (환경 변수 이름, 키 값).
+
+    OPENAI_SUMMARY_API_KEY가 있으면 그 키를, 없으면 OPENAI_API_KEY를 쓴다.
+    """
+    if settings.openai_summary_api_key:
+        return "OPENAI_SUMMARY_API_KEY", settings.openai_summary_api_key
+    return "OPENAI_API_KEY", settings.openai_api_key
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="논문 3칸 요약 + 한국어 제목 → paper_analysis 저장")
     ap.add_argument("--limit", type=int, default=20, help="최대 처리 편수 (기본 20)")
@@ -485,8 +512,12 @@ def main() -> None:
 
     if args.dry_run and not args.out:
         ap.error("--dry-run은 결과를 볼 파일이 필요합니다. --out 경로를 함께 주세요.")
-    if not settings.openai_api_key:
-        raise SystemExit("OPENAI_API_KEY가 비어 있습니다. backend/.env에 키를 넣어 주세요.")
+    key_name, api_key = summary_api_key()
+    if not api_key:
+        raise SystemExit(
+            "OpenAI 키가 없습니다. backend/.env의 OPENAI_SUMMARY_API_KEY(요약 배치 전용) 또는 "
+            "OPENAI_API_KEY에 키를 넣어 주세요."
+        )
     model = settings.openai_summary_model
     if not model:
         raise SystemExit(
@@ -501,12 +532,13 @@ def main() -> None:
         # get_new_papers에 '초록 있는 것만' 조건을 추가한다 (팀 기준 1,000편은 전부 초록이 있다).
         papers = [(p.id, p.title, p.abstract) for p in functions.get_new_papers(limit=args.limit)]
     print(f"대상 {len(papers)}편, 모델 {model}" + (" (dry-run: DB에 저장하지 않음)" if args.dry_run else ""))
+    print(f"OpenAI 키: {key_name}")  # 어느 변수의 키를 쓰는지만 알린다. 키 값은 출력하지 않는다.
 
     from openai import OpenAI
 
     # 재시도는 ask()가 직접 센다 (SDK 자체 재시도와 겹치지 않게 0).
     report = run(
-        papers, OpenAI(api_key=settings.openai_api_key, max_retries=0), model, args.dry_run, args.polish
+        papers, OpenAI(api_key=api_key, max_retries=0), model, args.dry_run, args.polish
     )
 
     if args.out:

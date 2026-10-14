@@ -30,8 +30,15 @@ class PaperOut(BaseModel):
     collected_at: datetime = Field(description="수집 시각")
 
 
+# 요약 배치가 채우는 글 칸. 값이 있는데 공백뿐이면 "요약이 있다"로 잘못 읽히므로 저장을 막는다.
+SUMMARY_TEXT_FIELDS = ("title_ko", "summary_background", "summary_finding", "summary_limitation")
+
+
 class AnalysisIn(BaseModel):
     """save_summary()가 받는 논문 분석 결과. (paper_analysis 테이블)
+
+    ★ 2026-10-13 변경: title_ko / summary_* 칸에 빈 문자열이나 공백뿐인 값을 주면 ValueError.
+      (비워 두려면 None을 보낸다.)
 
     ★ 2026-10-12 변경: embedding / embedding_model 필드를 없앴다.
       save_summary()는 paper_analysis만 저장하고, 임베딩 저장은
@@ -56,6 +63,13 @@ class AnalysisIn(BaseModel):
     summary_limitation: Optional[str] = Field(default=None, description="③ 한계")
     tags: list[str] = Field(default_factory=list, description="매칭용 태그 (수면장애, 배회 등)")
     model_name: Optional[str] = Field(default=None, description="분석에 쓴 LLM 이름")
+
+    @field_validator(*SUMMARY_TEXT_FIELDS)
+    @classmethod
+    def _reject_blank(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("빈 문자열이나 공백뿐인 값은 저장할 수 없습니다 (비워 두려면 None)")
+        return value
 
 
 class SearchResult(BaseModel):
@@ -409,3 +423,71 @@ class SaveEmbeddingsResult(BaseModel):
         default_factory=list,
         description="papers에 없어서 저장하지 못한 paper_id 목록 (이 함수는 논문을 새로 넣지 않는다)",
     )
+
+
+# ------------------------------------------------------------
+# 가이드라인(기반 지식층) 조각 — guideline_knowledge, 2026-10-14 추가 (008_guideline_embedding.sql)
+# 한 줄 = 가이드라인 문서의 한 조각(장·절 단위) + 그 조각의 임베딩.
+# 조각 나누기와 임베딩 생성은 AI(김현서), 저장·검색 함수는 DB(박주현) 담당이다.
+# ------------------------------------------------------------
+
+
+class GuidelineChunkIn(BaseModel):
+    """save_guidelines()가 받는 가이드라인 조각 한 건. (guideline_knowledge 입력)
+
+    (source_url, chunk_index)가 조각을 가리키는 키다 — 같은 키로 다시 저장하면 갱신된다.
+    id / created_at / updated_at은 DB가 채운다.
+    """
+
+    doc_title: str = Field(min_length=1, description="가이드라인(문서) 이름")
+    section: Optional[str] = Field(default=None, description="장·절 제목")
+    chunk_index: int = Field(ge=0, description="문서 안에서 조각의 순서")
+    content: str = Field(description="조각 본문. 공백뿐이면 안 된다")
+    topic: str = Field(min_length=1, description="주제 (예: 수면장애 관리, 배회 대응)")
+    source: Optional[str] = Field(default=None, description="발행 기관")
+    source_url: str = Field(min_length=1, description="원문 링크 — 문서를 구분하는 키")
+    published_year: Optional[int] = Field(default=None, ge=1900, le=2100, description="발행 연도")
+    language: Optional[Literal["ko", "en"]] = None
+    tags: list[str] = Field(default_factory=list, description="매칭용 태그 (paper_analysis.tags와 같은 체계)")
+    embedding: list[float] = Field(description=f"조각 임베딩. 길이는 반드시 {EMBEDDING_DIM}")
+    embedding_model: str = Field(min_length=1, description="임베딩을 만든 모델 이름 (예: 'bge-m3')")
+
+    @field_validator("content")
+    @classmethod
+    def _reject_blank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("본문(content)이 비어 있거나 공백뿐입니다.")
+        return value
+
+    @field_validator("embedding")
+    @classmethod
+    def _check_dim(cls, value: list[float]) -> list[float]:
+        if len(value) != EMBEDDING_DIM:
+            raise ValueError(
+                f"임베딩 차원이 맞지 않습니다: {len(value)} (기대값 {EMBEDDING_DIM}). "
+                "논문과 같은 모델(bge-m3)로 만든 벡터인지 확인하세요."
+            )
+        return value
+
+
+class GuidelineSearchResult(BaseModel):
+    """search_similar_guidelines()가 반환하는 검색 결과 한 건. (논문의 SearchResult와 같은 모양)"""
+
+    id: UUID = Field(description="guideline_knowledge.id — get_guidelines_by_ids()에 그대로 넣는다")
+    score: float = Field(description="코사인 유사도 (1 - 코사인 거리). 1에 가까울수록 비슷하다")
+
+
+class GuidelineChunkOut(BaseModel):
+    """get_guidelines_by_ids()가 반환하는 가이드라인 조각 한 건. 임베딩은 돌려주지 않는다."""
+
+    id: UUID
+    doc_title: str
+    section: Optional[str] = None
+    chunk_index: int
+    content: str
+    source: Optional[str] = None
+    source_url: str
+    published_year: Optional[int] = None
+    language: Optional[str] = None
+    topic: str
+    tags: list[str] = Field(default_factory=list)

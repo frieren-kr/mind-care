@@ -7,12 +7,13 @@ OpenAI를 부르지 않는다. 임시 논문(source='test-summarize')을 넣고 
 """
 import json
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 from uuid import uuid4
 
 from app.db import functions
 from app.db.connection import get_connection
-from app.schemas import PaperIn
+from app.schemas import AnalysisIn, PaperIn
 from scripts import summarize_papers
 from scripts.summarize_papers import BANNED_WORDS, MAX_RETRIES, Drug, Summary, check, run
 
@@ -101,6 +102,8 @@ class SummarizePapersTest(unittest.TestCase):
         bad_clients = [
             FakeClient("JSON이 아님"),
             FakeClient(json.dumps({**GOOD, "summary_limitation": ""})),
+            FakeClient(json.dumps({**GOOD, "summary_finding": "   "})),      # 공백뿐인 칸
+            FakeClient(json.dumps({**GOOD, "title_ko": "\n\t "})),
             FakeClient(json.dumps({"title_ko": "칸 부족"})),
             FakeClient(json.dumps(GOOD), finish_reason="length"),  # 토큰 한도에서 잘린 응답
         ]
@@ -131,6 +134,52 @@ class SummarizePapersTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(problems(**{field: text}))
 
+    def test_check_allows_units_and_english_in_parentheses_after_drug_name(self):
+        def problems(text):
+            return check(Summary(**{**GOOD, "summary_finding": text}))
+
+        for ok in [
+            "하루 10mg을 12주 동안 먹었습니다.",
+            "2.5 mL씩, 몸무게 1kg당 5mg/kg을 썼습니다.",
+            "용량은 mg 단위로 적었습니다.",
+            "아우벨리티(dextromethorphan-bupropion)를 썼습니다.",
+            "두 약(donepezil, memantine)을 함께 썼습니다.",
+            "나멘다(Namenda XR)를 썼습니다.",
+            "새 약 DSP-2342를 쥐에게 썼습니다.",   # 약·물질 코드명 (대문자 + 숫자)
+            "MW073은 공격적인 행동을 줄였습니다.",
+        ]:
+            with self.subTest(ok=ok):
+                self.assertEqual(problems(ok), [])
+        for bad in ["donepezil 10mg을 먹었습니다.", "MMSE 점수가 올랐습니다.", "(Auvelity)를 썼습니다.",
+                    "DSP 계열 약을 썼습니다."]:  # 숫자가 없는 약자는 코드명이 아니다
+            with self.subTest(bad=bad):
+                self.assertTrue(problems(bad))
+        # 제목은 괄호 안 영어도 여전히 안 된다.
+        self.assertTrue(check(Summary(**{**GOOD, "title_ko": "아우벨리티(Auvelity)의 효과"})))
+
+    def test_blank_summary_cells_are_rejected_by_analysis_in_and_save_summary(self):
+        for value in ("", "   ", "\n"):
+            for name in ("title_ko", "summary_background", "summary_finding", "summary_limitation"):
+                with self.subTest(name=name, value=value):
+                    with self.assertRaises(ValueError):
+                        AnalysisIn(paper_id=self.paper_id, **{name: value})
+        analysis = AnalysisIn(paper_id=self.paper_id, **GOOD)
+        analysis.summary_finding = "  "  # 만든 뒤에 바꾼 값도 저장 직전에 걸린다
+        with self.assertRaises(ValueError):
+            functions.save_summary(analysis)
+        self.assertIsNone(functions.get_paper_detail(self.paper_id).summary_finding)
+
+    def test_whitespace_only_row_is_returned_by_get_new_papers_again(self):
+        def pending():
+            return [p.id for p in functions.get_new_papers(limit=10, source=SOURCE)]
+
+        functions.save_summary(AnalysisIn(paper_id=self.paper_id, **GOOD))
+        self.assertNotIn(self.paper_id, pending())
+        # 예전 버그로 공백만 들어간 행 (지금은 save_summary가 막으므로 직접 만든다).
+        with get_connection() as conn:
+            conn.execute("UPDATE paper_analysis SET summary_finding = '  ' WHERE paper_id = %s", (self.paper_id,))
+        self.assertIn(self.paper_id, pending())
+
     def test_check_flags_banned_words_in_title_and_body(self):
         for word in BANNED_WORDS:
             for field in ("title_ko", "summary_finding"):
@@ -153,6 +202,10 @@ class SummarizePapersTest(unittest.TestCase):
         # 처음 나오는 곳(①)에 괄호가 없으면 뒤(②)에 있어도 걸린다.
         self.assertIn("약 이름 영어 괄호 빠짐", problems("아우벨리티가 나왔습니다.", "아우벨리티(Auvelity)는 줄였습니다.")[0])
         self.assertTrue(problems("배경", "아우벨리티는 증상을 줄였습니다."))
+        # 코드명처럼 본문에도 영문 그대로 쓴 이름은 괄호를 요구하지 않는다.
+        self.assertEqual(
+            check(Summary(**{**GOOD, "summary_finding": "MW073은 행동을 줄였습니다."}),
+                  [Drug(ko="MW073", en="MW073")], "The antagonist MW073 mitigates aggressive behavior"), [])
         # 초록에 없는 영어 이름(LLM이 지어낸 것)은 검사하지 않는다.
         self.assertEqual(problems("배경", "아우벨리티는 줄였습니다.", [Drug(ko="아우벨리티", en="Madeupname")]), [])
 
@@ -230,6 +283,12 @@ class SummarizePapersTest(unittest.TestCase):
 
         self.assertIn("뒤에 괄호 설명이 붙은 곳: 1개", markdown)
         self.assertIn("번: 치매(기억력이 떨어지는 병)", markdown)
+
+    def test_summary_api_key_prefers_dedicated_key(self):
+        with mock.patch.multiple(summarize_papers.settings, openai_summary_api_key="전용", openai_api_key="공용"):
+            self.assertEqual(summarize_papers.summary_api_key(), ("OPENAI_SUMMARY_API_KEY", "전용"))
+        with mock.patch.multiple(summarize_papers.settings, openai_summary_api_key="", openai_api_key="공용"):
+            self.assertEqual(summarize_papers.summary_api_key(), ("OPENAI_API_KEY", "공용"))
 
     def test_dry_run_does_not_write(self):
         report = run(self.papers, FakeClient(json.dumps(GOOD)), "fake-model", dry_run=True)

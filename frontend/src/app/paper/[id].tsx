@@ -9,13 +9,18 @@ import { Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getMockPaper } from '@/mocks/feed';
 import { mockProfile } from '@/mocks/user';
-import type { ReadingLevel } from '@/types';
+import { displayTitle, type ReadingLevel } from '@/types';
 
 export default function PaperDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const paper = getMockPaper(id);
   const theme = useTheme();
   const [level, setLevel] = useState<ReadingLevel>(mockProfile.reading_level);
+  const summaryRows: [string, string | null][] = [
+    ['연구 배경', paper.summary_background],
+    ['새로 밝혀진 것', paper.summary_finding],
+    ['한계', paper.summary_limitation],
+  ];
 
   return (
     <Screen>
@@ -25,9 +30,9 @@ export default function PaperDetailScreen() {
         <Chip label="자세하게" selected={level === 'detail'} onPress={() => setLevel('detail')} />
       </View>
 
-      <ThemedText type="title">{paper.title}</ThemedText>
+      <ThemedText type="title">{displayTitle(paper)}</ThemedText>
       <View style={styles.row}>
-        <EvidenceBadge level={paper.evidence_level} />
+        {paper.evidence_grade ? <EvidenceBadge level={paper.evidence_grade} /> : null}
         <ThemedText type="small" themeColor="textSecondary">
           {paper.study_type}
         </ThemedText>
@@ -38,8 +43,13 @@ export default function PaperDetailScreen() {
 
       <Card>
         <ThemedText type="subtitle">📌 한눈에 보기</ThemedText>
-        {paper.summary_bullets.map((b) => (
-          <ThemedText key={b}>• {b}</ThemedText>
+        {summaryRows.map(([label, text]) => (
+          <View key={label} style={styles.summaryRow}>
+            <ThemedText type="smallBold" themeColor="textSecondary">
+              {label}
+            </ThemedText>
+            <ThemedText>{text ?? '요약을 준비하고 있어요.'}</ThemedText>
+          </View>
         ))}
       </Card>
 
@@ -53,10 +63,12 @@ export default function PaperDetailScreen() {
         ))}
       </View>
 
-      <View style={[styles.personal, { backgroundColor: theme.highlight }]}>
-        <ThemedText type="subtitle">💡 우리 상황에서는?</ThemedText>
-        <ThemedText>{paper.personal_meaning}</ThemedText>
-      </View>
+      {paper.personal_reason ? (
+        <View style={[styles.personal, { backgroundColor: theme.highlight }]}>
+          <ThemedText type="subtitle">💡 우리 상황에서는?</ThemedText>
+          <ThemedText>{paper.personal_reason}</ThemedText>
+        </View>
+      ) : null}
 
       <View style={styles.section}>
         <ThemedText type="subtitle">⚠️ 한계와 주의점</ThemedText>
@@ -97,6 +109,9 @@ const styles = StyleSheet.create({
   },
   section: {
     gap: Spacing.two,
+  },
+  summaryRow: {
+    gap: Spacing.one,
   },
   personal: {
     borderRadius: Radius.card,
