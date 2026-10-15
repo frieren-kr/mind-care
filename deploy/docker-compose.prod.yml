@@ -1,0 +1,53 @@
+# 마인드 케어 서버용 (EC2 한 대에 DB + 백엔드). 사용법·순서는 docs/deploy.md.
+#
+# 레포 루트에서 항상 --env-file backend/.env 를 같이 준다 (POSTGRES_PASSWORD를 아래 ${...}에 채우기 위해):
+#   docker compose --env-file backend/.env -f deploy/docker-compose.prod.yml up -d --build
+#
+# 로컬 개발용 backend/docker-compose.yml과는 프로젝트 이름(mindcare)·볼륨이 따로라 서로 섞이지 않는다.
+
+name: mindcare
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mindcare
+      POSTGRES_DB: mindcare
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?--env-file backend/.env 를 주고, 그 안에 POSTGRES_PASSWORD를 설정하세요}
+    ports:
+      - "127.0.0.1:5432:5432"  # 서버 안에서만 (외부에서 DB에 직접 붙지 못하게)
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 최초 기동(볼륨이 비어 있을 때)에만 001~008이 파일명 순서대로 실행된다.
+      - ../backend/app/db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindcare -d mindcare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ../backend
+    image: mindcare-backend
+    restart: unless-stopped
+    env_file: ../backend/.env
+    environment:
+      # .env의 DATABASE_URL(localhost)을 덮어쓴다 — 컨테이너끼리는 서비스 이름 db로 찾는다.
+      DATABASE_URL: postgresql://mindcare:${POSTGRES_PASSWORD}@db:5432/mindcare
+      TZ: KST-9  # 로그 시각을 한국 시간으로 (slim 이미지엔 tzdata가 없어 POSIX 표기. 한국은 서머타임 없음)
+    ports:
+      - "127.0.0.1:8000:8000"  # 일단 서버 안에서만. 외부 공개는 리버스 프록시를 붙일 때 정한다
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - models:/models      # bge-m3 캐시 (다시 받지 않게)
+      - logs:/app/logs      # update_papers 로그
+      - state:/app/state    # update_papers 요약 실패 기록
+
+volumes:
+  pgdata:
+  models:
+  logs:
+  state:

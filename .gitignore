@@ -40,3 +40,4 @@ Thumbs.db
 # ---- Data / temp ----
 *.sqlite3
 *.db
+update_papers_state.json*

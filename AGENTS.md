@@ -29,6 +29,7 @@ PubMed에서 논문을 주기적으로 수집하고, LLM + RAG로 관련성/근�
 | [`docs/api.md`](docs/api.md) | API 주소 목록(담당 표시), 응답 형식, `/recommendations` 동작, 프론트 연결 상태 | API를 만들거나 화면에서 부를 때 |
 | [`docs/users.md`](docs/users.md) | 사용자·환자 함수·API (김한슬) | 사용자·환자 데이터를 다룰 때 |
 | [`docs/ai.md`](docs/ai.md) | AI·검색 문서 안내 (김현서·허웅) | AI 파이프라인·검색·에이전트 작업 |
+| [`docs/deploy.md`](docs/deploy.md) | 서버 배포·주기 배치 (박주현) | 서버에 올리거나 cron·배치를 다룰 때 |
 | [`docs/history.md`](docs/history.md) | 날짜별 상태·변경 기록, 해결된 이슈 | 과거 결정의 이유가 궁금할 때만 |
 
 ---
