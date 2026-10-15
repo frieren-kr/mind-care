@@ -1,4 +1,4 @@
-"""피드 개인화용 일괄 조회 + 돌봄 기록·월간 요약 쓰기 (박주현 담당).
+"""피드 개인화용 일괄 조회 + 돌봄 기록·월간 요약 쓰기 + 피드 저장본 (박주현 담당).
 
 ★ 팀 규칙 ★
 AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다. 이 모듈의 함수를 통해서만 접근한다.
@@ -13,11 +13,12 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다. 이 모듈의 함�
 
 이 모듈은 `app/ai/`를 import 하지 않는다 (db → ai 방향 의존은 만들지 않는다).
 """
+import json
 import logging
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg import IsolationLevel
@@ -44,7 +45,12 @@ from app.feed_schemas import (
     FeedReadMedication,
     FeedReadSafetyEvent,
     FeedReadSnapshot,
+    FeedBatch,
+    FeedBatchItem,
+    FeedItemIn,
+    SavedFeedBatch,
 )
+from app.schemas import PaperDetailResponse
 
 logger = logging.getLogger(__name__)
 
@@ -618,3 +624,113 @@ def save_profile_summary(
         user_id, period_start, period_end, summary_id,
     )
     return summary_id
+
+
+# ============================================================
+# 피드 저장본 (feed_items, 009) — AI 피드를 저장하고 기간 안에는 저장본을 돌려준다
+# ============================================================
+
+# 한 문장이라 묶음 전체가 들어가거나 하나도 안 들어간다. now()는 트랜잭션 시작 시각이라 묶음 안에서 모두 같다.
+# is_saved: 이 사용자가 예전 묶음에서 북마크한 논문이면 새 묶음에도 true로 이어 붙인다
+# (북마크는 행마다 있어서, 안 그러면 같은 논문이 새 묶음에 다시 나올 때 북마크가 풀린 것처럼 보인다).
+_SAVE_FEED_BATCH = """
+    INSERT INTO feed_items (user_id, paper_id, batch_id, rank, relevance_score,
+                            personalized_explanation, category, is_saved)
+    SELECT %(user_id)s, i.paper_id, %(batch_id)s, i.rank, i.relevance_score,
+           i.personal_reason, i.category,
+           EXISTS (SELECT 1 FROM feed_items AS f
+                    WHERE f.user_id = %(user_id)s AND f.paper_id = i.paper_id AND f.is_saved)
+      FROM jsonb_to_recordset(%(items)s::jsonb)
+           AS i(paper_id uuid, rank int, relevance_score float8, personal_reason text, category text)
+    RETURNING created_at
+"""
+
+_LATEST_FEED_BATCH = """
+    WITH latest AS (
+        SELECT batch_id, created_at
+          FROM feed_items
+         WHERE user_id = %(user_id)s AND batch_id IS NOT NULL AND created_at > %(since)s
+         ORDER BY created_at DESC, batch_id
+         LIMIT 1
+    )
+    SELECT l.batch_id, l.created_at AS generated_at,
+           f.rank, f.personalized_explanation AS personal_reason, f.category,
+           f.relevance_score, f.is_saved,
+           p.id, p.title, p.abstract, p.published_date AS published_at, p.journal,
+           p.url AS pubmed_url, p.doi, p.publication_types, p.mesh_terms,
+           a.study_type, a.evidence_level,
+           a.title_ko, a.summary_background, a.summary_finding, a.summary_limitation
+      FROM latest AS l
+      JOIN feed_items AS f ON f.batch_id = l.batch_id
+      JOIN papers AS p ON p.id = f.paper_id
+      LEFT JOIN paper_analysis AS a ON a.paper_id = p.id
+     ORDER BY f.rank
+"""
+
+
+def save_feed_batch(user_id: UUID, items: list[FeedItemIn]) -> SavedFeedBatch:
+    """피드 한 묶음을 저장한다 (트랜잭션 하나 — 전부 저장되거나 하나도 안 된다).
+
+    목록 순서대로 rank 1, 2, …를 붙인다. 예전 묶음은 지우지 않는다 (북마크가 그 행에 남아 있다).
+    이 사용자가 예전에 북마크한 논문은 새 묶음에서도 is_saved=true로 이어진다.
+
+    Returns:
+        SavedFeedBatch(batch_id, generated_at). generated_at = 이 묶음의 feed_items.created_at.
+
+    Raises:
+        ValueError: items가 비었거나, 없는 사용자이거나, papers에 없는 논문이 들어 있는 경우
+            (이때는 아무것도 저장되지 않는다).
+    """
+    if not items:
+        raise ValueError("빈 피드는 저장하지 않습니다.")
+
+    batch_id = uuid4()
+    rows = [{**item.model_dump(mode="json"), "rank": rank} for rank, item in enumerate(items, 1)]
+    params = {"user_id": user_id, "batch_id": batch_id, "items": json.dumps(rows)}
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(_SAVE_FEED_BATCH, params)
+            except ForeignKeyViolation as err:
+                raise ValueError(
+                    f"없는 사용자이거나 papers에 없는 논문입니다 (user_id={user_id}): {err.diag.message_detail}"
+                ) from err
+            generated_at = cur.fetchone()[0]
+
+    logger.info("save_feed_batch: user_id=%s %d편 저장 (batch_id=%s)", user_id, len(items), batch_id)
+    return SavedFeedBatch(batch_id=batch_id, generated_at=generated_at)
+
+
+def get_latest_feed_batch(
+    user_id: UUID, *, max_age: timedelta, reference_time: datetime
+) -> Optional[FeedBatch]:
+    """기간 안(created_at > reference_time - max_age)의 가장 최근 묶음을 논문 상세와 함께 돌려준다.
+
+    시각은 인자로 받는다 (함수 안에서 now()를 쓰지 않는다 — 호출하는 쪽 시계 기준).
+
+    Returns:
+        FeedBatch (items는 rank 순). 기간 안에 묶음이 없으면 None.
+        그 사이 papers에서 지워진 논문은 빠지고, 전부 지워졌으면 None.
+
+    Raises:
+        ValueError: reference_time에 시간대가 없거나 max_age가 0 이하인 경우.
+    """
+    if reference_time.tzinfo is None or reference_time.utcoffset() is None:
+        raise ValueError("reference_time에 시간대가 없습니다 (tz-aware datetime이어야 합니다).")
+    if max_age <= timedelta(0):
+        raise ValueError(f"max_age는 0보다 커야 합니다: {max_age}")
+
+    with get_connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_LATEST_FEED_BATCH, {"user_id": user_id, "since": reference_time - max_age})
+            rows = cur.fetchall()
+    if not rows:
+        return None
+
+    batch_id, generated_at = rows[0]["batch_id"], rows[0]["generated_at"]
+    items = []
+    for row in rows:
+        meta = {k: row.pop(k) for k in ("rank", "personal_reason", "category", "relevance_score", "is_saved")}
+        del row["batch_id"], row["generated_at"]
+        items.append(FeedBatchItem(**meta, paper=PaperDetailResponse(**row)))
+    return FeedBatch(batch_id=batch_id, generated_at=generated_at, items=items)

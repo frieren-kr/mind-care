@@ -20,7 +20,7 @@
 | `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
 | `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
-| `GET /recommendations/{user_id}?patient_id=&k=5` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
+| `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 [`users.md`](users.md) 참고.
 - `/recommendations`(담당: 박주현)는 **두 방식**으로 응답하고, 어느 쪽인지 응답의 `mode`에 적는다.
@@ -55,9 +55,18 @@
     실제 응답은 항상 `mode="search"`이고 `personal_reason` 등 AI 쪽 칸은 `null`이다.** 허웅 님 `search_evidence`
     핸들러·레지스트리·LLM 클라이언트가 나오면 이 함수만 `(AgentContext, str) -> StructuredAgentResult`를
     돌려주도록 바꾼다(입력은 정식 경로의 `caregiver_all` JSON). 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
+  - **AI 피드 저장 기간** (2026-10-15, 10/14 회의) — `mode="ai"` 결과는 `feed_items`에 한 묶음으로 저장한다
+    (`feed_read.save_feed_batch()`, `k`와 상관없이 AI 결과 전부). 다음 요청부터 **저장 기간 안이면 실행기를 부르지 않고**
+    저장본(`get_latest_feed_batch()` + 논문 상세·근거 등급)을 돌려준다. 기간이 지나면 새로 만든다.
+    - 기간은 `get_feed_cache_days(user_id)`가 정한다. 지금은 상수 `FEED_CACHE_DAYS = 3`.
+      **한슬 님 사용자별 설정(1~7일)이 생기면 이 함수만 바꾼다.**
+    - `refresh=true` — 기간과 상관없이 새로 만들고 저장한다 (이후 요청은 이 새 묶음을 받는다).
+      실행기가 없거나 실패하면 지금처럼 검색 방식으로 응답한다.
+    - **검색 방식 결과는 저장하지 않는다.** 실행기가 `None`이면(지금 기본값) 저장본도 보지 않는다.
+    - 저장본 읽기·저장이 실패해도(예: `009` 미적용) 경고 로그만 남기고, 새로 만들거나 저장 없이 응답한다.
   - `k`는 1~5 (AI 결과가 최대 5개). 404 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
   - bge-m3는 **서버 시작 때 미리 불러온다**(`main.py` lifespan, 걸린 시간은 시작 로그에). `PRELOAD_EMBEDDING_MODEL=0`이면 건너뛰고 첫 요청 때 불러온다(테스트는 `tests/__init__.py`가 끈다). 예열이 실패해도 서버는 뜨고 경고만 남긴다.
-  - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요).
+  - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요. 저장 기간은 `FeedCacheTests`가 DB 없이 확인).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보내고, 화면 표시용 `'A'`~`'D'`는
@@ -85,7 +94,9 @@
   `mode`(`"ai"` | `"search"` — 어느 방식으로 만들었는지),
   `queries?`(`list[str]` — 이번에 쓴 검색어 목록. `search`일 때만, `ai`면 `None`. ★2026-10-13 `query: str` → `queries: list[str]`),
   `items`(`RecommendationItem` 목록, 최대 5개. `search`면 검색어(환자)별 상위 논문을 번갈아 뽑은 순 —
-  검색어가 하나면 관련도 높은 순, `ai`면 AI가 정한 순)
+  검색어가 하나면 관련도 높은 순, `ai`면 AI가 정한 순),
+  `generated_at?`(★2026-10-15 추가, tz 포함 시각) — 저장된 AI 피드 묶음의 생성 시각. 저장본을 다시 줄 때도 **처음 만든 시각**이다.
+  `search`이거나 저장에 실패했으면 `None`. 화면에서 "○일 전 추천" 표시에 쓸 수 있다.
 - **evidence_grade** (위 세 응답 모델 공통) = 화면 표시용 근거 등급 `"A"`~`"D"`. 등급이 없으면 `None`.
   DB의 `evidence_level`(문자 `"1"`~`"6"`)을 **묶은 값**이고, `evidence_level`은 그대로 함께 돌려준다.
   변환 규칙의 정본은 AI 쪽 `app/ai/retrieval/evidence.py`의 `to_grade()` (`1→A, 2→B, 3·4→C, 5·6→D`).

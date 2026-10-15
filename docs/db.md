@@ -22,7 +22,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE)
   + `007_paper_analysis_title_ko.sql`(`paper_analysis.title_ko` — 논문 제목의 한국어 번역,
     `summary_comparison` → `summary_background` 이름 변경)
-  + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장).
+  + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장)
+  + `009_feed_items_cache.sql`(`feed_items`에 `batch_id`·`rank`·`category` + 인덱스 — AI 피드 저장본, 2026-10-15).
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -84,6 +85,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_feed_context_snapshot(*, user_id, reference_time, reference_date, recent_period_start, recent_period_end)` | 전부 키워드 전용. `reference_time`/`recent_period_*`는 **tz-aware** `datetime`, `reference_date`는 `date` | `FeedReadSnapshot` |
 | `save_care_log(user_id, log_type, content=None, mood_tag=None, patient_id=None, logged_at=None)` | `log_type`: `patient_care` / `caregiver_selfcare`(필수), `patient_id`: 선택(그 간병인의 환자여야 함), `logged_at`: `None`이면 DB `now()` | 저장된 `care_logs` id (`UUID`) |
 | `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
+| `save_feed_batch(user_id, items: list[FeedItemIn])` | AI 피드 한 묶음 (`paper_id, personal_reason?, category?, relevance_score?`). 목록 순서대로 `rank` 1부터. **트랜잭션 하나** — 없는 사용자·논문이 있으면 `ValueError`, 아무것도 저장 안 됨. 빈 목록도 `ValueError` | `SavedFeedBatch(batch_id, generated_at)` |
+| `get_latest_feed_batch(user_id, *, max_age: timedelta, reference_time)` | `reference_time`은 **tz-aware**. `created_at > reference_time - max_age`인 가장 최근 묶음 | `FeedBatch(batch_id, generated_at, items)` — items는 `rank` 순, 항목마다 `personal_reason, category, relevance_score, is_saved, paper: PaperDetailResponse`. 없으면 `None` |
 
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
@@ -247,6 +250,16 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `(user_id, period_start, period_end)` UNIQUE 인덱스를 `ON CONFLICT` 대상으로 쓴다.
 - 개발용 샘플: `python -m scripts.seed_dev_care_logs` (최근 30일 돌봄 기록 + 지난달 요약. 재실행 안전).
   테스트: `python -m unittest tests.test_feed_read`.
+
+피드 저장본 (`feed_items`, `009`, 2026-10-15 — 10/14 회의):
+- AI 피드 한 번 = 한 묶음(`batch_id`). 묶음 안 행은 `created_at`이 같고 이것이 응답의 `generated_at`이다.
+  `personal_reason`은 기존 `personalized_explanation` 칸에 저장한다. 검색 방식(폴백) 결과는 저장하지 않는다.
+- **예전 묶음은 지우지 않는다** — 북마크(`is_saved`)가 행마다 있어서, 지우면 북마크가 사라진다.
+- 새 묶음을 저장할 때 이 사용자가 예전에 북마크한 논문이면 `is_saved=true`로 이어 붙인다
+  (안 그러면 같은 논문이 새 묶음에 다시 나올 때 북마크가 풀린 것처럼 보인다).
+  **나중에 북마크 API를 만들 때**: 목록은 `(user_id, paper_id)` 기준으로 중복을 없애고,
+  해제는 그 사용자·논문의 **모든 행**을 `false`로 바꿔야 한다 (한 행만 바꾸면 다음 묶음에서 다시 살아난다).
+- 테스트: `python -m unittest tests.test_feed_cache` (실 DB, `009`가 없거나 논문 3편 미만이면 skip).
 
 
 요약 배치 (`backend/scripts/summarize_papers.py`, 담당 박주현, 2026-10-13):
