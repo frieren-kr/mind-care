@@ -68,6 +68,7 @@ from app.user_schemas import (
     UserUpdate,
     check_assessment_score,
     check_date_order,
+    check_medication_state,
     check_visit_state,
     normalize_assessment_type,
     parse_optional_date,
@@ -934,13 +935,14 @@ def create_medication(medication: dict[str, Any] | MedicationIn) -> MedicationOu
             - patient_id, drug_name: 필수
             - is_taking: 선택, 기본 true (현재 복용 중)
             - start_date / end_date: 선택, 미래 가능. end_date ≥ start_date
+            - 미래 end_date는 is_taking=false 불가 (종료일까지는 복용 중)
 
     Returns:
         저장된 MedicationOut (DB가 만든 id, created_at, updated_at 포함).
 
     Raises:
         ValueError: 필드가 빠졌거나 형식이 틀린 경우, 종료일이 시작일보다 빠른 경우,
-            존재하지 않는 환자인 경우.
+            복용 중단인데 종료일이 미래인 경우, 존재하지 않는 환자인 경우.
     """
     data = _to_model(MedicationIn, medication)
 
@@ -1003,6 +1005,7 @@ def update_medication(
     복용 중단은 {"is_taking": false, "end_date": "2026-10-07"}로 한다 (행을 지우지 않는다).
     날짜 순서는 "수정 후의 시작일 + 수정 후의 종료일" 조합으로 검사한다
     (종료일만 바꿔도 기존 시작일보다 빠르면 거부).
+    "복용 중단인데 종료일이 미래"인지도 수정 후의 is_taking + end_date 조합으로 검사한다.
 
     Args:
         medication_id: 수정할 복약 기록 (medications.id).
@@ -1016,7 +1019,7 @@ def update_medication(
 
     Raises:
         ValueError: 바꿀 수 없는 필드·모르는 필드가 있거나 형식이 틀린 경우,
-            수정 후 종료일이 시작일보다 빠른 경우.
+            수정 후 종료일이 시작일보다 빠른 경우, 수정 후 복용 중단인데 종료일이 미래인 경우.
     """
     fields = _to_model(MedicationUpdate, data).model_dump(exclude_unset=True)
 
@@ -1031,6 +1034,7 @@ def update_medication(
 
     merged = {**current.model_dump(), **fields}
     check_date_order(merged["start_date"], merged["end_date"], "start_date", "end_date")
+    check_medication_state(merged["is_taking"], merged["end_date"])
 
     row = _update_row("medications", "id", key, fields)
     if row is None:  # 조회와 수정 사이에 삭제된 경우

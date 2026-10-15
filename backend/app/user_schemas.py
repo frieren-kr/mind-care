@@ -284,6 +284,18 @@ def check_visit_state(visit_date: date, is_visited: bool) -> None:
         raise ValueError(f"미래 날짜({visit_date})의 진료는 방문 완료(is_visited=true)로 기록할 수 없습니다.")
 
 
+def check_medication_state(is_taking: bool, end_date: Optional[date]) -> None:
+    """복용 중단(is_taking=false)인데 종료일이 아직 오지 않은 기록을 막는다.
+
+    앞으로 끝날 약은 종료일까지 복용 중(true)이므로 is_taking=true + 미래 end_date로 넣는다.
+    """
+    if not is_taking and end_date is not None and end_date > today():
+        raise ValueError(
+            f"종료일({end_date})이 미래인 약은 복용 중단(is_taking=false)으로 기록할 수 없습니다. "
+            "종료일까지는 복용 중(is_taking=true)으로 넣어 주세요."
+        )
+
+
 def _normalize_stage(value: Any) -> Optional[str]:
     """진단 단계 — DEMENTIA_STAGES 값만 받는다. 비어 있으면 None (아직 모름)."""
     stage = _optional_text(value, "dementia_stage")
@@ -834,6 +846,7 @@ class MedicationIn(BaseModel):
 
     약 1종 = 1행. 복용을 멈추면 지우지 않고 is_taking=false + end_date로 남긴다 (복약 이력).
     복용 시작·종료일은 미래도 받는다 (내일부터 먹을 약, 2주 뒤 끝나는 처방).
+    단 종료일이 미래인 약은 아직 복용 중이므로 is_taking=false로 넣을 수 없다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -870,6 +883,7 @@ class MedicationIn(BaseModel):
     @model_validator(mode="after")
     def _check_date_order(self) -> "MedicationIn":
         check_date_order(self.start_date, self.end_date, "start_date", "end_date")
+        check_medication_state(self.is_taking, self.end_date)
         return self
 
 
@@ -879,7 +893,7 @@ class MedicationUpdate(BaseModel):
     - patient_id는 바꿀 수 없다
     - drug_name / is_taking은 null 불가, 다른 텍스트·날짜는 null이면 값 삭제
     - 복용 중단: {"is_taking": false, "end_date": "YYYY-MM-DD"}
-    - 날짜 순서는 "수정 후 시작일 + 수정 후 종료일"로 검사해야 해서
+    - 날짜 순서와 "복용 중단인데 종료일이 미래"는 수정 후 값 조합으로 검사해야 해서
       user_functions.update_medication()이 DB 값과 합쳐 검사한다.
     """
 
