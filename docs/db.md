@@ -295,6 +295,31 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   "치매"·"알츠하이머병" 뒤에 괄호 설명이 붙은 곳의 개수, 금지 단어·약 이름 괄호 검사 결과가 적힌다.
 - 테스트: `python -m unittest tests.test_summarize_papers` (가짜 LLM, 실 DB 필요).
 
+통합 배치 (`backend/scripts/update_papers.py`, 담당 박주현, 2026-10-14):
+- **수집 → 임베딩 → 근거 등급 → 요약**을 한 번에 돌린다. 단계마다 아직 처리 안 된 논문만 고른다 —
+  수집은 `save_papers()`의 중복 건너뛰기, 임베딩은 `get_papers_without_embedding('bge-m3')`, 등급은
+  `get_papers_without_evidence()`, 요약은 `get_new_papers(--limit)`. 그래서 여러 번 돌려도 결과가 같고,
+  한 단계가 통째로 실패해도 앞 단계 결과는 DB에 남아 다음 실행 때 이어서 처리된다.
+- 임베딩·등급은 현서 님 `embed_papers.py`·`classify_papers.py`가 `main()`만 있어서 부르지 않고, 두 스크립트가 쓰는
+  `embed_documents()`·`classify()`와 DB 함수를 같은 순서로 직접 부른다. 요약은 `summarize_papers.run()`을 그대로 쓰고
+  키는 `OPENAI_SUMMARY_API_KEY` → `OPENAI_API_KEY` 순서(로그에는 변수 이름만).
+- 겹쳐 실행 방지: 잠금 파일(Linux `fcntl.flock`, Windows는 `msvcrt`). 이미 실행 중이면 경고 로그만 남기고 종료 코드 0.
+- 종료 코드: **0** 전부 성공 / **1** 일부 실패(다음 단계는 계속 진행) / **2** 실행 불가(DB 연결 실패, 키·`OPENAI_SUMMARY_MODEL` 없음).
+- 로그: 시작·끝 시각, 단계별 처리·실패 건수와 걸린 시간. 화면과 `--log-file`에 같이 남긴다.
+  PubMed 요청 URL에 `api_key`가 들어가므로 httpx 요청 로그는 끈다.
+- 실행 (`backend/`에서):
+  ```bash
+  python -m scripts.update_papers --log-file logs/update_papers.log   # 전체 (요약 최대 100편)
+  python -m scripts.update_papers --skip-collect --limit 20           # 수집 빼고, 요약 20편
+  python -m scripts.update_papers --only classify                     # 한 단계만 (collect/embed/classify/summarize)
+  python -m scripts.update_papers --dry-run                           # DB에 쓰지 않음 (요약은 LLM을 부르지만 저장 안 함)
+  python -m scripts.update_papers --only summarize --retry-skipped    # 요약 3번 실패해 건너뛰던 논문도 다시 시도
+  ```
+  그 밖의 옵션: `--days-back`(수집 기간, 기본 7일 — cron 주기보다 길게), `--max-results`(수집 최대, 기본 100), `--lock-file`.
+- 요약 실패 논문은 저장되지 않아 다음 실행 때 다시 시도되지만, 실패 횟수를 상태 파일(`--state-file`, 기본은 `--log-file`과 같은 폴더의 `update_papers_state.json`)에 논문 id별로 적어 **3번 실패하면 다음 실행부터 건너뛴다**(로그에 "건너뜀 n건 (PMID 목록)", 종료 코드 1의 원인 아님). 상태 파일이 없거나 깨지면 새로 시작하고, `--dry-run`은 기록하지 않는다.
+- **자동 실행: AWS 서버(EC2 1대)에서 cron으로 실행 예정.** 예: `0 3 * * 1 cd /path/backend && .venv/bin/python -m scripts.update_papers --log-file logs/update_papers.log`
+- 테스트: `python -m unittest tests.test_update_papers` (가짜 단계·가짜 모델, DB 불필요).
+
 
 수집기(`collectors/pubmed.py`) 쪽 함수:
 - `fetch_papers_by_pmids(pmids, require_abstract=True)` — PMID 목록으로 논문을 받아온다(검색 단계 없음).
