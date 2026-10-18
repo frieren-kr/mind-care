@@ -3,7 +3,7 @@
 ★ 팀 규칙 ★
 AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 사용자·환자 테이블은 반드시 이 모듈의 함수를 통해서만 접근한다. (논문 테이블은 functions.py)
-함수 이름 / 입출력 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
+함수 이름 / 입출력 형식이 바뀌면 docs/users.md와 docs/db.md의 데이터 접근 계약에 기록한다.
 
 입출력 형식은 `app/user_schemas.py`가 정본이다 (논문 쪽 functions.py ↔ schemas.py와 같은 관계).
 - 입력: JSON을 파싱한 dict 그대로 넣어도 되고, user_schemas의 모델(XxxIn / XxxUpdate)을 넣어도 된다.
@@ -24,7 +24,8 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 
 테이블 정의는 migrations/001_init.sql(users, patient_profiles, caregiver_profiles)
 + 004_patient_management.sql(phone_number, clinical_assessments, safety_events, medications, medical_visits)
-+ 005_medical_visits_detail.sql(medical_visits 진료 항목 컬럼, 인덱스)이 정본이다.
++ 005_medical_visits_detail.sql(medical_visits 진료 항목 컬럼, 인덱스)
++ 010_user_feed_refresh_days.sql(users 피드 갱신 주기)이 정본이다.
 """
 import logging
 from datetime import date, datetime, timedelta
@@ -49,6 +50,8 @@ from app.user_schemas import (
     CaregiverContext,
     CaregiverProfileIn,
     CaregiverProfileOut,
+    FeedSettingsOut,
+    FeedSettingsUpdate,
     MedicalVisitIn,
     MedicalVisitOut,
     MedicalVisitUpdate,
@@ -434,7 +437,7 @@ def list_users(limit: int = 100, offset: int = 0) -> list[UserSummary]:
 
     rows = _fetch_all(
         """
-        SELECT u.id, u.name, u.email, u.created_at,
+        SELECT u.id, u.name, u.email, u.created_at, u.feed_refresh_days,
                (SELECT count(*) FROM patient_profiles AS p WHERE p.caregiver_id = u.id) AS patient_count
           FROM users AS u
          ORDER BY u.created_at, u.id
@@ -443,6 +446,36 @@ def list_users(limit: int = 100, offset: int = 0) -> list[UserSummary]:
         {"limit": limit, "offset": offset},
     )
     return [UserSummary.model_validate(row) for row in rows]
+
+
+def get_user_feed_settings(user_id: UUID | str) -> Optional[FeedSettingsOut]:
+    """사용자의 피드 갱신 주기를 읽는다. 없는 사용자·잘못된 UUID는 None."""
+    key = _parse_uuid(user_id)
+    if key is None:
+        return None
+    row = _fetch_one(
+        "SELECT id AS user_id, feed_refresh_days FROM users WHERE id = %(user_id)s",
+        {"user_id": key},
+    )
+    return FeedSettingsOut.model_validate(row) if row else None
+
+
+def update_user_feed_settings(
+    user_id: UUID | str, data: dict[str, Any] | FeedSettingsUpdate,
+) -> Optional[FeedSettingsOut]:
+    """피드 주기(정수 1~7일)를 저장한다. 잘못된 값은 ValueError, 없는 사용자는 None.
+
+    다른 계정 필드는 유지하고 users.updated_at을 갱신한다.
+    피드를 생성하거나 생성 시각을 바꾸지 않는다. 다음 요청부터 새 기간으로 만료를 판단한다.
+    """
+    fields = _to_model(FeedSettingsUpdate, data).model_dump()
+    key = _parse_uuid(user_id)
+    if key is None:
+        return None
+    row = _update_row("users", "id", key, fields)
+    if row is None:
+        return None
+    return FeedSettingsOut(user_id=row["id"], feed_refresh_days=row["feed_refresh_days"])
 
 
 # ============================================================
@@ -1217,6 +1250,7 @@ def get_caregiver_context(user_id: UUID | str) -> Optional[CaregiverContext]:
     return CaregiverContext(
         user_id=user.id,
         name=user.name,
+        feed_refresh_days=user.feed_refresh_days,
         caregiver_profile=get_caregiver_profile(user.id),
         patient_ids=user.patient_ids,
         generated_at=datetime.now(APP_TIMEZONE),
@@ -1266,6 +1300,7 @@ def get_user_profile_context(user_id: UUID | str) -> Optional[UserProfileContext
     return UserProfileContext(
         user_id=user.id,
         name=user.name,
+        feed_refresh_days=user.feed_refresh_days,
         caregiver_profile=get_caregiver_profile(user.id),
         patients=[_patient_context(patient, now) for patient in list_patients(user.id)],
         generated_at=datetime.now(APP_TIMEZONE),

@@ -3,10 +3,11 @@
 논문 도메인의 `app/schemas.py`와 같은 역할을 사용자·환자 도메인에서 맡는다.
 테이블 정의는 `app/db/migrations/001_init.sql`(users, patient_profiles, caregiver_profiles)
 + `004_patient_management.sql`(phone_number, clinical_assessments, safety_events, medications,
-medical_visits) + `005_medical_visits_detail.sql`(진료 항목 컬럼)이 정본이고,
+medical_visits) + `005_medical_visits_detail.sql`(진료 항목 컬럼)
++ `010_user_feed_refresh_days.sql`(사용자별 피드 갱신 주기)이 정본이고,
 이 파일은 그 스키마를 파이썬 쪽에서 드러내는 계약이다.
 `app/db/user_functions.py`는 이 모델로 입력을 검증하고, 이 모델로 결과를 돌려준다.
-스키마가 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약" 섹션도 갱신한다.
+스키마가 바뀌면 docs/users.md와 docs/db.md의 데이터 접근 계약도 갱신한다.
 
 모델 이름 규칙:
 - XxxIn     : 저장(create / upsert) 입력. id / created_at / updated_at은 DB가 채우므로 없다.
@@ -48,6 +49,9 @@ EMAIL_MAX_LENGTH = 254
 # 한국 시간 00~09시에 "오늘" 기록이 미래로 거부되지 않는다. 한국은 서머타임이 없어 고정 +9시간이고,
 # zoneinfo("Asia/Seoul")는 Windows에서 tzdata 패키지가 필요해 고정 오프셋을 쓴다.
 APP_TIMEZONE = timezone(timedelta(hours=9), "KST")
+
+# 사용자별 AI 피드 재사용 기간. DB의 DEFAULT / CHECK와 함께 유지한다.
+DEFAULT_FEED_REFRESH_DAYS = 3
 
 # 진단 단계. 앱 대상이 치매·경도인지장애라 001 주석의 경도/중등도/중증에 경도인지장애를 더했다.
 DEMENTIA_STAGES = ("경도인지장애", "경도", "중등도", "중증")
@@ -477,6 +481,9 @@ class UserOut(BaseModel):
     name: str
     email: str = Field(description="로그인 이메일 (소문자로 저장됨)")
     phone_number: Optional[str] = Field(default=None, description="'-' 없는 숫자만 (예: 01012345678)")
+    feed_refresh_days: int = Field(
+        default=DEFAULT_FEED_REFRESH_DAYS, strict=True, ge=1, le=7, description="피드 갱신 주기(일), 1~7일",
+    )
     created_at: datetime = Field(description="가입 시각")
     updated_at: datetime = Field(description="마지막 정보 수정 시각")
     patient_ids: list[UUID] = Field(
@@ -495,7 +502,23 @@ class UserSummary(BaseModel):
     name: str
     email: str = Field(description="로그인 이메일 (중복 불가)")
     patient_count: int = Field(description="담당 환자 수")
+    feed_refresh_days: int = Field(default=DEFAULT_FEED_REFRESH_DAYS, strict=True, ge=1, le=7)
     created_at: datetime = Field(description="가입 시각")
+
+
+class FeedSettingsUpdate(BaseModel):
+    """사용자별 피드 설정 변경. 일수는 JSON 정수로 명시해야 한다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feed_refresh_days: int = Field(..., strict=True, ge=1, le=7, description="피드 갱신 주기(일), 1~7일")
+
+
+class FeedSettingsOut(BaseModel):
+    """피드 설정 조회·변경 결과. 계정의 이메일·전화번호는 포함하지 않는다."""
+
+    user_id: UUID
+    feed_refresh_days: int = Field(..., strict=True, ge=1, le=7)
 
 
 # ============================================================
@@ -1101,6 +1124,9 @@ class CaregiverContext(BaseModel):
 
     user_id: UUID = Field(description="사용자 고유 id (users.id)")
     name: str = Field(description="사용자(간병인) 이름")
+    feed_refresh_days: int = Field(
+        default=DEFAULT_FEED_REFRESH_DAYS, strict=True, ge=1, le=7, description="피드 갱신 주기(일), 1~7일",
+    )
     caregiver_profile: Optional[CaregiverProfileOut] = Field(
         default=None, description="간병인 자가점검. 아직 저장한 적이 없으면 null",
     )
@@ -1116,6 +1142,9 @@ class UserProfileContext(BaseModel):
 
     user_id: UUID = Field(description="사용자 고유 id (users.id)")
     name: str = Field(description="사용자(간병인) 이름")
+    feed_refresh_days: int = Field(
+        default=DEFAULT_FEED_REFRESH_DAYS, strict=True, ge=1, le=7, description="피드 갱신 주기(일), 1~7일",
+    )
     caregiver_profile: Optional[CaregiverProfileOut] = Field(
         default=None, description="간병인 자가점검. 아직 저장한 적이 없으면 null",
     )

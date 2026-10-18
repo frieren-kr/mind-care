@@ -38,7 +38,7 @@ from app.api.recommendations import (
 from app.db.connection import get_connection
 from app.feed_schemas import FeedBatch, FeedBatchItem, SavedFeedBatch
 from app.schemas import PaperDetailResponse
-from app.user_schemas import APP_TIMEZONE, PatientContext, UserProfileContext
+from app.user_schemas import APP_TIMEZONE, FeedSettingsOut, PatientContext, UserProfileContext
 from main import app
 
 # 시드 스크립트(scripts/seed_dev_profiles.py)가 만드는 샘플 간병인 이메일.
@@ -221,6 +221,8 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         guards = {
             "psycopg.connect": {"side_effect": AssertionError("Offline tests must not connect to DB")},
             "app.api.recommendations.user_functions.get_user_profile_context": {"return_value": self.profile},
+            "app.api.recommendations.user_functions.get_user_feed_settings": {
+                "return_value": FeedSettingsOut(user_id=self.user, feed_refresh_days=3)},
             "app.api.recommendations.functions.get_paper_details_by_pmids": {"return_value": self.papers},
             "app.api.recommendations.search_by_queries": {},
             # 피드 저장본은 FeedCacheTests에서 따로 본다. 여기서는 "저장본 없음 / 저장 실패 없음"으로 둔다.
@@ -397,6 +399,8 @@ class FeedCacheTests(unittest.TestCase):
         for target, kw in {
             "psycopg.connect": {"side_effect": AssertionError("DB에 붙으면 안 된다")},
             "app.api.recommendations.user_functions.get_user_profile_context": {"return_value": Mock(patients=[])},
+            "app.api.recommendations.user_functions.get_user_feed_settings": {
+                "return_value": FeedSettingsOut(user_id=self.user, feed_refresh_days=3)},
             "app.api.recommendations.functions.get_paper_details_by_pmids": {"return_value": self.papers},
             "app.api.recommendations.search_by_queries": {"return_value": package},
             "app.api.recommendations.context_prepare": {"return_value": "{}"},
@@ -447,6 +451,32 @@ class FeedCacheTests(unittest.TestCase):
         self.assertEqual(self.calls, 2)
         self.assertEqual(datetime.fromisoformat(body["generated_at"]), self.now)
         self.assertEqual(len(self.batches), 2)
+
+    def test_user_period_change_applies_to_existing_feed(self):
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=7)
+        first = self.get()
+        self.at(days=4)
+        self.assertEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 1)
+        # 저장본 생성 시각은 유지한 채 기간만 줄이면 다음 요청에서 새로 만든다.
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=1)
+        self.assertNotEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 2)
+
+    def test_user_period_expires_at_exact_boundary(self):
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=1)
+        first = self.get()
+        self.at(hours=23, minutes=59, seconds=59)
+        self.assertEqual(self.get()["generated_at"], first["generated_at"])
+        self.at(days=1)
+        self.assertNotEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 2)
+
+    def test_settings_read_failure_still_generates_feed(self):
+        self.get_user_feed_settings.side_effect = RuntimeError("설정 조회 실패")
+        with self.assertLogs("app.api.recommendations", "WARNING"):
+            body = self.get()
+        self.assertEqual((body["mode"], self.calls), ("ai", 1))
 
     def test_refresh_ignores_period(self):
         self.get()

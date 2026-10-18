@@ -24,6 +24,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     `summary_comparison` → `summary_background` 이름 변경)
   + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장)
   + `009_feed_items_cache.sql`(`feed_items`에 `batch_id`·`rank`·`category` + 인덱스 — AI 피드 저장본, 2026-10-15).
+  + `010_user_feed_refresh_days.sql`(`users.feed_refresh_days`, 기본 3일, 1~7일 제약 + 진료·복약 날짜 무결성 트리거).
+    사용자 요청으로 010에 트리거를 추가했으므로 기존 적용 DB도 재실행한다. 기존 갱신 주기는 유지하며, 상세 정책은 [`users.md`](users.md) 참고.
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -68,6 +70,18 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `list_papers(limit=20, offset=0)` | `limit`: int, `offset`: int | `PaperListResponse` — `total` + `items` |
 | `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
 | `get_paper_details_by_pmids(pmids: list[str])` | `pmids`: PubMed PMID 목록 (`papers.external_id`, `source='pubmed'`) | `dict[str, PaperDetailResponse]` — 키가 PMID |
+
+**사용자 피드 설정** — `app/db/user_functions.py`, 입출력 정본은 `app/user_schemas.py`:
+
+| 함수 | 입력 | 반환 |
+|---|---|---|
+| `get_user_feed_settings(user_id)` | UUID 또는 UUID 문자열 | `FeedSettingsOut(user_id, feed_refresh_days)` 또는 None |
+| `update_user_feed_settings(user_id, data)` | UUID 또는 UUID 문자열, `FeedSettingsUpdate` 또는 dict | 저장된 `FeedSettingsOut` 또는 None. 잘못된 설정은 ValueError |
+
+`users.feed_refresh_days`는 SMALLINT NOT NULL DEFAULT 3, CHECK 1~7이다. 기존·신규 사용자 기본값은 3일.
+사용자·간병인 조회 모델(`UserOut`, `UserSummary`, `CaregiverContext`, `UserProfileContext`)에도 이 값을 포함한다.
+변경 시 계정의 `updated_at`만 갱신하고 피드 생성 시각은 바꾸지 않는다. 다음 AI 피드 요청부터 새 기간으로
+저장본 만료를 판단한다. 자세한 API·검증 정책은 [`users.md`](users.md) 참고.
 
 **가이드라인(기반 지식층)** — `backend/app/db/functions.py` (담당 박주현, 2026-10-14 추가, `008`).
 **역할: 조각 나누기와 임베딩 생성은 AI(김현서), 저장·검색 함수는 DB(박주현).**

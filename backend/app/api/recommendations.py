@@ -1,6 +1,7 @@
 """논문 추천 API (박주현 담당).
 
 GET /recommendations/{user_id}?patient_id=&k=5   간병인(관리 환자 전체)에 맞는 논문 최대 5편
+interests=수면관리&interests=돌봄스트레스   간병인 관심사를 추가한 검색 추천
 
 흐름:
   ① get_user_profile_context()로 사용자·환자 확인 (404 판정, 검색어 재료)   [한슬님 함수]
@@ -19,7 +20,7 @@ AI 피드 저장 기간 (10/14 회의): AI 결과는 feed_items에 묶음으로 
 """
 import logging
 from datetime import datetime, timedelta
-from typing import Callable, Optional
+from typing import Annotated, Callable, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -37,7 +38,7 @@ from app.db import feed_read
 from app.db.feed_read import get_feed_context_snapshot
 from app.feed_schemas import FeedItemIn
 from app.schemas import RecommendationItem, RecommendationResponse
-from app.user_schemas import APP_TIMEZONE, PatientOut
+from app.user_schemas import APP_TIMEZONE, DEFAULT_FEED_REFRESH_DAYS, PatientOut
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ GENERAL_QUERY = "치매 가족 돌봄에 도움이 되는 연구"
 FeedExecution = Callable[[AgentContext, str], StructuredAgentResult]
 
 # AI 피드 저장 기간 기본값 (10/14 회의).
-FEED_CACHE_DAYS = 3
+FEED_CACHE_DAYS = DEFAULT_FEED_REFRESH_DAYS
 
 
 def _example(detail: str) -> dict:
@@ -73,11 +74,9 @@ def get_feed_execution() -> Optional[FeedExecution]:
 
 
 def get_feed_cache_days(user_id: UUID) -> int:
-    """이 사용자의 AI 피드 저장 기간(일).
-
-    ★ 한슬 님 사용자별 설정(1~7일)이 생기면 여기서 그 값을 읽어 돌려준다 (없으면 FEED_CACHE_DAYS) ★
-    """
-    return FEED_CACHE_DAYS
+    """사용자의 설정(1~7일)을 읽는다. 조회 사이에 사용자가 사라지면 기본값을 쓴다."""
+    settings = user_functions.get_user_feed_settings(user_id)
+    return settings.feed_refresh_days if settings is not None else FEED_CACHE_DAYS
 
 
 def _now() -> datetime:
@@ -87,8 +86,8 @@ def _now() -> datetime:
 
 def load_cached_feed(user_id: UUID) -> Optional[tuple[datetime, list[RecommendationItem]]]:
     """기간 안의 저장본 (생성 시각, 항목). 없거나 읽기에 실패하면 None (→ 새로 만든다)."""
-    days = get_feed_cache_days(user_id)
     try:
+        days = get_feed_cache_days(user_id)
         batch = feed_read.get_latest_feed_batch(user_id, max_age=timedelta(days=days), reference_time=_now())
     except Exception as exc:  # 009 미적용 등. 저장본이 없을 때처럼 새로 만든다
         logger.warning("피드 저장본 읽기 실패 → 새로 만든다 (%s)", type(exc).__name__)
@@ -134,7 +133,8 @@ def build_query(patient: PatientOut) -> str:
 
 
 def search_recommendations(
-    user_id: UUID, patient_id: Optional[UUID], patients: list[PatientOut], k: int
+    user_id: UUID, patient_id: Optional[UUID], patients: list[PatientOut], k: int,
+    caregiver_interests: Optional[list[str]] = None,
 ) -> RecommendationResponse:
     """검색 방식 (mode="search"). AI 방식을 못 쓸 때의 대신 응답이기도 하다.
 
@@ -143,6 +143,9 @@ def search_recommendations(
     """
     # 프로필이 같은 환자는 검색어도 같으므로 한 번만 쓴다 (순서 유지).
     queries = list(dict.fromkeys(build_query(p) for p in patients)) or [GENERAL_QUERY]
+    if caregiver_interests:
+        interest_text = ", ".join(caregiver_interests)
+        queries = [f"{query}. 간병인의 관심사: {interest_text}" for query in queries]
     evidence = search_by_queries(queries, k).evidence
     details = functions.get_paper_details_by_pmids([e.pmid for e in evidence])
 
@@ -156,7 +159,7 @@ def search_recommendations(
     return RecommendationResponse(
         user_id=user_id, patient_id=patient_id, mode="search", queries=queries,
         # 근거 등급 A~D는 응답을 만드는 이 계층에서 붙인다 (evidence_grade.py 설명 참고).
-        items=with_grades(items),
+        items=with_grades(items[:k]),
     )
 
 
@@ -213,6 +216,11 @@ def get_recommendations(
     k: int = Query(5, ge=1, le=5, description="추천 논문 수 (최대 5)"),
     refresh: bool = Query(False, description="true면 저장 기간과 상관없이 AI 피드를 새로 만든다"),
     feed_execution: Optional[FeedExecution] = Depends(get_feed_execution),
+    interests: Annotated[Optional[list[str]], Query(
+        max_length=10,
+        description="간병인 관심사. interests=수면관리&interests=돌봄스트레스처럼 반복 지정. "
+                    "최대 10개, 항목당 100자. 지정하면 환자 상태와 결합한 검색 방식으로 응답",
+    )] = None,
 ) -> RecommendationResponse:
     """간병인의 관리 환자 전체를 기준으로 논문을 최대 `k`편 돌려준다.
 
@@ -224,9 +232,18 @@ def get_recommendations(
     - AI 결과는 저장되고, 저장 기간(기본 3일) 안에는 저장본을 그대로 준다 (`generated_at` = 처음 만든 시각).
       `refresh=true`면 새로 만든다. 검색 방식 결과는 저장하지 않는다 (`generated_at`=null).
     - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
+    - `interests`는 간병인이 요청에 지정한 관심사다. 공백·중복을 제거하고 환자 검색어에 더한다.
+      유효한 관심사가 있으면 검색 방식을 사용한다 (AI 저장본은 요청 관심사를 반영하지 않음).
+    - 논문 요약은 DB의 저장본이다. 요약 전인 논문은 요약 필드가 null일 수 있다.
     - 없는 사용자는 404.
     - 서버를 띄운 뒤 첫 요청은 임베딩 모델(bge-m3)을 불러오느라 오래 걸린다.
     """
+    caregiver_interests = list(dict.fromkeys(
+        value.strip() for value in (interests or []) if value.strip()
+    ))
+    if any(len(value) > 100 for value in caregiver_interests):
+        raise HTTPException(status_code=422, detail="관심사는 항목당 100자 이하여야 합니다.")
+
     profile = user_functions.get_user_profile_context(user_id)
     if profile is None:
         raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
@@ -235,7 +252,7 @@ def get_recommendations(
     if patient_id is not None and patient_id not in patients:
         raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
 
-    if feed_execution is not None:
+    if feed_execution is not None and not caregiver_interests:
         if not refresh and (cached := load_cached_feed(user_id)):
             generated_at, items = cached
             return RecommendationResponse(
@@ -264,4 +281,6 @@ def get_recommendations(
             logger.warning("추천 AI 실패 → 검색 방식으로 응답 (stage=없음, %s)", type(exc).__name__)
 
     selected = [patients[patient_id]] if patient_id is not None else list(patients.values())
-    return search_recommendations(user_id, patient_id, selected, k)
+    return search_recommendations(
+        user_id, patient_id, selected, k, caregiver_interests=caregiver_interests,
+    )

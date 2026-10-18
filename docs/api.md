@@ -20,9 +20,14 @@
 | `GET /feed/{user_id}` | `api/users.py` | 간병인 + 담당 환자 전원의 현재 상태. 없는 사용자는 404 | `UserProfileContext` |
 | `GET /feed_user/{user_id}` | `api/users.py` | 간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록). 없는 사용자는 404 | `CaregiverContext` |
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
+| `GET /users/{user_id}/feed-settings` | `api/users.py` | 피드 갱신 주기 조회(1~7일, 기본 3일). 없는 사용자는 404 | `FeedSettingsOut` |
+| `PATCH /users/{user_id}/feed-settings` | `api/users.py` | JSON `{"feed_refresh_days": 5}` 저장. 정수 1~7만 허용, 잘못된 입력은 422, 없는 사용자는 404 | `FeedSettingsOut` |
 | `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 [`users.md`](users.md) 참고.
+- `/feed/{user_id}`와 `/feed_user/{user_id}` 응답에는 최상위 `feed_refresh_days`를 포함한다.
+  피드 설정 API의 응답은 `{user_id, feed_refresh_days}`다. 설정 변경 시 기존 피드는 유지하고
+  다음 AI 피드 요청부터 기존 생성 시각에 새 기간을 적용한다. 설정 저장 자체는 피드를 생성하지 않는다.
 - `/recommendations`(담당: 박주현)는 **두 방식**으로 응답하고, 어느 쪽인지 응답의 `mode`에 적는다.
   **★ 2026-10-13 정식(간병인 기준) 경로로 전환** — 추천 기준은 환자 한 명이 아니라 간병인의 관리 환자 전체다.
   사용자·환자 확인(404 판정)과 검색어 재료는 `user_functions.get_user_profile_context(user_id)` 한 번으로 읽는다.
@@ -58,8 +63,9 @@
   - **AI 피드 저장 기간** (2026-10-15, 10/14 회의) — `mode="ai"` 결과는 `feed_items`에 한 묶음으로 저장한다
     (`feed_read.save_feed_batch()`, `k`와 상관없이 AI 결과 전부). 다음 요청부터 **저장 기간 안이면 실행기를 부르지 않고**
     저장본(`get_latest_feed_batch()` + 논문 상세·근거 등급)을 돌려준다. 기간이 지나면 새로 만든다.
-    - 기간은 `get_feed_cache_days(user_id)`가 정한다. 지금은 상수 `FEED_CACHE_DAYS = 3`.
-      **한슬 님 사용자별 설정(1~7일)이 생기면 이 함수만 바꾼다.**
+    - 기간은 `get_feed_cache_days(user_id)`가 `get_user_feed_settings()`로 읽은 `users.feed_refresh_days`다.
+      기본 3일, 사용자 설정은 1~7일. 만료 기준은 마지막 생성 시각 + 설정 일수이며, 정확히 만료된 시각부터 새로 만든다.
+      요청 시 검사하는 방식이며 백그라운드 자동 갱신 작업은 없다.
     - `refresh=true` — 기간과 상관없이 새로 만들고 저장한다 (이후 요청은 이 새 묶음을 받는다).
       실행기가 없거나 실패하면 지금처럼 검색 방식으로 응답한다.
     - **검색 방식 결과는 저장하지 않는다.** 실행기가 `None`이면(지금 기본값) 저장본도 보지 않는다.

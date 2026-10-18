@@ -15,7 +15,9 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from app.db import user_functions
-from app.user_schemas import CaregiverContext, PatientContext, UserProfileContext
+from app.user_schemas import (
+    CaregiverContext, FeedSettingsOut, FeedSettingsUpdate, PatientContext, UserProfileContext,
+)
 
 router = APIRouter(tags=["feed"])
 
@@ -73,3 +75,34 @@ def get_profile(user_id: UUID) -> UserProfileContext:
     if profile is None:
         raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
     return profile
+
+
+@router.get(
+    "/users/{user_id}/feed-settings",
+    response_model=FeedSettingsOut,
+    summary="피드 갱신 주기 조회",
+    responses=_not_found(_USER_NOT_FOUND),
+)
+def get_feed_settings(user_id: UUID) -> FeedSettingsOut:
+    """사용자별 피드 갱신 주기(1~7일, 기본 3일)를 조회한다."""
+    settings = user_functions.get_user_feed_settings(user_id)
+    if settings is None:
+        raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
+    return settings
+
+
+@router.patch(
+    "/users/{user_id}/feed-settings",
+    response_model=FeedSettingsOut,
+    summary="피드 갱신 주기 변경",
+    responses=_not_found(_USER_NOT_FOUND),
+)
+def update_feed_settings(user_id: UUID, data: FeedSettingsUpdate) -> FeedSettingsOut:
+    """주기를 저장하고 반환한다. 다음 AI 피드 요청부터 기존 생성 시각에 새 기간을 적용한다.
+
+    즉시 피드를 생성하거나 주기 작업을 예약하지 않는다. 검색 피드는 저장하지 않는다.
+    """
+    settings = user_functions.update_user_feed_settings(user_id, data)
+    if settings is None:
+        raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
+    return settings
