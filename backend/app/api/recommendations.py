@@ -19,20 +19,27 @@ AI 피드 저장 기간 (10/14 회의): AI 결과는 feed_items에 묶음으로 
 로그인이 아직 없어서 user_id를 경로로 받는다 (api/users.py와 같은 방식).
 """
 import logging
+from contextlib import suppress
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import Annotated, Callable, Optional
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from openai import OpenAI
 
+from app.ai.agent.clients.openai_client import OpenAIClient
+from app.ai.agent.composition import build_evidence_registry
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.feed import FeedWorkflow, FeedWorkflowError
 from app.ai.agent.workflows.feed_context_backend_source import ProductionFeedContextSource
 from app.ai.agent.workflows.feed_context_loader import DefaultFeedContextLoader
 from app.ai.agent.workflows.feed_context_prepare import prepare_production_feed_input
+from app.ai.agent.workflows.feed_execution import FeedExecutionV1
 from app.ai.retrieval.search import search_by_queries
 from app.api.evidence_grade import with_grades
+from app.config import settings
 from app.db import functions, user_functions
 from app.db import feed_read
 from app.db.feed_read import get_feed_context_snapshot
@@ -61,16 +68,37 @@ def _example(detail: str) -> dict:
     return {"description": detail, "content": {"application/json": {"example": {"detail": detail}}}}
 
 
+@lru_cache(maxsize=1)
 def get_feed_execution() -> Optional[FeedExecution]:
     """FeedWorkflow의 2단계(feed_execution)를 돌려주는 FastAPI 의존성.
 
-    ★ 웅 님 search_evidence 핸들러·레지스트리·LLM 클라이언트 함수로 교체 예정 ★
-    지금은 None을 돌려주고, None이면 엔드포인트가 검색 방식으로 대신 응답한다.
-    1단계가 정식(간병인 기준) 경로이므로, 교체할 함수는 feed_scope="caregiver_all"
+    backend/.env의 OPENAI_API_KEY와 OPENAI_SUMMARY_MODEL로 실제 실행기를 조립한다.
+    키/모델이 없거나 초기화가 실패하면 None (검색 방식). 설정 변경 후 서버 재시작 필요.
+    실행기와 SDK는 프로세스 안에서 재사용한다. 조립만으로 외부 API를 호출하지 않는다.
+    1단계가 정식(간병인 기준) 경로이므로, 실행기는 feed_scope="caregiver_all"
     입력(관리 환자 0~20명)을 받는다. context.patient_id는 항상 None이다.
     테스트에서는 app.dependency_overrides[get_feed_execution]으로 바꿔 끼운다.
     """
-    return None
+    api_key = settings.openai_api_key.strip()
+    model = settings.openai_summary_model.strip()
+    if not api_key or not model:
+        logger.info("추천 AI 설정 없음 → 검색 방식으로 응답")
+        return None
+
+    sdk = None
+    try:
+        registry = build_evidence_registry()
+        sdk = OpenAI(api_key=api_key, timeout=20.0, max_retries=0)
+        client = OpenAIClient(sdk, model=model, timeout_seconds=20.0)
+        return FeedExecutionV1(client=client, registry=registry)
+    except Exception as exc:
+        if sdk is not None:
+            with suppress(Exception):
+                sdk.close()
+        # 의존성 초기화는 엔드포인트의 try 밖이므로 여기서 검색 방식으로 돌린다.
+        # 키나 Provider 오류 원문은 로그에 남기지 않는다.
+        logger.warning("추천 AI 초기화 실패 → 검색 방식으로 응답 (%s)", type(exc).__name__)
+        return None
 
 
 def get_feed_cache_days(user_id: UUID) -> int:

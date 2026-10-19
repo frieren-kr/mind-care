@@ -56,10 +56,21 @@
     - `get_feed_execution()`이 `None`일 때
     - `FeedWorkflowError`나 다른 예외가 났을 때 (`stage`와 예외 종류를 warning 로그로 남긴다. 메시지는 남기지 않는다)
     - AI 결과를 걸러낸 뒤 남은 항목이 0개일 때
-  - **★ 교체 지점: `get_feed_execution()`** (`api/recommendations.py`의 FastAPI 의존성). **지금은 `None`을 돌려줘서
-    실제 응답은 항상 `mode="search"`이고 `personal_reason` 등 AI 쪽 칸은 `null`이다.** 허웅 님 `search_evidence`
-    핸들러·레지스트리·LLM 클라이언트가 나오면 이 함수만 `(AgentContext, str) -> StructuredAgentResult`를
-    돌려주도록 바꾼다(입력은 정식 경로의 `caregiver_all` JSON). 테스트는 `app.dependency_overrides[get_feed_execution]`으로 바꿔 끼운다.
+  - **AI 연결: `get_feed_execution()`** (`api/recommendations.py`의 FastAPI 의존성).
+    `backend/.env`의 `OPENAI_API_KEY`와 `OPENAI_SUMMARY_MODEL`로
+    `OpenAIClient` + `build_evidence_registry()` + `FeedExecutionV1`을 조립한다.
+    모델은 논문 요약 배치와 같은 설정을 쓰며 기본값은 없다.
+    GPT-5.6 Luna를 사용하려면 `OPENAI_SUMMARY_MODEL=gpt-5.6-luna`로 설정한다.
+    실제 검색 도구는 `RagEvidenceRetriever`를 통해 기존 RAG 검색을 호출한다.
+    키/모델이 비어 있거나 초기화에 실패하면 `None`을 반환하여 검색 방식으로 응답한다.
+    실행기(초기화 실패 시 `None` 포함)는 프로세스 안에서 재사용하므로 **설정 변경 후 서버를 재시작한다**.
+    `.env`는 실행 디렉터리와 관계없이 `backend/.env`에서 읽고, 프로세스 환경 변수가 우선한다.
+    테스트는 `app.dependency_overrides[get_feed_execution]` 또는 가짜 HTTP 응답으로 외부 호출을 막는다.
+    - 실제 검증 담당자: 키와 모델을 `.env`에 설정하고 서버를 재시작한 뒤
+      `GET /recommendations/{user_id}?k=5&refresh=true`를 호출한다 (`interests`는 생략).
+      HTTP 200만으로 성공을 판단하지 말고 `mode="ai"`와 `items[].personal_reason`을 확인한다.
+      `generated_at`은 저장 성공 시 채워진다. `mode="search"`이면 서버의 AI 초기화/실행 경고 로그를 확인한다.
+      DB·논문 임베딩·사용자 데이터가 필요하며, 이 연결 변경의 자동 테스트는 실제 Provider를 호출하지 않는다.
   - **AI 피드 저장 기간** (2026-10-15, 10/14 회의) — `mode="ai"` 결과는 `feed_items`에 한 묶음으로 저장한다
     (`feed_read.save_feed_batch()`, `k`와 상관없이 AI 결과 전부). 다음 요청부터 **저장 기간 안이면 실행기를 부르지 않고**
     저장본(`get_latest_feed_batch()` + 논문 상세·근거 등급)을 돌려준다. 기간이 지나면 새로 만든다.

@@ -1,9 +1,13 @@
 """환경 변수 설정. .env 파일에서 읽어온다 (.env.example 참고)."""
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=Path(__file__).resolve().parents[1] / ".env", extra="ignore"
+    )
 
     # Database
     database_url: str = "postgresql://mindcare:password@localhost:5432/mindcare"
@@ -15,8 +19,8 @@ class Settings(BaseSettings):
     # LLM / Embedding
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    # 논문 요약 배치(scripts/summarize_papers.py)가 쓰는 OpenAI 모델. 일부러 기본값을 두지 않는다
-    # (비어 있으면 배치가 안내 메시지를 내고 멈춘다).
+    # 논문 요약 배치와 개인화 피드가 함께 쓰는 OpenAI 모델. 기본값은 두지 않는다.
+    # 비어 있으면 배치는 안내 후 중단하고, 피드는 검색 방식으로 응답한다.
     openai_summary_model: str = ""
     # 요약 배치 전용 키(선택). 있으면 요약 배치는 이 키를 쓰고, 비어 있으면 openai_api_key를 쓴다.
     openai_summary_api_key: str = ""

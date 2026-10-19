@@ -259,6 +259,89 @@ class OfflineFeedHandoffTests(unittest.TestCase):
     def use(self, execution):
         app.dependency_overrides[get_feed_execution] = lambda: execution
 
+    def use_real_dependency_with_mock_provider(self, transport):
+        """실제 설정→SDK→실행기 조립을 쓰되 HTTP 전송만 가짜로 대체한다."""
+        import httpx
+        from openai import OpenAI
+        from types import SimpleNamespace
+
+        get_feed_execution.cache_clear()
+        self.addCleanup(get_feed_execution.cache_clear)
+        app.dependency_overrides.pop(get_feed_execution)
+
+        def make_sdk(**kwargs):
+            sdk = OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
+            self.addCleanup(sdk.close)
+            return sdk
+
+        for target, options in {
+            "app.api.recommendations.settings": {"new": SimpleNamespace(
+                openai_api_key="offline-placeholder", openai_summary_model="gpt-5.6-luna")},
+            "app.api.recommendations.OpenAI": {"side_effect": make_sdk},
+            "socket.socket.connect": {"side_effect": AssertionError("Live network forbidden")},
+        }.items():
+            patcher = patch(target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_configured_dependency_runs_sdk_search_handoff_and_returns_ai(self):
+        import httpx
+        from app.ai.agent.tests.test_openai_client import completion
+        from app.ai.agent.tests.test_feed_execution import final_turn
+
+        requests = []
+
+        def transport(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                return httpx.Response(200, json=completion({
+                    "role": "assistant", "content": None, "tool_calls": [{
+                        "id": "search_1", "type": "function", "function": {
+                            "name": "search_evidence",
+                            "arguments": json.dumps({"query": "Dementia sleep research"}),
+                        },
+                    }],
+                }, "tool_calls"))
+            return httpx.Response(200, json=completion({"role": "assistant", "content": final_turn().text}))
+
+        self.use_real_dependency_with_mock_provider(transport)
+        with patch("app.ai.retrieval.search.search", return_value=self.search.return_value) as rag, \
+                patch("app.api.recommendations.feed_read.save_feed_batch", return_value=SavedFeedBatch(
+                    batch_id=uuid4(), generated_at=self.profile.generated_at)) as save:
+            response = self.get(refresh=True)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "ai")
+        self.assertIsNotNone(body["generated_at"])
+        self.assertEqual(body["items"][0]["personal_reason"], "Synthetic care interest")
+        self.assertEqual(body["items"][0]["title"], "DB title 0")
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(r["model"] == "gpt-5.6-luna" for r in requests))
+        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["search_evidence"])
+        rag.assert_called_once_with(query="Dementia sleep research", k=5)
+        save.assert_called_once()
+        self.search.assert_not_called()
+        self.assertIs(get_feed_execution(), get_feed_execution())
+
+    def test_configured_dependency_provider_error_returns_search(self):
+        import httpx
+
+        requests = []
+
+        def transport(request):
+            requests.append(request)
+            return httpx.Response(401, json={"error": {"message": "PRIVATE provider detail", "type": "auth_error"}})
+
+        self.use_real_dependency_with_mock_provider(transport)
+        with self.assertLogs("app.api.recommendations", "WARNING") as logs:
+            response = self.get(refresh=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "search")
+        self.assertIsNone(response.json()["generated_at"])
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))
+        self.search.assert_called_once()
+
     def test_handoff_keeps_db_title_summaries_grades_order_and_agent_reasons(self):
         pmids = [DB_PMIDS[0], None, DB_PMIDS[1], MISSING_PMID, DB_PMIDS[2]]
         result = make_result("offline", pmids)
@@ -514,6 +597,8 @@ class EndpointTests(unittest.TestCase):
         self.caregiver_one = seed_user_id(self, SEED_EMAIL_ONE_PATIENT, expected_patients=1)
         self.client = TestClient(app)
         self.addCleanup(app.dependency_overrides.clear)
+        # 실제 키가 있는 개발 환경에서도 기본 테스트는 외부 LLM을 호출하지 않는다.
+        self.use(None)
         # AI 피드 저장본이 남아 있으면 가짜 실행기를 부르지 않으므로, 샘플·임시 사용자의 저장본을 앞뒤로 비운다.
         self.clear_saved_feeds()
         self.addCleanup(self.clear_saved_feeds)
@@ -565,7 +650,6 @@ class EndpointTests(unittest.TestCase):
 
     def test_no_feed_execution_uses_search(self):
         require_search(self)
-        self.assertIsNone(get_feed_execution())  # 교체 전 기본값
         self.assert_search(self.get())
 
     def test_fake_feed_execution_uses_ai(self):
