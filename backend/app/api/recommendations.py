@@ -10,7 +10,7 @@ interests=수면관리&interests=돌봄스트레스   간병인 관심사를 추
        context_prepare = get_feed_context_snapshot() → ProductionFeedContextSource
                          → DefaultFeedContextLoader → prepare_production_feed_input()
   ③ AI 방식을 못 쓰면 검색 방식 (mode="search")으로 대신 응답
-       환자마다 build_query() → search_by_queries() → get_paper_details_by_pmids()   [현서님 함수]
+       환자마다 build_queries()(영어 여러 줄) → search_by_queries() → get_paper_details_by_pmids()   [현서님 함수]
 
 AI 피드 저장 기간 (10/14 회의): AI 결과는 feed_items에 묶음으로 저장하고, 기간(기본 3일) 안에는
 실행기를 다시 부르지 않고 저장본을 돌려준다. refresh=true면 기간과 상관없이 새로 만든다.
@@ -22,6 +22,7 @@ import logging
 from contextlib import suppress
 from datetime import datetime, timedelta
 from functools import lru_cache
+from itertools import zip_longest
 from typing import Annotated, Callable, Optional
 from uuid import UUID, uuid4
 
@@ -39,6 +40,7 @@ from app.ai.agent.workflows.feed_context_prepare import prepare_production_feed_
 from app.ai.agent.workflows.feed_execution import FeedExecutionV1
 from app.ai.retrieval.search import search_by_queries
 from app.api.evidence_grade import with_grades
+from app.api.search_terms import INTEREST_EN, STAGE_EN, SYMPTOM_EN, expand_interest, to_en
 from app.config import settings
 from app.db import functions, user_functions
 from app.db import feed_read
@@ -55,7 +57,10 @@ _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."
 
 # 관리 환자가 0명일 때 검색 방식이 쓰는 일반 검색어.
-GENERAL_QUERY = "치매 가족 돌봄에 도움이 되는 연구"
+GENERAL_QUERY = "dementia care: interventions and management"
+
+# 검색 방식에서 환자 1명이 만드는 검색어 최대 줄 수.
+MAX_QUERIES_PER_PATIENT = 4
 
 FeedExecution = Callable[[AgentContext, str], StructuredAgentResult]
 
@@ -144,20 +149,31 @@ def save_feed(user_id: UUID, items: list[RecommendationItem]) -> Optional[dateti
     return saved.generated_at
 
 
-def build_query(patient: PatientOut) -> str:
-    """환자 단계·증상·관심사로 한국어 검색어 한 줄을 만든다 (검색 방식 전용).
+def build_queries(patient: PatientOut) -> list[str]:
+    """환자 단계·증상·관심사로 영어 검색어 여러 줄을 만든다 (검색 방식 전용, 최대 4줄).
 
-    값을 문장에 끼워 넣기만 한다 (간병인 자가점검, 평가 점수, 안전 기록 등은 쓰지 않는다).
+    증상 1개당 한 줄, 관심사 1개당 한 줄(INTEREST_EXPAND에 있으면 펼친 줄들)을 번갈아 넣는다.
+    단어는 search_terms.py 단어표로 바꾼다 (표에 없으면 한국어 그대로).
+    간병인 자가점검, 평가 점수, 안전 기록 등은 쓰지 않는다.
     """
-    subject = f"치매 환자({patient.dementia_stage})" if patient.dementia_stage else "치매 환자"
-    parts = []
-    if patient.symptoms:
-        parts.append(f"{', '.join(patient.symptoms)} 증상")
-    if patient.interests:
-        parts.append(", ".join(patient.interests))
-    if not parts:
-        return f"{subject} 돌봄에 도움이 되는 연구"
-    return f"{subject}의 {'과 '.join(parts)}에 도움이 되는 연구"
+    stage = to_en(STAGE_EN, patient.dementia_stage or "", default="dementia")
+    symptom_lines = [f"{to_en(SYMPTOM_EN, s)} in {stage}: interventions and management" for s in patient.symptoms]
+    interest_lines = []
+    for interest in patient.interests:
+        expanded = expand_interest(interest, stage)
+        if expanded:
+            interest_lines += expanded
+        else:
+            interest_lines.append(f"{to_en(INTEREST_EN, interest)} for people with {stage}")
+    if not symptom_lines and not interest_lines:
+        return [f"{stage} care: interventions and management"]
+    return _interleave([symptom_lines, interest_lines])[:MAX_QUERIES_PER_PATIENT]
+
+
+def _interleave(lists: list[list[str]]) -> list[str]:
+    """목록마다 1번째 줄 → 2번째 줄 … 순서로 섞는다. 같은 줄은 한 번만 (먼저 나온 자리)."""
+    mixed = [line for row in zip_longest(*lists) for line in row if line is not None]
+    return list(dict.fromkeys(mixed))
 
 
 def search_recommendations(
@@ -166,14 +182,17 @@ def search_recommendations(
 ) -> RecommendationResponse:
     """검색 방식 (mode="search"). AI 방식을 못 쓸 때의 대신 응답이기도 하다.
 
-    환자마다 검색어를 하나씩 만들어 search_by_queries()로 합친다 (환자별로 골고루 뽑힌다).
-    환자가 0명이면 일반 검색어 하나를 쓴다.
+    환자마다 build_queries()로 영어 검색어 여러 줄을 만들어 "환자별 1번째 줄 → 2번째 줄 …" 순서로 섞고
+    search_by_queries()로 합친다 (줄별로 골고루 뽑힌다). 같은 줄은 한 번만 쓴다.
+    환자가 0명이면 일반 검색어 하나를 쓴다. 간병인 관심사 줄은 "환자 한 명 더"처럼 섞기 순서에 넣는다.
+    섞은 뒤 k줄까지만 쓴다 (줄마다 1등부터 뽑으므로 k줄 뒤는 결과에 들어가지 않는다).
     """
-    # 프로필이 같은 환자는 검색어도 같으므로 한 번만 쓴다 (순서 유지).
-    queries = list(dict.fromkeys(build_query(p) for p in patients)) or [GENERAL_QUERY]
+    query_lists = [build_queries(p) for p in patients] or [[GENERAL_QUERY]]
     if caregiver_interests:
-        interest_text = ", ".join(caregiver_interests)
-        queries = [f"{query}. 간병인의 관심사: {interest_text}" for query in queries]
+        query_lists.append([
+            f"{to_en(INTEREST_EN, interest)} for people with dementia" for interest in caregiver_interests
+        ])
+    queries = _interleave(query_lists)[:k]
     evidence = search_by_queries(queries, k).evidence
     details = functions.get_paper_details_by_pmids([e.pmid for e in evidence])
 
@@ -255,12 +274,12 @@ def get_recommendations(
     - `mode="ai"`: AI가 고른 논문 + `personal_reason` / `category`. 제목·요약은 DB에서 온다.
       `patient_id`와 관계없이 관리 환자 전체가 기준이다.
     - `mode="search"`: 검색어(`queries`)와 가까운 논문 + `relevance_score`. AI 방식을 아직 못 쓰거나
-      실패했거나 결과가 0건일 때의 대신 응답이다. 환자마다 검색어를 하나씩 만들고,
-      `patient_id`를 주면 그 환자 검색어 하나만 쓴다. 환자가 0명이면 일반 검색어 하나.
+      실패했거나 결과가 0건일 때의 대신 응답이다. 환자마다 영어 검색어를 최대 4줄 만들어 섞고 k줄까지 쓴다.
+      `patient_id`를 주면 그 환자 검색어만 쓴다. 환자가 0명이면 일반 검색어 하나.
     - AI 결과는 저장되고, 저장 기간(기본 3일) 안에는 저장본을 그대로 준다 (`generated_at` = 처음 만든 시각).
       `refresh=true`면 새로 만든다. 검색 방식 결과는 저장하지 않는다 (`generated_at`=null).
     - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
-    - `interests`는 간병인이 요청에 지정한 관심사다. 공백·중복을 제거하고 환자 검색어에 더한다.
+    - `interests`는 간병인이 요청에 지정한 관심사다. 공백·중복을 제거하고 영어 검색어 줄로 바꿔 환자 검색어와 섞는다 (전체 k줄까지).
       유효한 관심사가 있으면 검색 방식을 사용한다 (AI 저장본은 요청 관심사를 반영하지 않음).
     - 논문 요약은 DB의 저장본이다. 요약 전인 논문은 요약 필드가 null일 수 있다.
     - 없는 사용자는 404.

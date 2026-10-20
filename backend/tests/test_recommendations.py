@@ -617,11 +617,11 @@ class EndpointTests(unittest.TestCase):
             f"/recommendations/{user_id or self.caregiver_one}", params=params
         )
 
-    def assert_search(self, response, queries=1):
+    def assert_search(self, response):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["mode"], "search")
-        self.assertEqual(len(body["queries"]), queries)
+        self.assertTrue(body["queries"])
         self.assertTrue(all(body["queries"]))
         self.assertEqual(len(body["items"]), SEARCH_ITEMS)
         self.assertIsNotNone(body["items"][0]["relevance_score"])
@@ -727,16 +727,18 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(len(provider_input["patients"]), 2)
 
     def test_search_covers_all_patients_or_one(self):
-        """검색 방식: 환자 2명 + patient_id 생략은 200(검색어 2개), 주면 그 환자 검색어 하나."""
+        """검색 방식: 환자 2명 + patient_id 생략은 두 환자 검색어를 섞고, 주면 그 환자 검색어만."""
         require_search(self)
         caregiver_two = seed_user_id(self, SEED_EMAIL_TWO_PATIENTS, expected_patients=2)
-        both = self.assert_search(self.get(caregiver_two), queries=2)
+        both = self.assert_search(self.get(caregiver_two))
         self.assertIsNone(both["patient_id"])
 
         second = self.patient_ids(caregiver_two)[1]
-        one = self.assert_search(self.get(caregiver_two, patient_id=second), queries=1)
+        one = self.assert_search(self.get(caregiver_two, patient_id=second))
         self.assertEqual(one["patient_id"], second)
-        self.assertEqual(one["queries"], [both["queries"][1]])
+        # 환자별 1번째 줄 → 2번째 줄 순서. 섞은 뒤 k줄까지만 쓰므로 집합 포함은 보지 않는다.
+        self.assertEqual(both["queries"][1], one["queries"][0])
+        self.assertNotIn(both["queries"][0], one["queries"])
 
     def test_no_patients_search_uses_general_query(self):
         """환자 0명도 404가 아니라 응답한다 (검색 방식은 일반 검색어 하나)."""

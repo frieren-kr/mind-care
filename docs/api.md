@@ -43,13 +43,23 @@
       `sources[].pmid`로 `get_paper_details_by_pmids()`를 한 번 부르고, `personal_reason` / `category`만 AI 결과에서,
       나머지(`id`, `title`, `title_ko`, … 요약 3칸)는 DB에서 채운다.
       **`pmid`가 없거나 DB에 없는 항목은 뺀다.** `relevance_score`는 `null`.
-  - **`mode="search"`** — `search_recommendations()`. 환자마다 `build_query()`로 검색어를 하나씩 만들어
+  - **`mode="search"`** — `search_recommendations()`. 환자마다 `build_queries()`로 **영어 검색어를 여러 줄** 만들어
     현서 님 `search_by_queries(검색어 목록, k)`로 합친다(검색어별 상위 논문을 번갈아 뽑고 중복은 한 번만) →
     `get_paper_details_by_pmids()`. `relevance_score`와 응답의 `queries`(이번에 쓴 검색어 목록, 데모·디버깅용)가
     채워지고 AI 쪽 2칸(`personal_reason`·`category`)은 `null`이다.
-    - `patient_id`를 주면 **그 환자 검색어 하나만** 쓴다.
-    - 환자가 0명이면 일반 검색어 하나(`"치매 가족 돌봄에 도움이 되는 연구"`)를 쓴다.
-    - `build_query()`는 환자 단계·증상·관심사를 문장에 끼워 넣는 검색 방식 전용 함수다.
+    - ★2026-10-21 한국어 한 줄 → 영어 여러 줄. 현서 님 점검에서 한국어 한 줄은 관련 0/5, 영어로 증상별로 쪼개면 4/5.
+      영어 검색어에 caregiver/family를 넣으면 보호자 본인 논문이 끌려와 2/5 → **단어표 값 말고는 이 단어를 넣지 않는다.**
+    - 단어는 `app/api/search_terms.py` 단어표(`STAGE_EN`·`SYMPTOM_EN`·`INTEREST_EN`·`INTEREST_EXPAND`)로 바꾼다.
+      띄어쓰기는 무시하고 찾으며("수면장애" = "수면 장애"), 표에 없는 단어는 한국어 그대로 둔다.
+    - 증상 1개당 `"{증상} in {단계}: interventions and management"`, 관심사 1개당 `"{관심사} for people with {단계}"`.
+      관심사가 `INTEREST_EXPAND`(약물 치료·비약물 치료)에 있으면 한 줄 대신 펼친 줄들. 단계가 없거나 표에 없으면 `dementia`.
+      약물 치료의 항아밀로이드 항체 줄은 **경도인지장애·경도일 때만** 넣는다(다른 단계면 첫 줄만).
+      증상·관심사 줄을 번갈아 넣고 **환자 1명당 최대 4줄**. 둘 다 없으면 `"{단계} care: interventions and management"` 한 줄.
+    - 여러 환자는 "환자별 1번째 줄 → 2번째 줄 …" 순서로 섞고, 같은 줄은 한 번만 쓴다. 섞은 뒤 **전체 `k`줄까지만** 쓴다.
+    - `patient_id`를 주면 **그 환자 검색어만** 쓴다.
+    - 환자가 0명이면 일반 검색어 하나(`"dementia care: interventions and management"`)를 쓴다.
+    - 요청의 `interests`(간병인 관심사)는 `"{관심사} for people with dementia"` 줄로 바꿔 **"환자 한 명 더"처럼 섞기 순서에 넣는다**
+      (환자가 여러 명이어도 관심사 1번째 줄이 첫 바퀴에 들어간다).
   - **`patient_id`는 선택 값이다.** 주면 그 간병인의 환자인지 확인하고(아니면 404), 응답의 `patient_id`에 그대로 적는다.
     안 주면 `null`. (이전: 환자가 2명 이상인데 생략하면 400, 환자 0명이면 404 → **둘 다 없앴다**.)
   - **폴백 규칙** — 아래 경우에는 `search` 방식으로 대신 응답한다(항상 200).
