@@ -30,7 +30,7 @@ SYMPTOM_EN = {
     "낙상 위험": "fall risk",
     "거동 불편": "impaired mobility",
     "삼킴 곤란": "dysphagia",
-    "공격성": "aggression and agitation",
+    "공격성": "aggression",
     "우울": "depression",
     "무기력": "apathy",
     # 추가 후보
@@ -38,7 +38,7 @@ SYMPTOM_EN = {
     "초조": "agitation",
     "환각": "hallucinations",
     "망상": "delusions",
-    "의심": "paranoia",
+    "의심": "suspiciousness",
     "식욕 저하": "loss of appetite",
     "요실금": "urinary incontinence",
     "언어 장애": "language difficulties",

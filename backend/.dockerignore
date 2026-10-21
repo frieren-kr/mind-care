@@ -32,3 +32,6 @@ tests/
 Dockerfile
 .dockerignore
 docker-compose*.yml
+
+# 가이드라인 PDF 원문
+data/

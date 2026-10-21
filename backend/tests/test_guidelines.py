@@ -80,7 +80,9 @@ class GuidelineFunctionsTest(unittest.TestCase):
         updated = functions.get_guidelines_by_ids([self.ids[1]])[0]  # id도 그대로다
         self.assertEqual((updated.content, updated.section, updated.tags), ("고친 본문", "새 절", []))
         # 임베딩도 같이 바뀌어서 vector(0)과의 유사도가 0이 된다 → 맨 뒤로 간다.
-        self.assertEqual([r.id for r in self.search()], [self.ids[0], self.ids[2], self.ids[1]])
+        # 실제 가이드라인이 DB에 많으면 유사도 0인 조각은 검색 결과(k개)에서 아예 빠질 수도 있다.
+        found = [r.id for r in self.search()]
+        self.assertIn(found, ([self.ids[0], self.ids[2], self.ids[1]], [self.ids[0], self.ids[2]]))
 
     def test_same_chunk_index_in_another_document_is_a_separate_row(self):
         functions.save_guidelines([chunk(0, vector(7), source_url=TEST_URL + "doc-b")])
