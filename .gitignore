@@ -41,3 +41,6 @@ Thumbs.db
 *.sqlite3
 *.db
 update_papers_state.json*
+
+# ---- 가이드라인 PDF 원문 (저작권, 깃에 올리지 않음) ----
+backend/data/guidelines/
