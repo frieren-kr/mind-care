@@ -35,7 +35,7 @@ class OpenAIClient:
     def generate(self, messages: Sequence[Message], tools: list[dict[str, Any]]) -> ModelTurn:
         kwargs: dict[str, Any] = {"model": self.model, "messages": [self._message(m) for m in messages]}
         if tools:
-            kwargs.update(tools=tools, tool_choice="auto")
+            kwargs.update(tools=tools, tool_choice="auto", extra_body={"reasoning_effort": "none"})
         check_deadline()
         deadline = request_deadline.get()
         timeout = self.timeout_seconds
