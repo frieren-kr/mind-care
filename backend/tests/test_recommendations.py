@@ -18,6 +18,7 @@ OfflineFeedHandoffTests는 DB/RAG read를 Mock으로 대체하여 Handoff와 HTT
 import json
 import unittest
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from functools import cache
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -35,8 +36,9 @@ from app.api.recommendations import (
     get_feed_execution,
 )
 from app.db.connection import get_connection
+from app.feed_schemas import FeedBatch, FeedBatchItem, SavedFeedBatch
 from app.schemas import PaperDetailResponse
-from app.user_schemas import PatientContext, UserProfileContext
+from app.user_schemas import APP_TIMEZONE, FeedSettingsOut, PatientContext, UserProfileContext
 from main import app
 
 # 시드 스크립트(scripts/seed_dev_profiles.py)가 만드는 샘플 간병인 이메일.
@@ -219,8 +221,13 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         guards = {
             "psycopg.connect": {"side_effect": AssertionError("Offline tests must not connect to DB")},
             "app.api.recommendations.user_functions.get_user_profile_context": {"return_value": self.profile},
+            "app.api.recommendations.user_functions.get_user_feed_settings": {
+                "return_value": FeedSettingsOut(user_id=self.user, feed_refresh_days=3)},
             "app.api.recommendations.functions.get_paper_details_by_pmids": {"return_value": self.papers},
             "app.api.recommendations.search_by_queries": {},
+            # 피드 저장본은 FeedCacheTests에서 따로 본다. 여기서는 "저장본 없음 / 저장 실패 없음"으로 둔다.
+            "app.api.recommendations.feed_read.get_latest_feed_batch": {"return_value": None},
+            "app.api.recommendations.feed_read.save_feed_batch": {},
         }
         mocks = {}
         for target, options in guards.items():
@@ -251,6 +258,89 @@ class OfflineFeedHandoffTests(unittest.TestCase):
 
     def use(self, execution):
         app.dependency_overrides[get_feed_execution] = lambda: execution
+
+    def use_real_dependency_with_mock_provider(self, transport):
+        """실제 설정→SDK→실행기 조립을 쓰되 HTTP 전송만 가짜로 대체한다."""
+        import httpx
+        from openai import OpenAI
+        from types import SimpleNamespace
+
+        get_feed_execution.cache_clear()
+        self.addCleanup(get_feed_execution.cache_clear)
+        app.dependency_overrides.pop(get_feed_execution)
+
+        def make_sdk(**kwargs):
+            sdk = OpenAI(**kwargs, http_client=httpx.Client(transport=httpx.MockTransport(transport)))
+            self.addCleanup(sdk.close)
+            return sdk
+
+        for target, options in {
+            "app.api.recommendations.settings": {"new": SimpleNamespace(
+                openai_api_key="offline-placeholder", openai_summary_model="gpt-5.6-luna")},
+            "app.api.recommendations.OpenAI": {"side_effect": make_sdk},
+            "socket.socket.connect": {"side_effect": AssertionError("Live network forbidden")},
+        }.items():
+            patcher = patch(target, **options)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_configured_dependency_runs_sdk_search_handoff_and_returns_ai(self):
+        import httpx
+        from app.ai.agent.tests.test_openai_client import completion
+        from app.ai.agent.tests.test_feed_execution import final_turn
+
+        requests = []
+
+        def transport(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                return httpx.Response(200, json=completion({
+                    "role": "assistant", "content": None, "tool_calls": [{
+                        "id": "search_1", "type": "function", "function": {
+                            "name": "search_evidence",
+                            "arguments": json.dumps({"query": "Dementia sleep research"}),
+                        },
+                    }],
+                }, "tool_calls"))
+            return httpx.Response(200, json=completion({"role": "assistant", "content": final_turn().text}))
+
+        self.use_real_dependency_with_mock_provider(transport)
+        with patch("app.ai.retrieval.search.search", return_value=self.search.return_value) as rag, \
+                patch("app.api.recommendations.feed_read.save_feed_batch", return_value=SavedFeedBatch(
+                    batch_id=uuid4(), generated_at=self.profile.generated_at)) as save:
+            response = self.get(refresh=True)
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["mode"], "ai")
+        self.assertIsNotNone(body["generated_at"])
+        self.assertEqual(body["items"][0]["personal_reason"], "Synthetic care interest")
+        self.assertEqual(body["items"][0]["title"], "DB title 0")
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(r["model"] == "gpt-5.6-luna" for r in requests))
+        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["search_evidence"])
+        rag.assert_called_once_with(query="Dementia sleep research", k=5)
+        save.assert_called_once()
+        self.search.assert_not_called()
+        self.assertIs(get_feed_execution(), get_feed_execution())
+
+    def test_configured_dependency_provider_error_returns_search(self):
+        import httpx
+
+        requests = []
+
+        def transport(request):
+            requests.append(request)
+            return httpx.Response(401, json={"error": {"message": "PRIVATE provider detail", "type": "auth_error"}})
+
+        self.use_real_dependency_with_mock_provider(transport)
+        with self.assertLogs("app.api.recommendations", "WARNING") as logs:
+            response = self.get(refresh=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["mode"], "search")
+        self.assertIsNone(response.json()["generated_at"])
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))
+        self.search.assert_called_once()
 
     def test_handoff_keeps_db_title_summaries_grades_order_and_agent_reasons(self):
         pmids = [DB_PMIDS[0], None, DB_PMIDS[1], MISSING_PMID, DB_PMIDS[2]]
@@ -360,12 +450,164 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertEqual(body["queries"], [GENERAL_QUERY])
 
 
+class FeedCacheTests(unittest.TestCase):
+    """AI 피드 저장 기간 (DB 없이). 저장 함수 두 개를 메모리 가짜로, 시계를 고정값으로 바꿔 끼운다."""
+
+    T0 = datetime(2026, 10, 15, 9, 0, tzinfo=APP_TIMEZONE)
+
+    def setUp(self):
+        self.user = uuid4()
+        self.now = self.T0
+        self.batches = []  # (user_id, FeedBatch)
+        self.calls = 0
+        self.papers = {pmid: PaperDetailResponse(id=UUID(int=200 + i), title=f"DB title {i}", evidence_level="2")
+                       for i, pmid in enumerate(DB_PMIDS)}
+        by_id = {p.id: p for p in self.papers.values()}
+
+        def save(user_id, items):
+            batch = FeedBatch(batch_id=uuid4(), generated_at=self.now, items=[
+                FeedBatchItem(rank=r, personal_reason=i.personal_reason, category=i.category,
+                              relevance_score=i.relevance_score, is_saved=False, paper=by_id[i.paper_id])
+                for r, i in enumerate(items, 1)])
+            self.batches.append((user_id, batch))
+            return SavedFeedBatch(batch_id=batch.batch_id, generated_at=batch.generated_at)
+
+        def latest(user_id, *, max_age, reference_time):
+            found = [b for u, b in self.batches if u == user_id and b.generated_at > reference_time - max_age]
+            return found[-1] if found else None
+
+        from app.ai.retrieval.search import EvidenceItem, EvidencePackage
+        package = EvidencePackage(query="q", evidence=[
+            EvidenceItem(evidence_type="new_research", pmid=DB_PMIDS[0], title="t", relevance_score=0.7)])
+        for target, kw in {
+            "psycopg.connect": {"side_effect": AssertionError("DB에 붙으면 안 된다")},
+            "app.api.recommendations.user_functions.get_user_profile_context": {"return_value": Mock(patients=[])},
+            "app.api.recommendations.user_functions.get_user_feed_settings": {
+                "return_value": FeedSettingsOut(user_id=self.user, feed_refresh_days=3)},
+            "app.api.recommendations.functions.get_paper_details_by_pmids": {"return_value": self.papers},
+            "app.api.recommendations.search_by_queries": {"return_value": package},
+            "app.api.recommendations.context_prepare": {"return_value": "{}"},
+            "app.api.recommendations.feed_read.save_feed_batch": {"side_effect": save},
+            "app.api.recommendations.feed_read.get_latest_feed_batch": {"side_effect": latest},
+            "app.api.recommendations._now": {"side_effect": lambda: self.now},
+        }.items():
+            patcher = patch(target, **kw)
+            setattr(self, target.rsplit(".", 1)[1], patcher.start())
+            self.addCleanup(patcher.stop)
+        self.use(self.execution)
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
+
+    def execution(self, context, _):
+        self.calls += 1
+        return make_result(context.request_id, DB_PMIDS)
+
+    def use(self, execution):
+        previous = app.dependency_overrides.copy()
+        self.addCleanup(lambda: (app.dependency_overrides.clear(), app.dependency_overrides.update(previous)))
+        app.dependency_overrides[get_feed_execution] = lambda: execution
+
+    def get(self, **params):
+        response = self.client.get(f"/recommendations/{self.user}", params=params)
+        self.assertEqual(response.status_code, 200)
+        return response.json()
+
+    def at(self, **delta):
+        self.now = self.T0 + timedelta(**delta)
+
+    def test_within_period_reuses_saved_feed(self):
+        first = self.get(k=2)
+        self.assertEqual((first["mode"], len(first["items"]), self.calls), ("ai", 2, 1))
+        self.assertEqual(datetime.fromisoformat(first["generated_at"]), self.T0)
+        self.at(days=2, hours=23)
+        again = self.get()  # k=5 — 처음에 k=2로 불렀어도 3편 전부 저장돼 있다
+        self.assertEqual(self.calls, 1)  # 실행기를 다시 부르지 않았다
+        self.assertEqual((again["mode"], again["generated_at"]), ("ai", first["generated_at"]))
+        self.assertEqual([i["title"] for i in again["items"]], ["DB title 0", "DB title 1", "DB title 2"])
+        self.assertEqual([i["personal_reason"] for i in again["items"]], ["이유 0", "이유 1", "이유 2"])
+        self.assertEqual({(i["category"], i["evidence_grade"]) for i in again["items"]}, {("care", "B")})
+
+    def test_after_period_generates_new_feed(self):
+        self.get()
+        self.at(days=3, seconds=1)
+        body = self.get()
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(datetime.fromisoformat(body["generated_at"]), self.now)
+        self.assertEqual(len(self.batches), 2)
+
+    def test_user_period_change_applies_to_existing_feed(self):
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=7)
+        first = self.get()
+        self.at(days=4)
+        self.assertEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 1)
+        # 저장본 생성 시각은 유지한 채 기간만 줄이면 다음 요청에서 새로 만든다.
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=1)
+        self.assertNotEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 2)
+
+    def test_user_period_expires_at_exact_boundary(self):
+        self.get_user_feed_settings.return_value = FeedSettingsOut(user_id=self.user, feed_refresh_days=1)
+        first = self.get()
+        self.at(hours=23, minutes=59, seconds=59)
+        self.assertEqual(self.get()["generated_at"], first["generated_at"])
+        self.at(days=1)
+        self.assertNotEqual(self.get()["generated_at"], first["generated_at"])
+        self.assertEqual(self.calls, 2)
+
+    def test_settings_read_failure_still_generates_feed(self):
+        self.get_user_feed_settings.side_effect = RuntimeError("설정 조회 실패")
+        with self.assertLogs("app.api.recommendations", "WARNING"):
+            body = self.get()
+        self.assertEqual((body["mode"], self.calls), ("ai", 1))
+
+    def test_refresh_ignores_period(self):
+        self.get()
+        self.at(hours=1)
+        body = self.get(refresh="true")
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(datetime.fromisoformat(body["generated_at"]), self.now)
+        self.at(hours=2)
+        self.assertEqual(self.get()["generated_at"], body["generated_at"])  # 이후로는 새 묶음을 준다
+        self.assertEqual(self.calls, 2)
+
+    def test_search_fallback_is_not_saved(self):
+        self.use(Mock(side_effect=RuntimeError("실패")))
+        with self.assertLogs("app.api.recommendations", "WARNING"):
+            body = self.get()
+        self.assertEqual((body["mode"], body["generated_at"]), ("search", None))
+        self.use(None)  # 실행기 없음 (지금 기본값)
+        body = self.get(refresh="true")
+        self.assertEqual((body["mode"], body["generated_at"]), ("search", None))
+        self.save_feed_batch.assert_not_called()
+        self.assertEqual(self.batches, [])
+
+    def test_cache_failures_do_not_break_ai(self):
+        self.get_latest_feed_batch.side_effect = RuntimeError("009 미적용")
+        self.save_feed_batch.side_effect = RuntimeError("저장 실패")
+        with self.assertLogs("app.api.recommendations", "WARNING") as logs:
+            body = self.get()
+        self.assertEqual((body["mode"], body["generated_at"], self.calls), ("ai", None, 1))
+        self.assertEqual(len(logs.output), 2)
+
+
 class EndpointTests(unittest.TestCase):
     def setUp(self):
         # 모든 엔드포인트 테스트가 '환자 1명인 간병인'을 기본으로 쓴다.
         self.caregiver_one = seed_user_id(self, SEED_EMAIL_ONE_PATIENT, expected_patients=1)
         self.client = TestClient(app)
         self.addCleanup(app.dependency_overrides.clear)
+        # 실제 키가 있는 개발 환경에서도 기본 테스트는 외부 LLM을 호출하지 않는다.
+        self.use(None)
+        # AI 피드 저장본이 남아 있으면 가짜 실행기를 부르지 않으므로, 샘플·임시 사용자의 저장본을 앞뒤로 비운다.
+        self.clear_saved_feeds()
+        self.addCleanup(self.clear_saved_feeds)
+
+    def clear_saved_feeds(self):
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM feed_items WHERE user_id IN (SELECT id FROM users"
+                            " WHERE email LIKE %s OR email LIKE %s)", (SEED_EMAIL_LIKE, TEST_EMAIL_PREFIX + "%"))
 
     def use(self, feed_execution):
         app.dependency_overrides[get_feed_execution] = lambda: feed_execution
@@ -375,11 +617,11 @@ class EndpointTests(unittest.TestCase):
             f"/recommendations/{user_id or self.caregiver_one}", params=params
         )
 
-    def assert_search(self, response, queries=1):
+    def assert_search(self, response):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["mode"], "search")
-        self.assertEqual(len(body["queries"]), queries)
+        self.assertTrue(body["queries"])
         self.assertTrue(all(body["queries"]))
         self.assertEqual(len(body["items"]), SEARCH_ITEMS)
         self.assertIsNotNone(body["items"][0]["relevance_score"])
@@ -408,7 +650,6 @@ class EndpointTests(unittest.TestCase):
 
     def test_no_feed_execution_uses_search(self):
         require_search(self)
-        self.assertIsNone(get_feed_execution())  # 교체 전 기본값
         self.assert_search(self.get())
 
     def test_fake_feed_execution_uses_ai(self):
@@ -453,9 +694,11 @@ class EndpointTests(unittest.TestCase):
         self.use(broken)
         with self.assertLogs("app.api.recommendations", "WARNING") as logs:
             self.assert_search(self.get())
-        self.assertIn("stage=feed_execution", logs.output[0])
-        self.assertIn("RuntimeError", logs.output[0])
-        self.assertNotIn("boom", logs.output[0])
+        # 009 미적용 DB면 "피드 저장본 읽기 실패" 경고가 먼저 찍히므로 AI 실패 줄을 찾아서 본다.
+        line = next(line for line in logs.output if "추천 AI 실패" in line)
+        self.assertIn("stage=feed_execution", line)
+        self.assertIn("RuntimeError", line)
+        self.assertNotIn("boom", "\n".join(logs.output))
 
     def test_no_usable_ai_items_falls_back_to_search(self):
         require_search(self)
@@ -484,16 +727,18 @@ class EndpointTests(unittest.TestCase):
                 self.assertEqual(len(provider_input["patients"]), 2)
 
     def test_search_covers_all_patients_or_one(self):
-        """검색 방식: 환자 2명 + patient_id 생략은 200(검색어 2개), 주면 그 환자 검색어 하나."""
+        """검색 방식: 환자 2명 + patient_id 생략은 두 환자 검색어를 섞고, 주면 그 환자 검색어만."""
         require_search(self)
         caregiver_two = seed_user_id(self, SEED_EMAIL_TWO_PATIENTS, expected_patients=2)
-        both = self.assert_search(self.get(caregiver_two), queries=2)
+        both = self.assert_search(self.get(caregiver_two))
         self.assertIsNone(both["patient_id"])
 
         second = self.patient_ids(caregiver_two)[1]
-        one = self.assert_search(self.get(caregiver_two, patient_id=second), queries=1)
+        one = self.assert_search(self.get(caregiver_two, patient_id=second))
         self.assertEqual(one["patient_id"], second)
-        self.assertEqual(one["queries"], [both["queries"][1]])
+        # 환자별 1번째 줄 → 2번째 줄 순서. 섞은 뒤 k줄까지만 쓰므로 집합 포함은 보지 않는다.
+        self.assertEqual(both["queries"][1], one["queries"][0])
+        self.assertNotIn(both["queries"][0], one["queries"])
 
     def test_no_patients_search_uses_general_query(self):
         """환자 0명도 404가 아니라 응답한다 (검색 방식은 일반 검색어 하나)."""

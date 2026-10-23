@@ -351,6 +351,11 @@ class RecommendationResponse(BaseModel):
     items: list[RecommendationItem] = Field(description="search면 검색어(환자)별 상위 논문을 번갈아 뽑은 순 (검색어가 하나면 관련도 높은 순), "
         "ai면 AI가 정한 순"
     )
+    generated_at: Optional[datetime] = Field(
+        default=None,
+        description="저장된 AI 피드 묶음의 생성 시각 (2026-10-15 추가). mode='ai'면 저장본을 다시 줄 때도 처음 만든 시각, "
+        "search이거나 저장에 실패했으면 null",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

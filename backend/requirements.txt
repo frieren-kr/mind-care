@@ -21,3 +21,4 @@ sentence-transformers>=3.0,<4   # bge-m3 임베딩 (app/ai/retrieval/embedding.p
 
 # ---- Utils ----
 python-dotenv==1.0.1
+pdfplumber>=0.11,<0.12   # 가이드라인 PDF 글자 추출 (scripts/load_guidelines.py)

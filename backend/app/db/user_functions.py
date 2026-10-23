@@ -3,7 +3,7 @@
 ★ 팀 규칙 ★
 AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 사용자·환자 테이블은 반드시 이 모듈의 함수를 통해서만 접근한다. (논문 테이블은 functions.py)
-함수 이름 / 입출력 형식이 바뀌면 반드시 AGENTS.md의 "데이터 접근 계약"에 기록한다.
+함수 이름 / 입출력 형식이 바뀌면 docs/users.md와 docs/db.md의 데이터 접근 계약에 기록한다.
 
 입출력 형식은 `app/user_schemas.py`가 정본이다 (논문 쪽 functions.py ↔ schemas.py와 같은 관계).
 - 입력: JSON을 파싱한 dict 그대로 넣어도 되고, user_schemas의 모델(XxxIn / XxxUpdate)을 넣어도 된다.
@@ -24,7 +24,8 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 
 테이블 정의는 migrations/001_init.sql(users, patient_profiles, caregiver_profiles)
 + 004_patient_management.sql(phone_number, clinical_assessments, safety_events, medications, medical_visits)
-+ 005_medical_visits_detail.sql(medical_visits 진료 항목 컬럼, 인덱스)이 정본이다.
++ 005_medical_visits_detail.sql(medical_visits 진료 항목 컬럼, 인덱스)
++ 010_user_feed_refresh_days.sql(users 피드 갱신 주기)이 정본이다.
 """
 import logging
 from datetime import date, datetime, timedelta
@@ -49,6 +50,8 @@ from app.user_schemas import (
     CaregiverContext,
     CaregiverProfileIn,
     CaregiverProfileOut,
+    FeedSettingsOut,
+    FeedSettingsUpdate,
     MedicalVisitIn,
     MedicalVisitOut,
     MedicalVisitUpdate,
@@ -68,6 +71,7 @@ from app.user_schemas import (
     UserUpdate,
     check_assessment_score,
     check_date_order,
+    check_medication_state,
     check_visit_state,
     normalize_assessment_type,
     parse_optional_date,
@@ -433,7 +437,7 @@ def list_users(limit: int = 100, offset: int = 0) -> list[UserSummary]:
 
     rows = _fetch_all(
         """
-        SELECT u.id, u.name, u.email, u.created_at,
+        SELECT u.id, u.name, u.email, u.created_at, u.feed_refresh_days,
                (SELECT count(*) FROM patient_profiles AS p WHERE p.caregiver_id = u.id) AS patient_count
           FROM users AS u
          ORDER BY u.created_at, u.id
@@ -442,6 +446,36 @@ def list_users(limit: int = 100, offset: int = 0) -> list[UserSummary]:
         {"limit": limit, "offset": offset},
     )
     return [UserSummary.model_validate(row) for row in rows]
+
+
+def get_user_feed_settings(user_id: UUID | str) -> Optional[FeedSettingsOut]:
+    """사용자의 피드 갱신 주기를 읽는다. 없는 사용자·잘못된 UUID는 None."""
+    key = _parse_uuid(user_id)
+    if key is None:
+        return None
+    row = _fetch_one(
+        "SELECT id AS user_id, feed_refresh_days FROM users WHERE id = %(user_id)s",
+        {"user_id": key},
+    )
+    return FeedSettingsOut.model_validate(row) if row else None
+
+
+def update_user_feed_settings(
+    user_id: UUID | str, data: dict[str, Any] | FeedSettingsUpdate,
+) -> Optional[FeedSettingsOut]:
+    """피드 주기(정수 1~7일)를 저장한다. 잘못된 값은 ValueError, 없는 사용자는 None.
+
+    다른 계정 필드는 유지하고 users.updated_at을 갱신한다.
+    피드를 생성하거나 생성 시각을 바꾸지 않는다. 다음 요청부터 새 기간으로 만료를 판단한다.
+    """
+    fields = _to_model(FeedSettingsUpdate, data).model_dump()
+    key = _parse_uuid(user_id)
+    if key is None:
+        return None
+    row = _update_row("users", "id", key, fields)
+    if row is None:
+        return None
+    return FeedSettingsOut(user_id=row["id"], feed_refresh_days=row["feed_refresh_days"])
 
 
 # ============================================================
@@ -934,13 +968,14 @@ def create_medication(medication: dict[str, Any] | MedicationIn) -> MedicationOu
             - patient_id, drug_name: 필수
             - is_taking: 선택, 기본 true (현재 복용 중)
             - start_date / end_date: 선택, 미래 가능. end_date ≥ start_date
+            - 미래 end_date는 is_taking=false 불가 (종료일까지는 복용 중)
 
     Returns:
         저장된 MedicationOut (DB가 만든 id, created_at, updated_at 포함).
 
     Raises:
         ValueError: 필드가 빠졌거나 형식이 틀린 경우, 종료일이 시작일보다 빠른 경우,
-            존재하지 않는 환자인 경우.
+            복용 중단인데 종료일이 미래인 경우, 존재하지 않는 환자인 경우.
     """
     data = _to_model(MedicationIn, medication)
 
@@ -1003,6 +1038,7 @@ def update_medication(
     복용 중단은 {"is_taking": false, "end_date": "2026-10-07"}로 한다 (행을 지우지 않는다).
     날짜 순서는 "수정 후의 시작일 + 수정 후의 종료일" 조합으로 검사한다
     (종료일만 바꿔도 기존 시작일보다 빠르면 거부).
+    "복용 중단인데 종료일이 미래"인지도 수정 후의 is_taking + end_date 조합으로 검사한다.
 
     Args:
         medication_id: 수정할 복약 기록 (medications.id).
@@ -1016,7 +1052,7 @@ def update_medication(
 
     Raises:
         ValueError: 바꿀 수 없는 필드·모르는 필드가 있거나 형식이 틀린 경우,
-            수정 후 종료일이 시작일보다 빠른 경우.
+            수정 후 종료일이 시작일보다 빠른 경우, 수정 후 복용 중단인데 종료일이 미래인 경우.
     """
     fields = _to_model(MedicationUpdate, data).model_dump(exclude_unset=True)
 
@@ -1031,6 +1067,7 @@ def update_medication(
 
     merged = {**current.model_dump(), **fields}
     check_date_order(merged["start_date"], merged["end_date"], "start_date", "end_date")
+    check_medication_state(merged["is_taking"], merged["end_date"])
 
     row = _update_row("medications", "id", key, fields)
     if row is None:  # 조회와 수정 사이에 삭제된 경우
@@ -1213,6 +1250,7 @@ def get_caregiver_context(user_id: UUID | str) -> Optional[CaregiverContext]:
     return CaregiverContext(
         user_id=user.id,
         name=user.name,
+        feed_refresh_days=user.feed_refresh_days,
         caregiver_profile=get_caregiver_profile(user.id),
         patient_ids=user.patient_ids,
         generated_at=datetime.now(APP_TIMEZONE),
@@ -1262,6 +1300,7 @@ def get_user_profile_context(user_id: UUID | str) -> Optional[UserProfileContext
     return UserProfileContext(
         user_id=user.id,
         name=user.name,
+        feed_refresh_days=user.feed_refresh_days,
         caregiver_profile=get_caregiver_profile(user.id),
         patients=[_patient_context(patient, now) for patient in list_patients(user.id)],
         generated_at=datetime.now(APP_TIMEZONE),

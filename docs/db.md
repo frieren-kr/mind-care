@@ -22,7 +22,10 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `004`·`005`(환자 관리·진료 상세) + `006_profile_summaries_index.sql`(월간 요약 조회 인덱스 + upsert용 UNIQUE)
   + `007_paper_analysis_title_ko.sql`(`paper_analysis.title_ko` — 논문 제목의 한국어 번역,
     `summary_comparison` → `summary_background` 이름 변경)
-  + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장).
+  + `008_guideline_embedding.sql`(`guideline_knowledge`를 가이드라인 조각 + 임베딩 `vector(1024)` + HNSW로 확장)
+  + `009_feed_items_cache.sql`(`feed_items`에 `batch_id`·`rank`·`category` + 인덱스 — AI 피드 저장본, 2026-10-15).
+  + `010_user_feed_refresh_days.sql`(`users.feed_refresh_days`, 기본 3일, 1~7일 제약 + 진료·복약 날짜 무결성 트리거).
+    사용자 요청으로 010에 트리거를 추가했으므로 기존 적용 DB도 재실행한다. 기존 갱신 주기는 유지하며, 상세 정책은 [`users.md`](users.md) 참고.
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -68,6 +71,18 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_paper_detail(paper_id: UUID)` | `paper_id`: `papers.id` | `PaperDetailResponse` 또는 `None`(없는 id) |
 | `get_paper_details_by_pmids(pmids: list[str])` | `pmids`: PubMed PMID 목록 (`papers.external_id`, `source='pubmed'`) | `dict[str, PaperDetailResponse]` — 키가 PMID |
 
+**사용자 피드 설정** — `app/db/user_functions.py`, 입출력 정본은 `app/user_schemas.py`:
+
+| 함수 | 입력 | 반환 |
+|---|---|---|
+| `get_user_feed_settings(user_id)` | UUID 또는 UUID 문자열 | `FeedSettingsOut(user_id, feed_refresh_days)` 또는 None |
+| `update_user_feed_settings(user_id, data)` | UUID 또는 UUID 문자열, `FeedSettingsUpdate` 또는 dict | 저장된 `FeedSettingsOut` 또는 None. 잘못된 설정은 ValueError |
+
+`users.feed_refresh_days`는 SMALLINT NOT NULL DEFAULT 3, CHECK 1~7이다. 기존·신규 사용자 기본값은 3일.
+사용자·간병인 조회 모델(`UserOut`, `UserSummary`, `CaregiverContext`, `UserProfileContext`)에도 이 값을 포함한다.
+변경 시 계정의 `updated_at`만 갱신하고 피드 생성 시각은 바꾸지 않는다. 다음 AI 피드 요청부터 새 기간으로
+저장본 만료를 판단한다. 자세한 API·검증 정책은 [`users.md`](users.md) 참고.
+
 **가이드라인(기반 지식층)** — `backend/app/db/functions.py` (담당 박주현, 2026-10-14 추가, `008`).
 **역할: 조각 나누기와 임베딩 생성은 AI(김현서), 저장·검색 함수는 DB(박주현).**
 
@@ -84,6 +99,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `get_feed_context_snapshot(*, user_id, reference_time, reference_date, recent_period_start, recent_period_end)` | 전부 키워드 전용. `reference_time`/`recent_period_*`는 **tz-aware** `datetime`, `reference_date`는 `date` | `FeedReadSnapshot` |
 | `save_care_log(user_id, log_type, content=None, mood_tag=None, patient_id=None, logged_at=None)` | `log_type`: `patient_care` / `caregiver_selfcare`(필수), `patient_id`: 선택(그 간병인의 환자여야 함), `logged_at`: `None`이면 DB `now()` | 저장된 `care_logs` id (`UUID`) |
 | `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
+| `save_feed_batch(user_id, items: list[FeedItemIn])` | AI 피드 한 묶음 (`paper_id, personal_reason?, category?, relevance_score?`). 목록 순서대로 `rank` 1부터. **트랜잭션 하나** — 없는 사용자·논문이 있으면 `ValueError`, 아무것도 저장 안 됨. 빈 목록도 `ValueError` | `SavedFeedBatch(batch_id, generated_at)` |
+| `get_latest_feed_batch(user_id, *, max_age: timedelta, reference_time)` | `reference_time`은 **tz-aware**. `created_at > reference_time - max_age`인 가장 최근 묶음 | `FeedBatch(batch_id, generated_at, items)` — items는 `rank` 순, 항목마다 `personal_reason, category, relevance_score, is_saved, paper: PaperDetailResponse`. 없으면 `None` |
 
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.
@@ -248,6 +265,16 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - 개발용 샘플: `python -m scripts.seed_dev_care_logs` (최근 30일 돌봄 기록 + 지난달 요약. 재실행 안전).
   테스트: `python -m unittest tests.test_feed_read`.
 
+피드 저장본 (`feed_items`, `009`, 2026-10-15 — 10/14 회의):
+- AI 피드 한 번 = 한 묶음(`batch_id`). 묶음 안 행은 `created_at`이 같고 이것이 응답의 `generated_at`이다.
+  `personal_reason`은 기존 `personalized_explanation` 칸에 저장한다. 검색 방식(폴백) 결과는 저장하지 않는다.
+- **예전 묶음은 지우지 않는다** — 북마크(`is_saved`)가 행마다 있어서, 지우면 북마크가 사라진다.
+- 새 묶음을 저장할 때 이 사용자가 예전에 북마크한 논문이면 `is_saved=true`로 이어 붙인다
+  (안 그러면 같은 논문이 새 묶음에 다시 나올 때 북마크가 풀린 것처럼 보인다).
+  **나중에 북마크 API를 만들 때**: 목록은 `(user_id, paper_id)` 기준으로 중복을 없애고,
+  해제는 그 사용자·논문의 **모든 행**을 `false`로 바꿔야 한다 (한 행만 바꾸면 다음 묶음에서 다시 살아난다).
+- 테스트: `python -m unittest tests.test_feed_cache` (실 DB, `009`가 없거나 논문 3편 미만이면 skip).
+
 
 요약 배치 (`backend/scripts/summarize_papers.py`, 담당 박주현, 2026-10-13):
 - 요약이 없는 논문(`get_new_papers(limit)`)마다 OpenAI로 `title_ko` + 요약 3칸을 만들어
@@ -294,6 +321,31 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   `--out` 결과 파일 맨 위에 칸별 글자 수 통계, 토큰 사용량, 검사에 걸린 논문 번호와 재생성 결과,
   "치매"·"알츠하이머병" 뒤에 괄호 설명이 붙은 곳의 개수, 금지 단어·약 이름 괄호 검사 결과가 적힌다.
 - 테스트: `python -m unittest tests.test_summarize_papers` (가짜 LLM, 실 DB 필요).
+
+통합 배치 (`backend/scripts/update_papers.py`, 담당 박주현, 2026-10-14):
+- **수집 → 임베딩 → 근거 등급 → 요약**을 한 번에 돌린다. 단계마다 아직 처리 안 된 논문만 고른다 —
+  수집은 `save_papers()`의 중복 건너뛰기, 임베딩은 `get_papers_without_embedding('bge-m3')`, 등급은
+  `get_papers_without_evidence()`, 요약은 `get_new_papers(--limit)`. 그래서 여러 번 돌려도 결과가 같고,
+  한 단계가 통째로 실패해도 앞 단계 결과는 DB에 남아 다음 실행 때 이어서 처리된다.
+- 임베딩·등급은 현서 님 `embed_papers.py`·`classify_papers.py`가 `main()`만 있어서 부르지 않고, 두 스크립트가 쓰는
+  `embed_documents()`·`classify()`와 DB 함수를 같은 순서로 직접 부른다. 요약은 `summarize_papers.run()`을 그대로 쓰고
+  키는 `OPENAI_SUMMARY_API_KEY` → `OPENAI_API_KEY` 순서(로그에는 변수 이름만).
+- 겹쳐 실행 방지: 잠금 파일(Linux `fcntl.flock`, Windows는 `msvcrt`). 이미 실행 중이면 경고 로그만 남기고 종료 코드 0.
+- 종료 코드: **0** 전부 성공 / **1** 일부 실패(다음 단계는 계속 진행) / **2** 실행 불가(DB 연결 실패, 키·`OPENAI_SUMMARY_MODEL` 없음).
+- 로그: 시작·끝 시각, 단계별 처리·실패 건수와 걸린 시간. 화면과 `--log-file`에 같이 남긴다.
+  PubMed 요청 URL에 `api_key`가 들어가므로 httpx 요청 로그는 끈다.
+- 실행 (`backend/`에서):
+  ```bash
+  python -m scripts.update_papers --log-file logs/update_papers.log   # 전체 (요약 최대 100편)
+  python -m scripts.update_papers --skip-collect --limit 20           # 수집 빼고, 요약 20편
+  python -m scripts.update_papers --only classify                     # 한 단계만 (collect/embed/classify/summarize)
+  python -m scripts.update_papers --dry-run                           # DB에 쓰지 않음 (요약은 LLM을 부르지만 저장 안 함)
+  python -m scripts.update_papers --only summarize --retry-skipped    # 요약 3번 실패해 건너뛰던 논문도 다시 시도
+  ```
+  그 밖의 옵션: `--days-back`(수집 기간, 기본 7일 — cron 주기보다 길게), `--max-results`(수집 최대, 기본 100), `--lock-file`.
+- 요약 실패 논문은 저장되지 않아 다음 실행 때 다시 시도되지만, 실패 횟수를 상태 파일(`--state-file`, 기본은 `--log-file`과 같은 폴더의 `update_papers_state.json`)에 논문 id별로 적어 **3번 실패하면 다음 실행부터 건너뛴다**(로그에 "건너뜀 n건 (PMID 목록)", 종료 코드 1의 원인 아님). 상태 파일이 없거나 깨지면 새로 시작하고, `--dry-run`은 기록하지 않는다.
+- **자동 실행: AWS 서버(EC2 1대)에서 cron으로 실행 예정.** 예: `0 3 * * 1 cd /path/backend && .venv/bin/python -m scripts.update_papers --log-file logs/update_papers.log`
+- 테스트: `python -m unittest tests.test_update_papers` (가짜 단계·가짜 모델, DB 불필요).
 
 
 수집기(`collectors/pubmed.py`) 쪽 함수:

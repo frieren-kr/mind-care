@@ -1,0 +1,37 @@
+# 이미지에 들어가면 안 되는 것: 키, 덤프, 로그, 캐시, 로컬 가상환경
+
+# 키·비밀번호
+.env
+.env.*
+!.env.example
+
+# DB 덤프 (마이그레이션 SQL만 남긴다)
+*.dump
+*.backup
+**/*.sql
+!app/db/migrations/*.sql
+
+# 로그·배치 상태 파일
+logs/
+*.log
+update_papers_state.json*
+
+# 캐시·가상환경·테스트
+.venv/
+venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+tests/
+
+# 빌드에 필요 없는 것
+.git
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# 가이드라인 PDF 원문
+data/

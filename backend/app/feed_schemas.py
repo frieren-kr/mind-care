@@ -16,7 +16,7 @@ AI 담당(허웅)의 adapter가 필드를 그대로 옮기면 되고, 아래 "�
 """
 from datetime import date
 from decimal import Decimal
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Literal, Optional, TypeVar
 from uuid import UUID
 
 from pydantic import (
@@ -29,6 +29,8 @@ from pydantic import (
     StrictStr,
     model_validator,
 )
+
+from app.schemas import PaperDetailResponse
 
 # 관리 환자 수 상한. 넘으면 자르지 않고 FeedPatientLimitExceeded를 던진다
 # (환자 목록은 Loader가 "완전해야 한다"고 요구해서, 자르면 조용히 틀린 결과가 된다).
@@ -207,3 +209,45 @@ class FeedReadSnapshot(FeedReadModel):
     managed_patients: FeedReadCollection[FeedReadManagedPatient]
     recent_care_logs: FeedReadCollection[FeedReadCareLog]
     long_term_summary: Optional[FeedReadLongTermSummary]
+
+
+# ============================================================
+# 피드 저장본 (feed_items, 009) — save_feed_batch() / get_latest_feed_batch()
+# ============================================================
+
+FeedCategory = Literal["treatment", "care", "prevention", "diagnosis"]  # RecommendationItem.category와 같다
+
+
+class FeedItemIn(BaseModel):
+    """저장할 피드 한 편. 묶음 안 순서(rank)는 목록 순서대로 1부터 붙는다."""
+
+    paper_id: UUID
+    personal_reason: Optional[str] = Field(default=None, description="feed_items.personalized_explanation에 저장")
+    category: Optional[FeedCategory] = None
+    relevance_score: Optional[float] = None
+
+
+class SavedFeedBatch(BaseModel):
+    """save_feed_batch() 반환값."""
+
+    batch_id: UUID
+    generated_at: AwareDatetime = Field(description="묶음의 생성 시각 (feed_items.created_at, 묶음 안에서 모두 같다)")
+
+
+class FeedBatchItem(BaseModel):
+    """저장된 피드 한 편 + 논문 상세 (get_paper_detail()과 같은 형식)."""
+
+    rank: int
+    personal_reason: Optional[str]
+    category: Optional[FeedCategory]
+    relevance_score: Optional[float]
+    is_saved: bool = Field(description="사용자가 북마크했는지")
+    paper: PaperDetailResponse
+
+
+class FeedBatch(BaseModel):
+    """get_latest_feed_batch() 반환값. items는 rank 순."""
+
+    batch_id: UUID
+    generated_at: AwareDatetime
+    items: list[FeedBatchItem]
