@@ -161,7 +161,7 @@ ai_summary(없으면 abstract) 발췌 최대 1,200자만 제공한다. 식별 me
 LLM은 `{"decisions":[{"include":true,"personal_reason":"...","category":"care"},{"include":false}]}`
 형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 후보 수만큼의 판단이 필요하고,
 제외 항목에는 이유/category/null도 허용하지 않는다. 선택 수가 5를 넘거나 길이가 다르면 실패한다.
-출처 ID·추가 필드·중복 JSON 키도 거부한다. 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다.
+출처 ID·추가 필드·중복 JSON 키도 거부한다. 검색 성공 후 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다. 검색 미실행은 정상 완료할 수 없다.
 서버는 후보 순서로 원본 참조를 결합하고 Snapshot 일치 및 기존 `resolve_evidence_references()`를
 재검증한다. 최종 `FeedAnswerV2`, `StructuredAgentResult` 및 Backend Handoff 계약은 그대로다.
 
@@ -203,8 +203,7 @@ server-resolved sources를 함께 넘긴다. 기존 StructuredAgentResult valida
 출처 참조 순서를 재검증하고 completed FeedAnswerV2 및 현재 request의 결과만 전달한다.
 다른 LLM 호출, 추가 외부 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
 정상 empty Feed는 허용한다. 실패 status/invalid output/출처 오류는 Handoff를 호출하지 않는다.
-Recoverable Tool error 뒤 Runner가 검증된 completed 결과를 반환하면 기존 의미대로 전달하며
-execution.errors를 보존한다. tool_timeout 등의 failed 결과는 전달하지 않는다.
+Feed 검색 Tool 오류는 즉시 failed로 종료하고 Handoff하지 않는다. Chat의 recoverable 오류 처리는 유지한다.
 
 각 단계의 exception은 `FeedWorkflowError.stage`(context_prepare/feed_execution/backend_handoff)로
 감싸며 원문 메시지는 숨긴다. 이후 단계는 호출하지 않고 자동 retry/repair는 없다.
@@ -1479,3 +1478,23 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.structured_de
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c 'import app.ai.agent.agent_loop_runner; import app.ai.agent.outputs; import app.ai.retrieval.search; import app.ai.retrieval.evidence'
 git diff --check
 ```
+
+### Feed 최초 검색과 검색 진행 상태
+
+Feed 첫 요청은 호출별 GenerationOptions로 search_evidence를 지정한다. 검색어는 모델이 생성하며
+Cold Start도 동일하다. 후속 요청은 auto, Tool 예산 또는 round 예산이 소진되면 none이다.
+parallel_tool_calls=False이며, 비준수 Provider가 상한을 넘는 call을 반환하면 기존 서버 제한으로 거부한다.
+옵션은 ContextVar를 통해 해당 generate 호출에만 적용하고 finally에서 복원한다.
+기존 generate(messages, tools) 인터페이스와 Chat의 auto/SDK timeout/retry 설정은 유지한다.
+
+최신 후보 메시지에는 검색 전 not_started, 검색 후 evaluating, 예산 소진 exhausted의 phase와
+성공/실패 횟수, 사용/잔여 예산을 전달한다. candidate_status는 not_searched/empty/available로
+별도로 구분한다. last_search는 반환 Evidence 수와 새 후보 수를 구분하며 원래 query는 기존
+assistant Tool Call 메시지에 보존한다. 검색 전 0건은 빈 검색 성공을 의미하지 않는다.
+검색 전 최종 text 또는 다른 Tool 응답은 feed_search_required로 거부한다. 검색 오류는 즉시
+failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하지 않는다.
+정상 검색 1/2/3회는 모델 호출 2/3/4회이며, 빈 검색 성공 후 추가 검색은 모델 선택이다.
+
+로컬 실제 모델 검증은 기존 테스트 DB/Provider 설정이 준비된 환경에서 위 로컬 예시로 수행한다.
+Cold Start의 최초 Tool Call, 1~3회 검색 후 상태, 예산 소진 뒤 최종 판단, AI Handoff를 확인한다.
+MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·검색 품질·토큰 비용은 검증하지 않는다.

@@ -63,6 +63,19 @@ class FeedCandidates:
     def __init__(self):
         self._items: list[FeedCandidate] = []
         self._pmids: set[str] = set()
+        self.successful_searches = 0
+        self.failed_searches = 0
+        self.last_search = None
+
+    def record_search(self, success: bool, returned: int = 0, added: int = 0) -> None:
+        self.successful_searches += int(success)
+        self.failed_searches += int(not success)
+        self.last_search = {"success": success, "returned_evidence_count": returned,
+                            "new_eligible_candidate_count": added}
+
+    @property
+    def count(self) -> int:
+        return len(self._items)
 
     def add(self, call_id: str, package: EvidencePackage) -> None:
         # Reject constructed/mutated packages before accepting any of their rows.
@@ -76,7 +89,7 @@ class FeedCandidates:
             self._items.append(FeedCandidate(ref.tool_call_id, ref.evidence_index, evidence.model_copy(deep=True)))
             self._pmids.add(evidence.pmid)
 
-    def message(self) -> Message:
+    def message(self, remaining: int = 3) -> Message:
         # One latest projection is appended to the current request, never history.
         # Field removal is not a free-text PII sanitizer. All excerpts remain untrusted.
         rows = []
@@ -86,7 +99,17 @@ class FeedCandidates:
             rows.append({"title": item.title[:300], "study_type": (item.study_type or "")[:80],
                          "evidence_excerpt": (excerpt or "")[:1200]})
         return Message(role="user", kind="evidence", content=json.dumps({
-            "context_type": "untrusted_feed_candidates", "candidate_count": len(rows),
+            "context_type": "untrusted_feed_candidates",
+            "search_progress": {
+                "phase": ("not_started" if not (self.successful_searches + self.failed_searches)
+                          else "exhausted" if remaining == 0 else "evaluating"),
+                "search_calls_used": self.successful_searches + self.failed_searches,
+                "search_calls_remaining": remaining,
+                "successful_searches": self.successful_searches, "failed_searches": self.failed_searches,
+            },
+            "candidate_status": ("not_searched" if not (self.successful_searches + self.failed_searches)
+                                 else "available" if rows else "empty"),
+            "last_search": self.last_search, "candidate_count": len(rows),
             "candidates": rows,
         }, ensure_ascii=False, allow_nan=False))
 
@@ -140,6 +163,12 @@ def minimize_feed_tool_messages(messages: Sequence[Message], outcomes: Sequence[
 def build_feed_decision_policy() -> Message:
     policy = """최종 text는 아래 FeedDecisionDraft JSON Schema의 단일 JSON object로 반환한다.
 Tool 선택/추가 호출은 기존 방식으로 계속한다. 검증용 재호출이나 재생성은 하지 않는다.
+첫 search_evidence 검색은 필수이며 검색어는 Context를 바탕으로 직접 작성한다.
+search_progress는 서버의 실제 검색 상태다. 검색 전 후보 0건을 최종 빈 결과로 판단하지 않는다.
+성공한 검색 후 후보가 없어도 남은 예산과 앞선 query를 보고 더 일반적인 검색이 유용한지 판단한다.
+추가 검색은 선택이며 동일 query 반복이나 예산을 채우기 위한 검색을 하지 않는다.
+예산이 0이면 Tool을 호출하지 않고 현재 후보의 최종 판단만 작성한다.
+검색 오류는 정상적인 검색 결과 0건이 아니다.
 현재 untrusted_feed_candidates 목록 하나가 최종 판단 대상이며 배열 순서는 서버가 고정한다.
 추가 검색 후에는 최신 목록으로 판단한다. 이전 검색의 개별 결과를 새 후보로 재조립하지 않는다.
 decisions 길이는 현재 candidate_count와 정확히 같아야 한다. i번째 판단은 i번째 후보에 대응한다.

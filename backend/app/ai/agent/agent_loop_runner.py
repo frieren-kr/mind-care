@@ -3,7 +3,7 @@ from time import monotonic
 from typing import cast
 
 from ._execution import RequestTimeout, bounded_call, check_deadline, positive_seconds, request_deadline
-from .clients.base import LLMClient
+from .clients.base import LLMClient, GenerationOptions, generate_with_options
 from .executor import ToolExecutor
 from .feed_candidates import FeedCandidates, FeedDecisionError, minimize_feed_tool_messages
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
@@ -84,7 +84,7 @@ class AgentLoopRunner:
 
         try:
             state.messages = bounded_call(lambda: self.prompt_builder.build_initial_messages(user_input, context))
-            if output_model is not None:
+            if output_model is not None and feed_candidates is None:
                 user_position = next((index for index, message in enumerate(state.messages)
                                       if message.role == "user"), len(state.messages))
                 state.messages.insert(user_position, bounded_call(lambda: build_structured_output_policy(output_model)))
@@ -95,11 +95,26 @@ class AgentLoopRunner:
                 messages = state.messages + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
                 if feed_candidates is not None:
-                    messages = messages + [bounded_call(feed_candidates.message)]
+                    remaining = min(self.max_total_tool_calls - state.total_tool_calls,
+                                    self.max_tool_rounds - state.tool_round)
+                    if feed_candidates.successful_searches:
+                        # Feed evaluation policy/projection belong to this request only,
+                        # after a successful search, never to persistent history.
+                        user_position = next((index for index, message in enumerate(messages)
+                                              if message.role == "user"), len(messages))
+                        messages.insert(user_position, bounded_call(
+                            lambda: build_structured_output_policy(output_model)))
+                        messages.append(bounded_call(lambda: feed_candidates.message(remaining)))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
                 try:
-                    turn = bounded_call(lambda: self.client.generate(messages, definitions))
+                    if feed_candidates is not None:
+                        options = GenerationOptions(
+                            tool_choice="none" if remaining == 0 else "auto",
+                            required_tool="search_evidence" if not feed_candidates.successful_searches else None)
+                        turn = bounded_call(lambda: generate_with_options(self.client, messages, definitions, options))
+                    else:
+                        turn = bounded_call(lambda: self.client.generate(messages, definitions))
                 except RequestTimeout:
                     raise
                 except Exception:
@@ -113,6 +128,11 @@ class AgentLoopRunner:
                 except Exception:
                     state.errors.append(AgentError(code="invalid_model_turn", message="LLM 응답이 계약과 일치하지 않습니다."))
                     return finish("invalid_response")
+                if feed_candidates is not None and not feed_candidates.successful_searches:
+                    if not turn.tool_calls or any(call.name != "search_evidence" for call in turn.tool_calls):
+                        state.errors.append(AgentError(code="feed_search_required",
+                            message="Feed는 최초 search_evidence 실행이 필요합니다."))
+                        return finish("invalid_response")
                 if not turn.tool_calls:
                     if not turn.text or not turn.text.strip():
                         state.errors.append(AgentError(code="empty_response", message="LLM 답변이 비어 있습니다."))
@@ -167,6 +187,10 @@ class AgentLoopRunner:
                         raise ValueError("Executor result does not match the call")
                     outcomes.append(outcome)
                     state.called_tools.append(trace)
+                    if feed_candidates is not None and call.name == "search_evidence" and not outcome.success:
+                        feed_candidates.record_search(False)
+                        state.errors.append(outcome.error)
+                        return finish("failed")
                     if outcome.error:
                         state.errors.append(outcome.error)
                         # timeout는 작업 완료 여부가 불명확하다. LLM 재호출/추가 Tool을 중단한다.
@@ -180,7 +204,9 @@ class AgentLoopRunner:
                             evidence_by_call[call.id] = package.model_copy(deep=True)
                             if feed_candidates is not None:
                                 stage = "candidate_source_mismatch"
+                                before_count = feed_candidates.count
                                 bounded_call(lambda: feed_candidates.add(call.id, evidence_by_call[call.id]))
+                                feed_candidates.record_search(True, len(package.evidence), feed_candidates.count - before_count)
                 stage = "prompt_builder_error"
                 followup = bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes))
                 if feed_candidates is not None:

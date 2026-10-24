@@ -246,7 +246,7 @@ class IterativeResearchTests(unittest.TestCase):
             (ModelTurn(text=""), "invalid_response", "empty_response"),
             (ModelTurn.model_construct(text=123, tool_calls=[]), "invalid_response", "invalid_model_turn")):
             with self.subTest(status=status, code=code):
-                execution, _, _ = research_runner([turn])
+                execution, _, _ = research_runner([ModelTurn(tool_calls=[search_call()]), turn])
                 result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)
                 self.assertEqual(result.execution.errors[-1].code, code)

@@ -122,15 +122,16 @@ class SearchEvidenceIntegrationTests(TestCase):
         self.assertEqual(result.sources, [])
         self.assertTrue(envelopes(client)[0]["success"])
 
-    def test_generic_search_error_remains_recoverable_but_cannot_back_a_citation(self):
-        for final, status in ((final_turn(count=0), "completed"), (final_turn(), "invalid_response")):
+    def test_generic_feed_search_error_stops_without_retry_or_citation(self):
+        for final, status in ((final_turn(count=0), "failed"), (final_turn(), "failed")):
             search = Mock(side_effect=RuntimeError("PRIVATE retrieval error"))
             client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final])
             result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
             self.assertEqual(result.execution.status, status)
             self.assertEqual(result.execution.errors[0].code, "tool_exception")
             self.assertEqual(result.sources, [])
-            self.assertIsNone(envelopes(client)[0]["data"])
+            self.assertEqual(len(client.requests), 1)
+            self.assertEqual(envelopes(client), [])
             self.assertNotIn("PRIVATE", result.model_dump_json())
             search.assert_called_once()
 

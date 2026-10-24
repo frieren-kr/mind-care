@@ -158,31 +158,28 @@ class FeedWorkflowTests(unittest.TestCase):
         tool = next(m for m in deps.client.requests[1][0] if m.role == "tool")
         self.assertTrue(json.loads(tool.content)["success"])
 
-    def test_timeout_fails_but_recoverable_tool_exception_keeps_runner_semantics(self):
+    def test_timeout_and_search_exception_stop_without_retry(self):
         for error in (TimeoutError("PRIVATE"), RuntimeError("PRIVATE")):
             def handler(context, args):
                 raise error
             deps = FakeFeedDependencies(CONTEXT, handler=handler,
                 turns=[ModelTurn(tool_calls=[search_call()]), final_turn(count=0)])
-            if isinstance(error, TimeoutError):
-                with self.assertRaises(FeedWorkflowError):
-                    deps.workflow().run(CONTEXT)
-                self.assertEqual(len(deps.client.requests), 1)
-                self.assertEqual(deps.saved, [])
-            else:
-                self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
-                self.assertEqual(deps.saved[0].execution.errors[0].code, "tool_exception")
+            with self.assertRaises(FeedWorkflowError):
+                deps.workflow().run(CONTEXT)
+            self.assertEqual(len(deps.client.requests), 1)
+            self.assertEqual(deps.saved, [])
+            self.assertEqual(deps.agent_result.execution.status, "failed")
             self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
 
-    def test_disallowed_profile_tool_is_unknown_and_never_discloses_profile(self):
+    def test_disallowed_profile_tool_never_executes_or_discloses_profile(self):
         deps = FakeFeedDependencies(CONTEXT, turns=[ModelTurn(tool_calls=[
             ToolCall(id="profile", name="get_patient_profile", arguments={})]), final_turn(count=0)])
-        deps.workflow().run(CONTEXT)
-        self.assertEqual(deps.agent_result.execution.errors[0].code, "unknown_tool")
+        with self.assertRaises(FeedWorkflowError):
+            deps.workflow().run(CONTEXT)
+        self.assertEqual(deps.agent_result.execution.errors[0].code, "feed_search_required")
+        self.assertEqual(deps.agent_result.execution.total_tool_calls, 0)
+        self.assertEqual(len(deps.client.requests), 1)
         self.assertIsNone(deps.runner.executor.registry.get("get_patient_profile"))
-        result = json.loads(next(m for m in deps.client.requests[1][0] if m.role == "tool").content)
-        self.assertFalse(result["success"])
-        self.assertIsNone(result["data"])
 
     def test_mutated_execution_configuration_stops_before_provider_and_handoff(self):
         deps = FakeFeedDependencies(CONTEXT)
@@ -266,14 +263,10 @@ class FeedWorkflowTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(deps.agent_result.execution.status, "invalid_response")
+        self.assertEqual(deps.agent_result.execution.status, "failed")
         self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
         self.assertIn("tool_exception", [error.code for error in deps.agent_result.execution.errors])
-        message = next(m for m in deps.client.requests[1][0] if m.role == "tool")
-        self.assertEqual(message.tool_call_id, "search_1")
-        outcome = json.loads(message.content)
-        self.assertFalse(outcome["success"])
-        self.assertIsNone(outcome["data"])
+        self.assertEqual(len(deps.client.requests), 1)
         self.assertIsNone(deps.agent_result.output)
         self.assertIsNone(deps.agent_result.execution.final_answer)
         self.assertEqual(deps.agent_result.sources, [])
@@ -359,7 +352,8 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
                 else:
                     with self.assertRaises(FeedWorkflowError):
                         workflow.run(context)
-                    self.assertEqual(deps.agent_result.execution.status, "invalid_response")
+                    self.assertEqual(deps.agent_result.execution.status,
+                                     "failed" if behavior == "failed_search" else "invalid_response")
                     self.assertIsNone(deps.agent_result.output)
                     self.assertEqual(deps.agent_result.sources, [])
                     self.assertEqual(deps.saved, [])

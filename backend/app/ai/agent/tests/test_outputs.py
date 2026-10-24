@@ -395,7 +395,7 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual(len(client.requests), 2)
 
     def test_feed_has_no_legacy_json_answer(self):
-        result, _ = self.run_output(feed_draft(), FeedAnswerV2, [tool_turn(call()), self.search()])
+        result, _ = self.run_output(feed_draft(), FeedAnswerV2, [self.search()])
         self.assertEqual(result.execution.status, "completed")
         self.assertIsInstance(result.output, FeedAnswerV2)
         self.assertIsNone(result.execution.final_answer)
@@ -471,7 +471,7 @@ class StructuredWorkflowTests(TestCase):
                                  else ["[FAKE] first", "[FAKE] second"])
                 for index, (messages, _) in enumerate(client.requests):
                     projections = [message for message in messages if message.kind == "evidence"]
-                    self.assertEqual(len(projections), 0 if model is ChatAnswerV1 else 1)
+                    self.assertEqual(len(projections), 0 if model is ChatAnswerV1 or index == 0 else 1)
                     tools = [message for message in messages if message.role == "tool"]
                     self.assertEqual([message.tool_call_id for message in tools],
                                      ["search_1", "search_2"][:index])
@@ -482,7 +482,7 @@ class StructuredWorkflowTests(TestCase):
                             self.assertEqual(envelope["data"], packages[query].model_dump(mode="json"))
                         else:
                             self.assertNotIn("evidence", envelope["data"])
-                    if model is FeedAnswerV2:
+                    if model is FeedAnswerV2 and index > 0:
                         self.assertEqual(json.loads(projections[0].content)["candidate_count"], index)
                 final_messages = client.requests[-1][0]
                 self.assertEqual([message.role for message in final_messages],
@@ -530,7 +530,7 @@ class StructuredWorkflowTests(TestCase):
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
                                           lambda context, args: evidence),))
         result, _ = self.run_output(feed_draft(5), FeedAnswerV2,
-                                    [tool_turn(call()), self.search()], registry)
+                                    [self.search()], registry)
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual([source.title for source in result.sources],
                          [f"[FAKE] source {index}" for index in range(5)])
@@ -546,9 +546,9 @@ class StructuredWorkflowTests(TestCase):
         for payload, preceding, registry in cases:
             model = FeedAnswerV2 if "decisions" in payload else ChatAnswerV1
             result, _ = self.run_output(payload, model, preceding, registry)
-            self.assertEqual(result.execution.status, "invalid_response")
+            self.assertEqual(result.execution.status, "failed" if model is FeedAnswerV2 else "invalid_response")
             self.assertEqual(result.execution.errors[-1].code,
-                             "candidate_count_mismatch" if model is FeedAnswerV2 else "invalid_structured_output")
+                             "empty_result" if model is FeedAnswerV2 else "invalid_structured_output")
             self.assertIsNone(result.output)
             self.assertIsNone(result.execution.final_answer)
             self.assertEqual(result.sources, [])

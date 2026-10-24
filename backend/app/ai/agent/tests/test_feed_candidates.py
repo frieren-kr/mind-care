@@ -238,7 +238,9 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         previous = []
         for count, (messages, _) in enumerate(client.requests):
             projections = [json.loads(m.content) for m in messages if m.kind == "evidence"]
-            self.assertEqual(len(projections), 1)
+            self.assertEqual(len(projections), int(count > 0))
+            if count == 0:
+                continue
             self.assertEqual(projections[0]["candidate_count"], count * 5)
             self.assertEqual(projections[0]["candidates"][:len(previous)], previous)
             previous = projections[0]["candidates"]
@@ -257,9 +259,9 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         result, client, _ = self.run_feed([self.search("failed", "one"), self.search("ok", "two"),
             ModelTurn(text=json.dumps(decisions(1, (0,))))],
             {"one": RuntimeError("PRIVATE"), "two": package(("A",))})
-        self.assertEqual(result.execution.status, "completed")
-        self.assertEqual(result.sources[0].source_ref.tool_call_id, "ok")
-        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(result.execution.status, "failed")
+        self.assertEqual(result.sources, [])
+        self.assertEqual(len(client.requests), 1)
         self.assertNotIn("PRIVATE", result.model_dump_json())
         result, client, _ = self.run_feed([self.search("ok", "one"),
             ModelTurn(text=json.dumps(decisions(0)))], {"one": package(("A",))})
@@ -272,12 +274,13 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertEqual(first.execution.status, "completed")
         runner.client = FakeLLMClient([ModelTurn(text=json.dumps(decisions(0)))])
         second = runner.run_structured("new", CONTEXT, output_model=FeedAnswerV2)
-        self.assertEqual(second.execution.status, "completed")
-        self.assertEqual(second.output.items, [])
+        self.assertEqual(second.execution.status, "invalid_response")
+        self.assertIsNone(second.output)
+        self.assertEqual(second.execution.errors[-1].code, "feed_search_required")
         self.assertEqual(len(runner.client.requests), 1)
 
     def test_candidate_assembly_projection_and_validation_share_request_deadline(self):
-        for method, generations in (("message", 0), ("add", 1), ("finalize", 2)):
+        for method, generations in (("message", 1), ("add", 1), ("finalize", 2)):
             release, finished = Event(), Event()
             original = getattr(FeedCandidates, method)
             def blocked(instance, *args):

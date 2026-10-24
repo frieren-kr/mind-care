@@ -242,10 +242,11 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         case.retriever.search_evidence.assert_called_once_with(
             query="Dementia sleep research", top_k=5, context=FEED_CONTEXT)
         self.assertEqual(len(case.requests), 2)
-        for payload in case.requests:
+        for index, payload in enumerate(case.requests):
             self.assertEqual(payload["reasoning_effort"], "none")
             self.assertEqual(payload["model"], "configured-test-model")
-            self.assertEqual(payload["tool_choice"], "auto")
+            self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "search_evidence"}} if index == 0 else "auto")
+            self.assertFalse(payload["parallel_tool_calls"])
             self.assertEqual(payload["tools"], case.execution.runner.registry.definitions())
         self.assertIn(case.prepare.return_value, [m["content"] for m in case.requests[0]["messages"] if m["role"] == "user"])
         followup = case.requests[1]["messages"]
@@ -313,13 +314,10 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             case.workflow.run(FEED_CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(len(case.requests), 2)
-        envelope = json.loads(next(m["content"] for m in case.requests[1]["messages"] if m["role"] == "tool"))
-        self.assertFalse(envelope["success"])
-        self.assertEqual(envelope["error"]["code"], "invalid_arguments")
+        self.assertEqual(len(case.requests), 1)
         result = case.results[0]
-        self.assertEqual(result.execution.status, "invalid_response")
-        self.assertEqual(result.execution.errors[-1].code, "candidate_count_mismatch")
+        self.assertEqual(result.execution.status, "failed")
+        self.assertEqual(result.execution.errors[-1].code, "invalid_arguments")
         self.assertIsNone(result.output)
         self.assertEqual(result.sources, [])
         case.retriever.search_evidence.assert_not_called()

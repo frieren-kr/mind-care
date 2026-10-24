@@ -8,7 +8,7 @@ from app.user_schemas import APP_TIMEZONE
 
 from ..outputs import StructuredAgentResult
 from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
-from ..schemas import AgentContext, ModelTurn
+from ..schemas import AgentContext, ModelTurn, ToolCall
 from ..tools import contracts as c
 from ..workflows.feed import FeedWorkflow
 from ..workflows.feed_execution import FeedExecutionV1
@@ -81,7 +81,9 @@ class FakeFeedDependencies:
         self.personalization = None
         self.agent_result = None
         self.client = client if client is not None else FakeLLMClient(turns if turns is not None else [
-            ModelTurn(text='{"decisions":[]}')
+            ModelTurn(tool_calls=[ToolCall(id="initial_search", name="search_evidence",
+                                          arguments={"query": "Dementia caregiver research"})]),
+            ModelTurn(text='{"decisions":[{"include":false}]}')
         ])
         self.execution = FeedExecutionV1(self.client,
             build_feed_test_registry(query_validator=self.validate_query, handler=handler))
