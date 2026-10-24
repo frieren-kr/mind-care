@@ -35,6 +35,8 @@ export default function PaperDetailScreen() {
       ['한계', paper.summary_limitation],
     ] as const
   ).filter(([, text]) => text);
+  // 'other'는 분류 규칙으로 판단하지 못한 논문이라 유형 이름을 보여주지 않는다
+  const studyType = paper.study_type !== 'other' ? paper.study_type : null;
   const meta = [paper.journal, paper.published_at].filter(Boolean).join(' · ');
   const pubmedUrl = paper.pubmed_url;
 
@@ -46,16 +48,13 @@ export default function PaperDetailScreen() {
           {paper.title}
         </ThemedText>
       ) : null}
-      {paper.evidence_grade || paper.study_type ? (
-        <View style={styles.row}>
-          {paper.evidence_grade ? <EvidenceBadge level={paper.evidence_grade} /> : null}
-          {paper.study_type ? (
-            <ThemedText type="small" themeColor="textSecondary">
-              {paper.study_type}
-            </ThemedText>
-          ) : null}
-        </View>
-      ) : null}
+      <View style={styles.row}>
+        {paper.evidence_grade ? <EvidenceBadge level={paper.evidence_grade} /> : null}
+        {/* 등급이 없으면 배지는 숨기고, 연구 유형도 모르면 "확인 중"으로 안내한다 (10/14 현서 님 의견) */}
+        <ThemedText type="small" themeColor="textSecondary">
+          {studyType ?? (paper.evidence_grade ? null : '연구 유형 확인 중')}
+        </ThemedText>
+      </View>
       {meta ? (
         <ThemedText type="small" themeColor="textSecondary">
           {meta}

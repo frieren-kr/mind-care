@@ -82,8 +82,19 @@ export default function FeedScreen() {
         </ScrollView>
       )}
 
+      {/* 피드 대기 문구 (10/14 회의): AI 피드는 최대 15초, 서버를 켠 뒤 첫 검색은 30초까지 걸린다 */}
       {feed.error && <ErrorView message={feed.error.message} onRetry={() => feed.reload()} />}
-      {feed.loading && data === null && <LoadingView message="맞춤 연구를 찾고 있어요…" />}
+      {feed.loading && data === null && (
+        <LoadingView
+          message="맞춤 연구를 고르고 있어요"
+          hint={'돌보시는 분의 상황에 맞는 연구를 찾는 중이에요.\n처음에는 30초쯤 걸릴 수 있으니 잠시만 기다려 주세요.'}
+        />
+      )}
+      {feed.loading && data !== null && (
+        <ThemedText type="small" themeColor="textSecondary">
+          추천을 다시 불러오고 있어요. 새로 만들 때는 15초쯤 걸릴 수 있어요.
+        </ThemedText>
+      )}
 
       {items.map((item) => (
         <PaperCard key={item.id} item={item} />

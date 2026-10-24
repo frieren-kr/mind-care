@@ -38,13 +38,18 @@ export function Screen({
   );
 }
 
-/** 불러오는 중 */
-export function LoadingView({ message = '불러오는 중이에요…' }: { message?: string }) {
+/** 불러오는 중. hint는 오래 걸릴 때 기다려 달라는 안내 */
+export function LoadingView({ message = '불러오는 중이에요…', hint }: { message?: string; hint?: string }) {
   const theme = useTheme();
   return (
     <View style={styles.status} accessibilityRole="progressbar" accessibilityLabel={message}>
       <ActivityIndicator size="large" color={theme.primary} />
-      <ThemedText themeColor="textSecondary">{message}</ThemedText>
+      <ThemedText type="bold">{message}</ThemedText>
+      {hint ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.hint}>
+          {hint}
+        </ThemedText>
+      ) : null}
     </View>
   );
 }
@@ -168,6 +173,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.three,
     paddingVertical: Spacing.five,
+  },
+  hint: {
+    textAlign: 'center',
   },
   card: {
     borderRadius: Radius.card,
