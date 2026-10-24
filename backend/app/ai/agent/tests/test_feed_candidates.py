@@ -57,9 +57,9 @@ class FeedCandidateContractTests(unittest.TestCase):
         output, resolved = table.finalize(json.dumps(decisions(4, range(4))), source)
         self.assertEqual([s.pmid for s in resolved], ["A", "B", "C", "D"])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in output.items],
-                         [("provider_real_call", 1), ("provider_real_call", 2), ("next", 1), ("next", 3)])
+                         [("provider_real_call", 1), ("next", 0), ("next", 1), ("next", 3)])
 
-    def test_three_searches_fifteen_candidates_and_deterministic_overflow(self):
+    def test_multiple_pools_rebalance_to_five_with_original_indices(self):
         table, source = FeedCandidates(), {}
         for call in range(3):
             source[str(call)] = package([str(call * 5 + i) for i in range(5)])
@@ -67,10 +67,11 @@ class FeedCandidateContractTests(unittest.TestCase):
         before = table.message()
         source["overflow"] = package(["15", "16"])
         table.add("overflow", source["overflow"])
-        self.assertEqual(table.message(), before)
-        output, refs = table.finalize(json.dumps(decisions(15, (0, 5, 10, 14))), source)
-        self.assertEqual([r.pmid for r in refs], ["0", "5", "10", "14"])
-        self.assertEqual([i.source_ref.tool_call_id for i in output.items], ["0", "1", "2", "2"])
+        self.assertEqual(json.loads(before.content)["candidate_count"], 5)
+        self.assertEqual(json.loads(table.message().content)["candidate_count"], 5)
+        output, refs = table.finalize(json.dumps(decisions(5, (0, 1, 2, 4))), source)
+        self.assertEqual([r.pmid for r in refs], ["0", "5", "10", "1"])
+        self.assertEqual([i.source_ref.tool_call_id for i in output.items], ["0", "1", "2", "0"])
 
     def test_missing_or_blank_pmids_are_excluded_without_reindexing(self):
         table, source = self.table((None, "", " \n", "A"))
@@ -122,8 +123,9 @@ class FeedCandidateContractTests(unittest.TestCase):
         value = json.loads(message.content)
         self.assertEqual(value["context_type"], "untrusted_feed_candidates")
         row = value["candidates"][0]
-        self.assertEqual(set(row), {"title", "study_type", "evidence_excerpt"})
-        self.assertEqual(tuple(len(row[k]) for k in row), (300, 80, 1200))
+        self.assertEqual(set(row), {"title", "study_type", "derived_evidence_grade", "evidence_excerpt"})
+        self.assertEqual(tuple(len(row[k]) for k in ('title', 'study_type', 'evidence_excerpt')), (300, 80, 1200))
+        self.assertIsNone(row['derived_evidence_grade'])
         for private in ("PRIVATE_PMID", "PRIVATE_CALL_ID", "PRIVATE_DOI", "PRIVATE_ABSTRACT"):
             self.assertNotIn(private, message.content)
 
@@ -149,7 +151,7 @@ class FeedCandidateContractTests(unittest.TestCase):
 
     def test_more_than_five_selected_is_not_truncated(self):
         table, source = self.table(tuple(str(i) for i in range(6)))
-        self.fails(table, source, decisions(6, range(6)), "too_many_selected")
+        self.fails(table, source, decisions(6, range(6)), "candidate_count_mismatch")
 
     def test_selected_reason_category_and_strict_bool_are_required(self):
         table, source = self.table(("A",))
@@ -187,7 +189,7 @@ class FeedCandidateContractTests(unittest.TestCase):
 
     def test_draft_schema_has_no_identifier_and_external_schema_is_unchanged(self):
         schema = FeedDecisionDraft.model_json_schema()
-        self.assertEqual(schema["properties"]["decisions"]["maxItems"], 15)
+        self.assertEqual(schema["properties"]["decisions"]["maxItems"], 5)
         for definition in schema["$defs"].values():
             self.assertFalse(definition["additionalProperties"])
         for name in ("source_ref", "tool_call_id", "pmid", "evidence_index"):
@@ -228,9 +230,9 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertEqual(tools[0].tool_call_id, "call_sdk_opaque")
         self.assertNotIn('"evidence"', tools[0].content)
 
-    def test_three_searches_have_one_latest_candidate_list_and_stable_positions(self):
+    def test_three_searches_have_one_latest_rebalanced_candidate_list(self):
         turns = [self.search(str(i), str(i)) for i in range(3)]
-        turns.append(ModelTurn(text=json.dumps(decisions(15, (0, 5, 10)))))
+        turns.append(ModelTurn(text=json.dumps(decisions(5, (0, 1, 2)))))
         packages = {str(i): package([str(i * 5 + j) for j in range(5)]) for i in range(3)}
         result, client, _ = self.run_feed(turns, packages)
         self.assertEqual(result.execution.status, "completed")
@@ -241,13 +243,14 @@ class FeedCandidateRunnerTests(unittest.TestCase):
             self.assertEqual(len(projections), int(count > 0))
             if count == 0:
                 continue
-            self.assertEqual(projections[0]["candidate_count"], count * 5)
-            self.assertEqual(projections[0]["candidates"][:len(previous)], previous)
-            previous = projections[0]["candidates"]
+            self.assertEqual(projections[0]["candidate_count"], 5)
+            ranks = ([0, 1, 2, 3, 4], [0, 0, 1, 1, 2], [0, 0, 0, 1, 1])[count - 1]
+            self.assertEqual([row["title"] for row in projections[0]["candidates"]],
+                             [f"Synthetic paper {rank}" for rank in ranks])
 
     def test_three_calls_in_one_turn_use_two_generations_and_keep_call_order(self):
         calls = [ToolCall(id=f"sdk_{i}", name="search_evidence", arguments={"query": str(i)}) for i in range(3)]
-        turns = [ModelTurn(tool_calls=calls), ModelTurn(text=json.dumps(decisions(15, (0, 5, 10))))]
+        turns = [ModelTurn(tool_calls=calls), ModelTurn(text=json.dumps(decisions(5, (0, 1, 2))))]
         packages = {str(i): package([str(i * 5 + j) for j in range(5)]) for i in range(3)}
         result, client, _ = self.run_feed(turns, packages, max_tool_rounds=3, max_total_tool_calls=3)
         self.assertEqual(result.execution.status, "completed")

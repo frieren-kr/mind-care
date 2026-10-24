@@ -22,10 +22,12 @@ class FeedExecutionV1:
     """
 
     def __init__(self, client: LLMClient, registry: ToolRegistry, *,
-                 tool_timeout_seconds: float = 30.0, request_timeout_seconds: float = 120.0):
+                 tool_timeout_seconds: float = 30.0, request_timeout_seconds: float = 120.0,
+                 allow_parallel_tools: bool = True, max_parallel_calls: int = 3):
         try:
             self.runner = AgentLoopRunner(client, registry, prompt_builder=FeedPromptBuilder(),
                 max_tool_rounds=3, max_total_tool_calls=3,
+                allow_parallel_tools=allow_parallel_tools, max_parallel_calls=max_parallel_calls,
                 tool_timeout_seconds=tool_timeout_seconds, request_timeout_seconds=request_timeout_seconds)
             self._validate_runner()
         except Exception:

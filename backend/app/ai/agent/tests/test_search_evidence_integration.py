@@ -55,14 +55,15 @@ class SearchEvidenceIntegrationTests(TestCase):
             publication_types=["Guideline"], mesh_terms=["Dementia"], journal=None, doi=None)
         hit = SimpleNamespace(paper_id=paper.paper_id, score=-0.4)
         with patch.object(rag, "embed_query", return_value=[0.0]) as embed, \
-             patch.object(rag, "search_similar", return_value=[hit]), \
+             patch.object(rag, "search_similar", return_value=[hit]) as nearest, \
              patch.object(rag, "get_papers_by_ids", return_value=[paper]), \
              patch.object(rag, "search", wraps=rag.search) as search:
             result = AgentLoopRunner(client, build_evidence_registry()).run_structured(
                 "Synthetic request", self.context, output_model=FeedAnswerV2)
         self.assertEqual(result.execution.status, "completed")
-        search.assert_called_once_with(query="Dementia sleep research", k=5)
+        search.assert_called_once_with(query="Dementia sleep research", k=8)
         embed.assert_called_once_with("Dementia sleep research")
+        nearest.assert_called_once_with([0.0], top_k=24, model_name=rag.MODEL_NAME)
         self.assertEqual(result.sources[0].pmid, "SYNTHETIC-PMID")
         self.assertEqual(result.sources[0].study_type, "guideline")
         self.assertEqual(result.sources[0].evidence_type, "new_research")

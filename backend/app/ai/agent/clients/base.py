@@ -14,7 +14,7 @@ class LLMClient(Protocol):
 # Call-scoped options preserve the generate(messages, tools) client interface.
 @dataclass(frozen=True)
 class GenerationOptions:
-    tool_choice: Literal["auto", "none"] = "auto"
+    tool_choice: Literal["auto", "none", "required"] = "auto"
     required_tool: str | None = None
     parallel_tool_calls: bool = False
 
