@@ -73,19 +73,20 @@ class FeedWorkflowTests(unittest.TestCase):
         class EvidenceDrivenFake(FakeLLMClient):
             def generate(self, messages, tools):
                 if len(self.requests) == 1:
-                    outcome = json.loads(next(m for m in messages if m.role == "tool").content)
-                    test.assertEqual(outcome["data"]["evidence"][0]["pmid"], "FAKE-PMID")
+                    candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
+                    test.assertEqual(candidates["candidate_count"], 1)
+                    test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep orchestration fixture")
                     self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research")]))
                 elif len(self.requests) == 2:
                     test.assertEqual([m.tool_call_id for m in messages if m.role == "tool"],
                                      ["search_1", "search_2"])
-                    self.turns.append(final_turn("search_2"))
+                    self.turns.append(final_turn())
                 return super().generate(messages, tools)
         client = EvidenceDrivenFake([ModelTurn(tool_calls=[search_call()])])
         deps = FakeFeedDependencies(CONTEXT, client=client)
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
         self.assertEqual(deps.search_queries, ["Dementia sleep research", "Caregiver support research"])
-        self.assertEqual(deps.saved[0].sources[0].source_ref.tool_call_id, "search_2")
+        self.assertEqual(deps.saved[0].sources[0].source_ref.tool_call_id, "search_1")  # First duplicate PMID wins.
 
     def test_each_stage_exception_stops_later_dependencies_and_hides_raw_details(self):
         for position, stage in enumerate(STAGES):
@@ -114,8 +115,8 @@ class FeedWorkflowTests(unittest.TestCase):
         cases = (
             [RuntimeError("PRIVATE provider")],
             [ModelTurn(text="PRIVATE invalid JSON")],
-            [ModelTurn(tool_calls=[search_call()]), final_turn("nonexistent")],
-            [ModelTurn(tool_calls=[search_call()]), final_turn(index=1)],
+            [ModelTurn(tool_calls=[search_call()]), ModelTurn(text='{"decisions":[{"include":false,"source_ref":{"tool_call_id":"nonexistent","evidence_index":0}}]}')],
+            [ModelTurn(tool_calls=[search_call()]), final_turn(count=2)],
             [ModelTurn(tool_calls=[search_call(f"search_{i}")]) for i in range(4)],
             [ModelTurn(tool_calls=[search_call(f"search_{i}") for i in range(4)])],
         )
@@ -140,7 +141,7 @@ class FeedWorkflowTests(unittest.TestCase):
                     identifier += 1
                     calls.append(search_call(f"search_{identifier}"))
                 turns.append(ModelTurn(tool_calls=calls))
-            deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn("search_3")])
+            deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn()])
             self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
             self.assertEqual(deps.saved[0].execution.total_tool_calls, 3)
             self.assertEqual(deps.saved[0].execution.tool_rounds, len(batches))
@@ -148,7 +149,7 @@ class FeedWorkflowTests(unittest.TestCase):
     def test_empty_evidence_and_empty_feed_are_successful_not_failed_reads(self):
         deps = FakeFeedDependencies(CONTEXT.model_copy(update={"patient_id": None}),
             snapshot=snapshot([], full=False), reference_time=NOW,
-            turns=[ModelTurn(tool_calls=[search_call()]), final_turn(empty=True)],
+            turns=[ModelTurn(tool_calls=[search_call()]), final_turn(count=0)],
             handler=lambda context, args: EvidencePackage(query=args.query, evidence=[]))
         self.assertIs(deps.workflow().run(CONTEXT.model_copy(update={"patient_id": None})), deps.receipt)
         self.assertEqual(deps.saved[0].output.items, [])
@@ -157,31 +158,28 @@ class FeedWorkflowTests(unittest.TestCase):
         tool = next(m for m in deps.client.requests[1][0] if m.role == "tool")
         self.assertTrue(json.loads(tool.content)["success"])
 
-    def test_timeout_fails_but_recoverable_tool_exception_keeps_runner_semantics(self):
+    def test_timeout_and_search_exception_stop_without_retry(self):
         for error in (TimeoutError("PRIVATE"), RuntimeError("PRIVATE")):
             def handler(context, args):
                 raise error
             deps = FakeFeedDependencies(CONTEXT, handler=handler,
-                turns=[ModelTurn(tool_calls=[search_call()]), final_turn(empty=True)])
-            if isinstance(error, TimeoutError):
-                with self.assertRaises(FeedWorkflowError):
-                    deps.workflow().run(CONTEXT)
-                self.assertEqual(len(deps.client.requests), 1)
-                self.assertEqual(deps.saved, [])
-            else:
-                self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
-                self.assertEqual(deps.saved[0].execution.errors[0].code, "tool_exception")
+                turns=[ModelTurn(tool_calls=[search_call()]), final_turn(count=0)])
+            with self.assertRaises(FeedWorkflowError):
+                deps.workflow().run(CONTEXT)
+            self.assertEqual(len(deps.client.requests), 1)
+            self.assertEqual(deps.saved, [])
+            self.assertEqual(deps.agent_result.execution.status, "failed")
             self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
 
-    def test_disallowed_profile_tool_is_unknown_and_never_discloses_profile(self):
+    def test_disallowed_profile_tool_never_executes_or_discloses_profile(self):
         deps = FakeFeedDependencies(CONTEXT, turns=[ModelTurn(tool_calls=[
-            ToolCall(id="profile", name="get_patient_profile", arguments={})]), final_turn(empty=True)])
-        deps.workflow().run(CONTEXT)
-        self.assertEqual(deps.agent_result.execution.errors[0].code, "unknown_tool")
+            ToolCall(id="profile", name="get_patient_profile", arguments={})]), final_turn(count=0)])
+        with self.assertRaises(FeedWorkflowError):
+            deps.workflow().run(CONTEXT)
+        self.assertEqual(deps.agent_result.execution.errors[0].code, "feed_search_required")
+        self.assertEqual(deps.agent_result.execution.total_tool_calls, 0)
+        self.assertEqual(len(deps.client.requests), 1)
         self.assertIsNone(deps.runner.executor.registry.get("get_patient_profile"))
-        result = json.loads(next(m for m in deps.client.requests[1][0] if m.role == "tool").content)
-        self.assertFalse(result["success"])
-        self.assertIsNone(result["data"])
 
     def test_mutated_execution_configuration_stops_before_provider_and_handoff(self):
         deps = FakeFeedDependencies(CONTEXT)
@@ -265,14 +263,10 @@ class FeedWorkflowTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(deps.agent_result.execution.status, "invalid_response")
+        self.assertEqual(deps.agent_result.execution.status, "failed")
         self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
         self.assertIn("tool_exception", [error.code for error in deps.agent_result.execution.errors])
-        message = next(m for m in deps.client.requests[1][0] if m.role == "tool")
-        self.assertEqual(message.tool_call_id, "search_1")
-        outcome = json.loads(message.content)
-        self.assertFalse(outcome["success"])
-        self.assertIsNone(outcome["data"])
+        self.assertEqual(len(deps.client.requests), 1)
         self.assertIsNone(deps.agent_result.output)
         self.assertIsNone(deps.agent_result.execution.final_answer)
         self.assertEqual(deps.agent_result.sources, [])
@@ -323,7 +317,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         turn = final_turn()
         value = json.loads(turn.text)
         reason = "치매 가족 돌봄에 참고할 수 있는 최신 연구이기 때문입니다."
-        value["items"][0]["personal_reason"] = reason
+        value["decisions"][0]["personal_reason"] = reason
         query = "General dementia cognitive health caregiver research"
         turns = [ModelTurn(tool_calls=[search_call(query=query)]), ModelTurn(text=json.dumps(value))]
         deps, workflow = self.production(context, empty_snapshot(), turns)
@@ -349,7 +343,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
                 if behavior == "failed_search":
                     raise RuntimeError("PRIVATE failed search")
                 return EvidencePackage(query=args.query, evidence=[])
-            turns = [ModelTurn(tool_calls=[search_call()]), final_turn(empty=behavior == "empty")]
+            turns = [ModelTurn(tool_calls=[search_call()]), final_turn(count=0 if behavior == "empty" else 1)]
             deps, workflow = self.production(context, empty_snapshot(), turns, handler=handler)
             with self.subTest(behavior=behavior):
                 if behavior == "empty":
@@ -358,7 +352,8 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
                 else:
                     with self.assertRaises(FeedWorkflowError):
                         workflow.run(context)
-                    self.assertEqual(deps.agent_result.execution.status, "invalid_response")
+                    self.assertEqual(deps.agent_result.execution.status,
+                                     "failed" if behavior == "failed_search" else "invalid_response")
                     self.assertIsNone(deps.agent_result.output)
                     self.assertEqual(deps.agent_result.sources, [])
                     self.assertEqual(deps.saved, [])

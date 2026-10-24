@@ -105,7 +105,8 @@ Stage 1 context_prepare:
   → FeedPersonalizationContextV1 → prepare_production_feed_input() → 최소 JSON
 Stage 2 feed_execution:
   같은 FeedExecutionV1 → AgentLoopRunner.run_structured(output_model=FeedAnswerV2) 1회
-  → LLM query ↔ search_evidence → FeedAnswerV2 / StructuredAgentResult
+  → LLM query ↔ search_evidence → 서버 후보 목록 → FeedDecisionDraft
+  → 서버 출처 결합 → FeedAnswerV2 / StructuredAgentResult
 Stage 3 backend_handoff:
   completed + FeedAnswerV2 + 현재 request 확인 → 기존 wrapper 재검증 → 필수 Backend Handoff
 ```
@@ -145,13 +146,64 @@ Workflow에는 별도 Runner, Retrieval Planner, Plan parameter, agent_stage 또
 run_feed_agent_loop seam이 없다. Wrapper는 공용 Runner를 요청당 한 번 호출하며,
 Tool 반복/timeout/structured parser/evidence resolution은 공용 엔진에 위임한다.
 
+**Feed 후보 순서와 내부 판단.** `feed_candidates.py`의 `FeedCandidates`는 Runner 실행 한 번에만
+존재한다. 성공한 검색의 검증된 Snapshot에서 PMID가 비어 있지 않은 결과만 수신 순서·원래 index
+순서로 추가한다. 동일 PMID는 최초 후보가 이기고 기존 위치는 이동하지 않는다. 최대 15개이며
+상한 이후 결과는 후보에 추가하지 않는다. 원본 `(tool_call_id, evidence_index)`와 전체 검증 근거는
+서버에 보관하고 요청 사이에 공유하지 않는다. PMID를 새로 만들거나 정규화하지 않는다.
+
+Feed의 성공 Tool message는 실제 Call ID와 성공 envelope를 유지하되 긴 원본 근거 대신 후보 목록
+안내만 담는다. 모델 호출마다 최신 `untrusted_feed_candidates` user message 하나를 덧붙이며
+이 목록은 대화 history에 누적하지 않는다. 각 후보에는 제목 최대 300자, 연구 유형 80자,
+ai_summary(없으면 abstract) 발췌 최대 1,200자만 제공한다. 식별 metadata 필드를 제외하는 것이며
+자유 텍스트의 개인정보 제거를 보장하지 않는다. 후보 본문은 비신뢰 데이터이고 system 정책이 아니다.
+
+LLM은 `{"decisions":[{"include":true,"personal_reason":"...","category":"care"},{"include":false}]}`
+형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 후보 수만큼의 판단이 필요하고,
+제외 항목에는 이유/category/null도 허용하지 않는다. 선택 수가 5를 넘거나 길이가 다르면 실패한다.
+출처 ID·추가 필드·중복 JSON 키도 거부한다. 검색 성공 후 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다. 검색 미실행은 정상 완료할 수 없다.
+서버는 후보 순서로 원본 참조를 결합하고 Snapshot 일치 및 기존 `resolve_evidence_references()`를
+재검증한다. 최종 `FeedAnswerV2`, `StructuredAgentResult` 및 Backend Handoff 계약은 그대로다.
+
+Feed 오류는 `invalid_feed_json`, `candidate_count_mismatch`, `invalid_feed_decision`,
+`too_many_selected`, `candidate_source_mismatch`로 구분하고 원문은 노출하지 않는다.
+후보 생성·메시지 구성·최종 검증도 기존 request deadline 안에서 실행한다.
+검색 1회는 정상적으로 모델 호출 2회, 검색 3라운드는 4회이며 추가 검증 호출·재생성·자동 retry는 없다.
+배열 위치와 출처 연결의 정확성만 검증하며, 모델이 서로 다른 후보의 설명을 혼동하는 의미적 오류는
+완전히 검출할 수 없다. 입력/출력 토큰 크기는 달라지므로 호출 수 보존이 비용 절감을 증명하지 않는다.
+
+**추후 로컬 실제 모델 확인.** 아래 절차는 Codex 오프라인 테스트에서 실행하지 않는다.
+기존 로컬 `.env`의 키/모델 설정과 테스트 DB·논문·RAG가 준비된 환경의 `backend/`에서,
+테스트 사용자 UUID로 다음을 실행한다. 키·프롬프트·환자 원문은 출력하지 않는다.
+
+```python
+from uuid import UUID, uuid4
+from app.ai.agent.outputs import FeedAnswerV2
+from app.ai.agent.schemas import AgentContext
+from app.api.recommendations import context_prepare, get_feed_execution
+
+context = AgentContext(request_id=str(uuid4()), user_id=UUID("<테스트 사용자 UUID>"), patient_id=None)
+execution = get_feed_execution()
+if execution is None:
+    raise RuntimeError("로컬 실행기 설정을 확인하세요")
+result = execution(context, context_prepare(context))
+print(result.execution.status, [e.code for e in result.execution.errors], result.execution.total_tool_calls)
+assert result.execution.status == "completed" and isinstance(result.output, FeedAnswerV2)
+assert result.execution.total_tool_calls >= 1  # Tool 미호출은 Tool Calling 검증 성공이 아니다.
+assert [s.source_ref for s in result.sources] == [item.source_ref for item in result.output.items]
+```
+
+실제 모델의 `reasoning_effort="none"` 지원과 판단 품질은 이 단계에서 별도로 확인한다.
+이후 테스트 서버의 `/recommendations/{user_id}?refresh=true`에서 `mode="ai"`와 추천 결과를
+확인한다. 정상 empty Feed나 DB에 없는 PMID는 Backend Handoff에서 빈 결과가 되어 검색 폴백할
+수 있으므로 HTTP 200/Agent completed만으로 API AI 모드 성공을 주장하지 않는다.
+
 **Backend Handoff.** 필수 `backend_handoff(context, result)` callable에 FeedAnswerV2 output과
 server-resolved sources를 함께 넘긴다. 기존 StructuredAgentResult validator로 nested 계약과
 출처 참조 순서를 재검증하고 completed FeedAnswerV2 및 현재 request의 결과만 전달한다.
-다른 LLM 호출, 추가 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
+다른 LLM 호출, 추가 외부 DTO, source resolver, 임의 paper_id/metadata 생성은 없다.
 정상 empty Feed는 허용한다. 실패 status/invalid output/출처 오류는 Handoff를 호출하지 않는다.
-Recoverable Tool error 뒤 Runner가 검증된 completed 결과를 반환하면 기존 의미대로 전달하며
-execution.errors를 보존한다. tool_timeout 등의 failed 결과는 전달하지 않는다.
+Feed 검색 Tool 오류는 즉시 failed로 종료하고 Handoff하지 않는다. Chat의 recoverable 오류 처리는 유지한다.
 
 각 단계의 exception은 `FeedWorkflowError.stage`(context_prepare/feed_execution/backend_handoff)로
 감싸며 원문 메시지는 숨긴다. 이후 단계는 호출하지 않고 자동 retry/repair는 없다.
@@ -817,8 +869,8 @@ LLM이 일반화된 query를 만들고 실제 Evidence를 본 뒤 충분하면 �
 정적 Topic Catalog/fixed query/alias matching/priority/greedy selection 및 별도 Plan DTO는 없다.
 
 **Structured Output.** Wrapper는 공용 `run_structured(..., output_model=FeedAnswerV2)` 결과를
-변환 없이 반환한다. Runner의 validate_final_output/evidence reference resolution을 그대로 사용하며
-없는 call/index는 거부한다. 서버 provenance는 successful search Tool Call → EvidencePackage의
+변환 없이 반환한다. Runner는 FeedDecisionDraft를 검증해 FeedAnswerV2를 생성한 뒤 기존
+evidence reference resolution을 사용하며 없는 call/index는 거부한다. 서버 provenance는 successful search Tool Call → EvidencePackage의
 0-based evidence_index → FeedAnswerV2.source_ref → ResolvedEvidence다. Query가 특정 profile
 signal에서 나왔는지, personal_reason의 의미적 정확성까지 증명하지 않는다.
 
@@ -929,7 +981,7 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | `testing/fake_tools.py` | 고정 합성 fixture 기반 3개 Fake Handler/테스트 Registry |
 | `testing/fake_llm.py` | 정해진 ModelTurn 순서와 요청 snapshot을 사용하는 FakeLLMClient |
 | `testing/demo.py` | 최근 기록 → 근거 조회 → 최종 응답의 Fake 데모 |
-| `testing/structured_demo.py` | 같은 Tool Loop로 실행하는 Chat/Feed V1 오프라인 예시 |
+| `testing/structured_demo.py` | 같은 Tool Loop로 실행하는 Chat V1/Feed V2 오프라인 예시 |
 | `tests/test_outputs.py` | V1 경계/버전/참조/구조화 실행/legacy 호환성 검증 |
 | `tests/test_workflows.py` | A–D 워크플로, 오류, 경계/Builder 교체/Fake 계약 검증 |
 | `tests/test_openai_client.py` | 네트워크 없이 실제 SDK 메시지 형식/오류 검증 |
@@ -1305,7 +1357,8 @@ feed = engine.run_structured(user_input, context, output_model=FeedAnswerV2)
 구조화 정책은 첫 user message 직전에 삽입하며 Builder의 기존 메시지 순서는 보존한다.
 기본 순서는 system 정책 → system Context → system 구조화 정책 → user 원문이다.
 Structured 모드에서는 `build_final_response_context()`의 aggregate evidence copy를 생략한다.
-call ID가 있는 원래 Tool Result의 전체 EvidencePackage가 재판단/최종 생성에 계속 전달된다.
+Chat은 call ID가 있는 원래 Tool Result의 전체 EvidencePackage를 계속 전달한다.
+Feed는 내부 Snapshot을 보관하고 성공 Tool message의 긴 근거를 최소화한 뒤 최신 후보 목록을 전달한다.
 legacy `run()`은 기존 aggregate evidence message와 Builder 호출 동작을 유지한다.
 Tool Call이 없는 마지막 `ModelTurn.text`를 단일 JSON object로 검증한다.
 Provider native response_format/strict schema 기능은 연결하지 않았다. 모델이 프롬프트를
@@ -1315,17 +1368,19 @@ Provider native response_format/strict schema 기능은 연결하지 않았다. 
 `sources: list[ResolvedEvidence]`의 별도 wrapper다. Chat 성공 시 `execution.final_answer`는
 검증된 `output.answer`에서만 파생한다. Feed 성공 시 `execution.final_answer=None`이며,
 JSON을 문자열 답변에 넣지 않는다. 실패 시 output=None, sources=[], final_answer=None이다.
-참조/JSON/콘텐츠 계약 위반은 `invalid_response` + `invalid_structured_output`으로 반환하고,
+Chat 참조/JSON/콘텐츠 계약 위반은 `invalid_response` + `invalid_structured_output`으로 반환하고,
+Feed는 위의 후보/판단 전용 오류 코드와 `invalid_response`를 사용한다.
 원문/검증 상세를 오류에 노출하지 않는다. 최종 검증도 기존 전체 request deadline에 포함된다.
 Tool 오류 후 참조 없는 Chat 설명은 가능하며, `completed`는 의료적 정확성 보장이 아니다.
 
 ### 콘텐츠 모델과 제한
 
 Feed 출력 클래스는 `FeedAnswerV2`이며 JSON의 `schema_version="2"`를 필수로 요구한다.
-공용 Runner와 구조화 Prompt도 공식 FeedAnswerV2 모델을 직접 참조하며 과거 Feed 모델 별칭은 제공하지 않는다.
+공용 Runner의 호출·반환 모델은 FeedAnswerV2이며, Feed의 LLM Schema만 내부 FeedDecisionDraft다.
+과거 Feed 모델 별칭은 제공하지 않는다.
 과거 headline/summary_bullets payload를 허용하는 별도 V1 모델은 없으며 두 필드는 extra로 거부한다.
 Paper Detail의 SummaryBullet/SummaryBullets와 summary_bullets 계약은 그대로 유지한다.
-추천 API DTO의 기존 Optional headline/summary_bullets는 제거하지 않으며 Handoff가 값을 생성하지 않는다.
+이번 변경은 추천 API DTO나 Handoff를 수정하지 않으며 기존 Backend 계약을 그대로 사용한다.
 
 모든 아래 모델은 `AgentModel`의 extra 금지/비유한 수 금지 정책을 상속한다.
 콘텐츠 문자열은 strict string이며 빈 문자열/공백만 있는 문자열을 거부하고 원문을 보존한다.
@@ -1358,8 +1413,9 @@ Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 �
 ### 출처 참조 검증과 서버 조립 경계
 
 AgentLoopRunner는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
-요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 Tool Result payload는 바꾸지 않는다.
-모델은 role=tool message의 tool_call_id와 data.evidence 위치를 참조한다.
+요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 서버 Snapshot은 바꾸지 않는다.
+Chat 모델은 role=tool message의 tool_call_id와 data.evidence 위치를 참조한다.
+Feed 모델은 후보별 include/이유/category만 반환하며, 원본 참조를 결합하는 책임은 서버에 있다.
 `resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
 현재 요청의 성공 검색 존재/0-based index 범위를 검사한다. 실패한 검색/다른 Tool/다른 요청의
 ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검색 snapshot만 제공해야 한다.
@@ -1369,7 +1425,7 @@ ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검
 publication_year/study_type/organization/source_url/full_text_available만 원본에서 복사한다.
 없던 metadata는 null 그대로 유지하고 abstract/ai_summary/전체 환자 기록은 반환하지 않는다.
 LLM이 이 metadata를 반환하는 schema는 없다. 이 클래스와 StructuredAgentResult는 서버용이며
-LLM 최종 출력 모델은 ChatAnswerV1/FeedAnswerV2뿐이다.
+LLM 최종 출력 모델은 ChatAnswerV1/내부 FeedDecisionDraft이며 외부 최종 DTO는 ChatAnswerV1/FeedAnswerV2다.
 
 | AI 콘텐츠 | 현재 Frontend 매핑 | 신뢰 가능한 서버 조립 |
 |---|---|---|
@@ -1422,3 +1478,23 @@ PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m app.ai.agent.testing.structured_de
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -c 'import app.ai.agent.agent_loop_runner; import app.ai.agent.outputs; import app.ai.retrieval.search; import app.ai.retrieval.evidence'
 git diff --check
 ```
+
+### Feed 최초 검색과 검색 진행 상태
+
+Feed 첫 요청은 호출별 GenerationOptions로 search_evidence를 지정한다. 검색어는 모델이 생성하며
+Cold Start도 동일하다. 후속 요청은 auto, Tool 예산 또는 round 예산이 소진되면 none이다.
+parallel_tool_calls=False이며, 비준수 Provider가 상한을 넘는 call을 반환하면 기존 서버 제한으로 거부한다.
+옵션은 ContextVar를 통해 해당 generate 호출에만 적용하고 finally에서 복원한다.
+기존 generate(messages, tools) 인터페이스와 Chat의 auto/SDK timeout/retry 설정은 유지한다.
+
+최신 후보 메시지에는 검색 전 not_started, 검색 후 evaluating, 예산 소진 exhausted의 phase와
+성공/실패 횟수, 사용/잔여 예산을 전달한다. candidate_status는 not_searched/empty/available로
+별도로 구분한다. last_search는 반환 Evidence 수와 새 후보 수를 구분하며 원래 query는 기존
+assistant Tool Call 메시지에 보존한다. 검색 전 0건은 빈 검색 성공을 의미하지 않는다.
+검색 전 최종 text 또는 다른 Tool 응답은 feed_search_required로 거부한다. 검색 오류는 즉시
+failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하지 않는다.
+정상 검색 1/2/3회는 모델 호출 2/3/4회이며, 빈 검색 성공 후 추가 검색은 모델 선택이다.
+
+로컬 실제 모델 검증은 기존 테스트 DB/Provider 설정이 준비된 환경에서 위 로컬 예시로 수행한다.
+Cold Start의 최초 Tool Call, 1~3회 검색 후 상태, 예산 소진 뒤 최종 판단, AI Handoff를 확인한다.
+MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·검색 품질·토큰 비용은 검증하지 않는다.

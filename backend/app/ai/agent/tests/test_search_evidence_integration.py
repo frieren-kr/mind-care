@@ -97,34 +97,41 @@ class SearchEvidenceIntegrationTests(TestCase):
         self.assertEqual(handoff.call_args.args[1].sources[0].pmid, "SYNTHETIC-PMID")
 
     def test_missing_call_out_of_range_or_empty_evidence_reference_is_rejected(self):
-        for final, raw in ((final_turn("missing"), package()), (final_turn(index=2), package()),
-                           (final_turn(), rag.EvidencePackage(query="synthetic", evidence=[]))):
+        injected = []
+        for call_id, index in (("missing", 0), ("search_1", 2)):
+            draft = json.loads(final_turn().text)
+            draft["decisions"][0]["source_ref"] = {"tool_call_id": call_id, "evidence_index": index}
+            injected.append(ModelTurn(text=json.dumps(draft)))
+        for final, raw, code in ((injected[0], package(), "invalid_feed_decision"),
+                                (injected[1], package(), "invalid_feed_decision"),
+                                (final_turn(), rag.EvidencePackage(query="synthetic", evidence=[]), "candidate_count_mismatch")):
             client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final])
             result = FeedExecutionV1(client, self.registry(Mock(return_value=raw)))(
                 self.context, prepared_input())
             self.assertEqual(result.execution.status, "invalid_response")
-            self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
+            self.assertEqual(result.execution.errors[-1].code, code)
             self.assertIsNone(result.output)
             self.assertEqual(result.sources, [])
 
     def test_empty_search_can_finish_with_empty_feed(self):
         search = Mock(return_value=rag.EvidencePackage(query="synthetic", evidence=[]))
-        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final_turn(empty=True)])
+        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final_turn(count=0)])
         result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.output.items, [])
         self.assertEqual(result.sources, [])
         self.assertTrue(envelopes(client)[0]["success"])
 
-    def test_generic_search_error_remains_recoverable_but_cannot_back_a_citation(self):
-        for final, status in ((final_turn(empty=True), "completed"), (final_turn(), "invalid_response")):
+    def test_generic_feed_search_error_stops_without_retry_or_citation(self):
+        for final, status in ((final_turn(count=0), "failed"), (final_turn(), "failed")):
             search = Mock(side_effect=RuntimeError("PRIVATE retrieval error"))
             client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final])
             result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
             self.assertEqual(result.execution.status, status)
             self.assertEqual(result.execution.errors[0].code, "tool_exception")
             self.assertEqual(result.sources, [])
-            self.assertIsNone(envelopes(client)[0]["data"])
+            self.assertEqual(len(client.requests), 1)
+            self.assertEqual(envelopes(client), [])
             self.assertNotIn("PRIVATE", result.model_dump_json())
             search.assert_called_once()
 

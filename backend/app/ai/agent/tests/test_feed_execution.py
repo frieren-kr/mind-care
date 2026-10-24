@@ -35,12 +35,10 @@ def search_call(identifier="search_1", query="Dementia sleep research"):
     return ToolCall(id=identifier, name="search_evidence", arguments={"query": query})
 
 
-def final_turn(call_id="search_1", index=0, *, empty=False):
-    return ModelTurn(text=json.dumps({"schema_version": "2", "response_type": "feed",
-        "items": [] if empty else [{
-            "source_ref": {"tool_call_id": call_id, "evidence_index": index},
-            "personal_reason": "Synthetic care interest", "category": "care",
-        }]}))
+def final_turn(*, count=1, selected=(0,), empty=False):
+    return ModelTurn(text=json.dumps({"decisions": [
+        {"include": True, "personal_reason": "Synthetic care interest", "category": "care"}
+        if i in selected and not empty else {"include": False} for i in range(count)]}))
 
 
 def research_runner(turns, *, empty_queries=(), client=None):
@@ -50,7 +48,8 @@ def research_runner(turns, *, empty_queries=(), client=None):
         searches.append((context, deepcopy(args)))
         return EvidencePackage(query=args.query, evidence=[] if args.query in empty_queries else [
             EvidenceItem(evidence_type="new_research", title="[FAKE] " + args.query,
-                         relevance_score=0.8, pmid="FAKE-PMID", doi="FAKE-DOI",
+                         relevance_score=0.8, pmid=("FAKE-PMID" if args.query == "Dementia sleep research"
+                                                   else "FAKE-PMID-" + args.query), doi="FAKE-DOI",
                          abstract="Synthetic public evidence")])
     client = client if client is not None else FakeLLMClient(turns)
     execution = FeedExecutionV1(client, ToolRegistry((
@@ -149,11 +148,12 @@ class IterativeResearchTests(unittest.TestCase):
                     data = json.loads(tool.content)
                     test.assertEqual(tool.tool_call_id, "search_1")
                     test.assertTrue(data["success"])
-                    test.assertEqual(data["data"]["evidence"][0]["title"], "[FAKE] Dementia sleep research")
+                    candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
+                    test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep research")
                     # The synthetic provider chooses a followup after inspecting actual evidence.
                     self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver sleep support research")]))
                 elif len(self.requests) == 2:
-                    self.turns.append(final_turn("search_2"))
+                    self.turns.append(final_turn(count=2, selected=(1,)))
                 return super().generate(messages, tools)
         client = EvidenceDrivenFake([ModelTurn(tool_calls=[search_call()])])
         execution, _, searches = research_runner([], client=client)
@@ -167,7 +167,7 @@ class IterativeResearchTests(unittest.TestCase):
 
     def test_third_search_result_can_be_followed_by_normal_final_output(self):
         turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research angle {i}")]) for i in range(1, 4)]
-        execution, client, searches = research_runner(turns + [final_turn("search_3")])
+        execution, client, searches = research_runner(turns + [final_turn(count=3, selected=(2,))])
         result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.execution.tool_rounds, 3)
@@ -200,7 +200,7 @@ class IterativeResearchTests(unittest.TestCase):
                         calls.append(search_call(f"search_{identifier}"))
                     turns.append(ModelTurn(tool_calls=calls))
                 if status == "completed":
-                    turns.append(final_turn(f"search_{identifier}"))
+                    turns.append(final_turn())  # Same query/PMID is one stable candidate.
                 execution, _, searches = research_runner(turns)
                 result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)
@@ -213,37 +213,40 @@ class IterativeResearchTests(unittest.TestCase):
             with self.subTest(followup=followup):
                 turns = [ModelTurn(tool_calls=[search_call()])]
                 if followup:
-                    turns += [ModelTurn(tool_calls=[search_call("search_2", "Different research perspective")]), final_turn("search_2")]
+                    turns += [ModelTurn(tool_calls=[search_call("search_2", "Different research perspective")]), final_turn()]
                 else:
-                    turns.append(final_turn(empty=True))
+                    turns.append(final_turn(count=0))
                 execution, client, searches = research_runner(turns, empty_queries={"Dementia sleep research"})
                 result = execution(CONTEXT, prepared_input())
                 tool = next(m for m in client.requests[1][0] if m.role == "tool")
-                self.assertEqual(json.loads(tool.content), {"success": True,
-                    "data": {"query": "Dementia sleep research", "evidence": []}, "error": None})
+                self.assertTrue(json.loads(tool.content)["success"])
+                candidates = json.loads(next(m.content for m in client.requests[1][0] if m.kind == "evidence"))
+                self.assertEqual(candidates["candidate_count"], 0)
                 self.assertEqual(result.execution.status, "completed")
                 self.assertEqual(result.execution.errors, [])
                 self.assertEqual(len(searches), 2 if followup else 1)
                 self.assertEqual(len(result.output.items), 1 if followup else 0)
 
-    def test_false_call_reference_or_out_of_range_index_fails_existing_output_validation(self):
+    def test_model_generated_call_reference_is_rejected_in_internal_feed_decision(self):
         for call_id, index in (("nonexistent_call", 0), ("search_1", 1)):
-            execution, _, _ = research_runner([ModelTurn(tool_calls=[search_call()]), final_turn(call_id, index)])
+            draft = json.loads(final_turn().text)
+            draft["decisions"][0]["source_ref"] = {"tool_call_id": call_id, "evidence_index": index}
+            execution, _, _ = research_runner([ModelTurn(tool_calls=[search_call()]), ModelTurn(text=json.dumps(draft))])
             with self.subTest(call_id=call_id, index=index):
                 result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, "invalid_response")
-                self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
+                self.assertEqual(result.execution.errors[-1].code, "invalid_feed_decision")
                 self.assertIsNone(result.output)
                 self.assertEqual(result.sources, [])
 
     def test_provider_failure_and_invalid_response_never_return_normal_feed(self):
         for turn, status, code in (
             (RuntimeError("PRIVATE provider detail"), "provider_error", "provider_error"),
-            (ModelTurn(text="PRIVATE invalid JSON"), "invalid_response", "invalid_structured_output"),
+            (ModelTurn(text="PRIVATE invalid JSON"), "invalid_response", "invalid_feed_json"),
             (ModelTurn(text=""), "invalid_response", "empty_response"),
             (ModelTurn.model_construct(text=123, tool_calls=[]), "invalid_response", "invalid_model_turn")):
             with self.subTest(status=status, code=code):
-                execution, _, _ = research_runner([turn])
+                execution, _, _ = research_runner([ModelTurn(tool_calls=[search_call()]), turn])
                 result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)
                 self.assertEqual(result.execution.errors[-1].code, code)

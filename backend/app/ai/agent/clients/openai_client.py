@@ -5,6 +5,7 @@ from typing import Any, Sequence
 
 from openai import OpenAI
 
+from .base import generation_options
 from .._execution import check_deadline, positive_seconds, request_deadline
 from ..schemas import Message, ModelTurn, ToolCall
 
@@ -35,7 +36,14 @@ class OpenAIClient:
     def generate(self, messages: Sequence[Message], tools: list[dict[str, Any]]) -> ModelTurn:
         kwargs: dict[str, Any] = {"model": self.model, "messages": [self._message(m) for m in messages]}
         if tools:
-            kwargs.update(tools=tools, tool_choice="auto")
+            kwargs.update(tools=tools, tool_choice="auto", extra_body={"reasoning_effort": "none"})
+        options = generation_options.get()
+        if options is not None:
+            if not tools:
+                raise ValueError("Tool selection options require tool definitions")
+            kwargs["tool_choice"] = ({"type": "function", "function": {"name": options.required_tool}}
+                                     if options.required_tool else options.tool_choice)
+            kwargs["parallel_tool_calls"] = options.parallel_tool_calls
         check_deadline()
         deadline = request_deadline.get()
         timeout = self.timeout_seconds

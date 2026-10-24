@@ -37,7 +37,7 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                     )])
                 client = FakeLLMClient([
                     ModelTurn(tool_calls=[ToolCall(id="search_1", name="search_evidence", arguments={"query": "dementia sleep research"})]),
-                    ModelTurn(text='{"schema_version": "2", "response_type": "feed", "items": []}'
+                    ModelTurn(text='{"decisions":[{"include":false}]}'
                               if structured else "synthetic final"),
                 ])
                 execution = FeedExecutionV1(client, ToolRegistry((
@@ -49,7 +49,7 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                 self.assertEqual(len(client.requests), 2)
                 followup = client.requests[1][0]
                 self.assertTrue(any(message.kind == "tool_result" for message in followup))
-                self.assertEqual(any(message.kind == "evidence" for message in followup), not structured)
+                self.assertTrue(any(message.kind == "evidence" for message in followup))
                 self.assertIn("Synthetic public research", json.dumps([
                     message.model_dump(mode="json") for message in followup]))
                 for messages, tools in client.requests:
@@ -86,12 +86,13 @@ class FeedPromptPrivacyTests(unittest.TestCase):
         feed_policy = build_structured_output_policy(FeedAnswerV2).content
         for retired_field in ('"headline"', '"summary_bullets"'):
             self.assertNotIn(retired_field, feed_policy)
-        for required_field in ('"source_ref"', '"personal_reason"', '"category"'):
+        self.assertNotIn('"source_ref"', feed_policy)
+        for required_field in ('"decisions"', '"include"', '"personal_reason"', '"category"'):
             self.assertIn(required_field, feed_policy)
         chat_policy = build_structured_output_policy(ChatAnswerV1).content
         self.assertIn("Cold Start", feed_policy)
-        self.assertIn("개인화 정보가 비어 있다는 이유만으로 items=[]를 강제하지 않는다", feed_policy)
-        self.assertIn("모든 item은 유효한 검색 Evidence를 인용한다", feed_policy)
+        self.assertIn("개인화 정보가 비어 있다는 이유만으로 전부 제외를 강제하지 않는다", feed_policy)
+        self.assertIn("원본 출처는 서버가 결합해 FeedAnswerV2를 만든다", feed_policy)
         self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", feed_policy)
         self.assertNotIn("personal_reason", chat_policy)
         self.assertNotIn("Cold Start", chat_policy)
@@ -104,7 +105,9 @@ class FeedPromptPrivacyTests(unittest.TestCase):
                          "여러 환자의 신호를 한 환자 상태로 합성하지 않는다", "임상 사실을 추론하거나 진단하지 않는다",
                          "충분하면 추가 검색을 하지 않는다", "후속 query", "의미상 동일한 검색",
                          "search_evidence만 사용", "최대 3회", "3번째 Tool 결과", "4번째 Tool Call",
-                         "top_k는 5", "서버 강제를 보장하는 것은 아니다", "FeedAnswerV2 structured output",
+                         "top_k는 5", "서버 강제를 보장하는 것은 아니다", "첫 검색 전에는", "검색 후에는 제공되는 평가 정책",
                          "효과 없음/안전함/임상적 부재"):
             self.assertIn(required, policy)
         self.assertNotIn("승인한 일반화된 연구 query만", policy)
+        self.assertNotIn("FeedDecisionDraft", policy)
+        self.assertIn("FeedAnswerV2", build_structured_output_policy(FeedAnswerV2).content)
