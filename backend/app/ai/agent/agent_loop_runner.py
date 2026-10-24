@@ -1,11 +1,15 @@
-"""순차 Tool Calling Loop. Prompt 규칙/Provider/DB 구현은 이 계층에 두지 않는다."""
+"""순차/명시적 병렬 Tool Calling Loop. Prompt 규칙/Provider/DB 구현은 이 계층에 두지 않는다."""
+from copy import deepcopy
+from functools import partial
 from time import monotonic
 from typing import cast
 
-from ._execution import RequestTimeout, bounded_call, check_deadline, positive_seconds, request_deadline
+from ._execution import RequestTimeout, ParallelStopped, bounded_call, bounded_parallel, check_deadline, positive_seconds, request_deadline
 from .clients.base import LLMClient, GenerationOptions, generate_with_options
 from .executor import ToolExecutor
-from .feed_candidates import FeedCandidates, FeedDecisionError, minimize_feed_tool_messages
+from .feed_search_policy import (MAX_FEED_RETRIEVAL, FeedSearchBudgetExceeded,
+                                 feed_tool_definitions, prepare_feed_searches)
+from .feed_candidates import FeedCandidates, FeedDecisionError
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
@@ -14,14 +18,33 @@ from .schemas import AgentContext, AgentError, AgentResult, AgentState, ModelTur
 from .tools.contracts import EvidencePackage
 
 
+def _validate_tool_result(call, result):
+    outcome, trace = result
+    outcome = ToolOutcome.model_validate(
+        outcome.model_dump(warnings=False) if isinstance(outcome, ToolOutcome) else outcome)
+    trace = ToolTrace.model_validate(
+        trace.model_dump(warnings=False) if isinstance(trace, ToolTrace) else trace)
+    if (outcome.call_id != call.id or outcome.tool_name != call.name or
+            outcome.success != (outcome.error is None) or trace.success != outcome.success):
+        raise ValueError("Executor result does not match the call")
+    return outcome, trace
+
+
 class AgentLoopRunner:
     def __init__(self, client: LLMClient, registry: ToolRegistry, *,
                  prompt_builder: PromptBuilder | None = None,
                  max_tool_rounds: int = 5, max_total_tool_calls: int = 10,
-                 tool_timeout_seconds: float = 30.0, request_timeout_seconds: float = 120.0):
+                 tool_timeout_seconds: float = 30.0, request_timeout_seconds: float = 120.0,
+                 allow_parallel_tools: bool = False, max_parallel_calls: int = 3):
         for name, value in (("max_tool_rounds", max_tool_rounds), ("max_total_tool_calls", max_total_tool_calls)):
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a strict positive integer")
+        if type(allow_parallel_tools) is not bool:
+            raise ValueError("allow_parallel_tools must be a boolean")
+        if type(max_parallel_calls) is not int or not 1 <= max_parallel_calls <= 8:
+            raise ValueError("max_parallel_calls must be an integer from 1 to 8")
+        self.allow_parallel_tools = allow_parallel_tools
+        self.max_parallel_calls = max_parallel_calls
         self.client = client
         self.registry = registry
         self.executor = ToolExecutor(registry, timeout_seconds=tool_timeout_seconds)
@@ -40,12 +63,46 @@ class AgentLoopRunner:
             raise ValueError("Only ChatAnswerV1 and FeedAnswerV2 are supported")
         return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model))
 
+    def _tool_results(self, calls, context, state, *, stop_on_failure):
+        parallel = False
+        if self.allow_parallel_tools and 1 < len(calls) <= self.max_parallel_calls:
+            parallel = bounded_call(lambda: all(
+                (spec := self.registry.get(call.name)) is not None and spec.parallel_safe for call in calls))
+        if parallel:
+            state.total_tool_calls += len(calls)
+            try:
+                raw_results = bounded_parallel([
+                    partial(self.executor.execute, call.model_copy(deep=True), context.model_copy(deep=True))
+                    for call in calls], stop_on_result=(
+                        lambda index, raw: not _validate_tool_result(calls[index], raw)[0].success)
+                        if stop_on_failure else None)
+            except ParallelStopped as stopped:
+                # Count Executor attempts that actually started, not unlaunched
+                # calls. Pending peers have no fabricated success/timeout Trace.
+                state.total_tool_calls -= len(calls) - stopped.started
+                for index, raw in stopped.results:
+                    yield calls[index], *_validate_tool_result(calls[index], raw)
+                return
+            for call, raw in zip(calls, raw_results, strict=True):
+                yield call, *_validate_tool_result(call, raw)
+        else:
+            for call in calls:
+                check_deadline()
+                state.total_tool_calls += 1
+                outcome, trace = _validate_tool_result(call, bounded_call(lambda: self.executor.execute(call, context)))
+                yield call, outcome, trace
+                if stop_on_failure and not outcome.success:
+                    return
+
     def _run(self, user_input: str, context: AgentContext, *,
              output_model: FinalOutputModel | None = None) -> AgentResult | StructuredAgentResult:
         state = AgentState(request_id=context.request_id)
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
         feed_candidates = FeedCandidates() if output_model is FeedAnswerV2 else None
+        feed_retrieval_used = 0
+        feed_model_calls = 0
+        feed_query_keys: set[str] = set()
         structured_output: ChatAnswerV1 | FeedAnswerV2 | None = None
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
@@ -95,7 +152,7 @@ class AgentLoopRunner:
                 messages = state.messages + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
                 if feed_candidates is not None:
-                    remaining = min(self.max_total_tool_calls - state.total_tool_calls,
+                    remaining = min(min(3, self.max_total_tool_calls) - state.total_tool_calls,
                                     self.max_tool_rounds - state.tool_round)
                     if feed_candidates.successful_searches:
                         # Feed evaluation policy/projection belong to this request only,
@@ -104,14 +161,18 @@ class AgentLoopRunner:
                                               if message.role == "user"), len(messages))
                         messages.insert(user_position, bounded_call(
                             lambda: build_structured_output_policy(output_model)))
-                        messages.append(bounded_call(lambda: feed_candidates.message(remaining)))
+                        messages.append(bounded_call(lambda: feed_candidates.message(
+                            remaining, model_tool_calls=feed_model_calls)))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
+                if feed_candidates is not None:
+                    definitions = bounded_call(lambda: feed_tool_definitions(definitions))
                 try:
                     if feed_candidates is not None:
                         options = GenerationOptions(
-                            tool_choice="none" if remaining == 0 else "auto",
-                            required_tool="search_evidence" if not feed_candidates.successful_searches else None)
+                            tool_choice=("none" if remaining == 0 else
+                                         "auto" if feed_candidates.successful_searches else "required"),
+                            parallel_tool_calls=self.allow_parallel_tools and self.max_parallel_calls > 1)
                         turn = bounded_call(lambda: generate_with_options(self.client, messages, definitions, options))
                     else:
                         turn = bounded_call(lambda: self.client.generate(messages, definitions))
@@ -169,48 +230,81 @@ class AgentLoopRunner:
                 if len(set(ids)) != len(ids) or seen_ids.intersection(ids):
                     state.errors.append(AgentError(code="duplicate_call_id", message="LLM Tool Call ID가 중복되었습니다."))
                     return finish("invalid_response")
+                calls = turn.tool_calls
+                if feed_candidates is not None:
+                    try:
+                        search_plan = bounded_call(lambda: prepare_feed_searches(
+                            calls, turn=state.tool_round + 1,
+                            remaining_calls=min(3, self.max_total_tool_calls) - state.total_tool_calls,
+                            remaining_budget=MAX_FEED_RETRIEVAL - feed_retrieval_used,
+                            previous_queries=feed_query_keys,
+                            reserved_ids=seen_ids | set(evidence_by_call)))
+                        calls = search_plan.searches
+                    except FeedSearchBudgetExceeded:
+                        state.errors.append(AgentError(code='tool_limit', message='Feed 실제 검색 예산을 초과했습니다.'))
+                        return finish('limit_reached')
+                    except (ValueError, TypeError):
+                        state.errors.append(AgentError(code="invalid_arguments",
+                            message="Feed 검색 입력 또는 검색량이 계약과 일치하지 않습니다."))
+                        return finish("failed")
+                    feed_retrieval_used += sum(call.arguments["top_k"] for call in calls)
+                    feed_model_calls += len(turn.tool_calls)
+                    feed_query_keys.update(search_plan.query_keys)
                 seen_ids.update(ids)
                 state.tool_round += 1
-                outcomes = []
-                for call in turn.tool_calls:
-                    check_deadline()
-                    state.total_tool_calls += 1
-                    stage = "executor_error"
-                    outcome, trace = bounded_call(lambda: self.executor.execute(call, context))
-                    # Pydantic instance도 dump 후 재검증하여 model_construct/변경된 필드를 차단한다.
-                    outcome = ToolOutcome.model_validate(
-                        outcome.model_dump(warnings=False) if isinstance(outcome, ToolOutcome) else outcome)
-                    trace = ToolTrace.model_validate(
-                        trace.model_dump(warnings=False) if isinstance(trace, ToolTrace) else trace)
-                    if (outcome.call_id != call.id or outcome.tool_name != call.name or
-                            outcome.success != (outcome.error is None) or trace.success != outcome.success):
-                        raise ValueError("Executor result does not match the call")
-                    outcomes.append(outcome)
-                    state.called_tools.append(trace)
-                    if feed_candidates is not None and call.name == "search_evidence" and not outcome.success:
-                        feed_candidates.record_search(False)
-                        state.errors.append(outcome.error)
+                stage = "executor_error"
+                results = self._tool_results(calls, context, state, stop_on_failure=feed_candidates is not None)
+                if feed_candidates is not None:
+                    # Consume and validate the whole batch before exposing evidence.
+                    results = list(results)
+                    state.called_tools.extend(trace for _, _, trace in results)
+                    state.errors.extend(outcome.error for _, outcome, _ in results if outcome.error)
+                    if any(not outcome.success for _, outcome, _ in results):
+                        for _, outcome, _ in results:
+                            feed_candidates.record_search(outcome.success)
                         return finish("failed")
-                    if outcome.error:
-                        state.errors.append(outcome.error)
-                        # timeout는 작업 완료 여부가 불명확하다. LLM 재호출/추가 Tool을 중단한다.
-                        if outcome.error.code in ("tool_timeout", "patient_context_mismatch"):
-                            return finish("failed")
-                    if outcome.success and call.name == ToolName.SEARCH_EVIDENCE.value:
-                        stage = "evidence_validation_error"
-                        package = bounded_call(lambda: EvidencePackage.model_validate(outcome.data))
+                    stage = "evidence_validation_error"
+                    packages = [(call.id, bounded_call(
+                        lambda outcome=outcome: EvidencePackage.model_validate(outcome.data)))
+                        for call, outcome, _ in results]
+                    if any(len(package.evidence) > call.arguments["top_k"]
+                           for call, (_, package) in zip(calls, packages, strict=True)):
+                        raise ValueError("Feed search returned more than its retrieval limit")
+                    stage = "candidate_source_mismatch"
+                    staged_candidates = deepcopy(feed_candidates)
+                    for call_id, package in packages:
+                        before_count = staged_candidates.eligible_count
+                        bounded_call(lambda: staged_candidates.add(call_id, package))
+                        staged_candidates.record_search(True, len(package.evidence),
+                            staged_candidates.eligible_count - before_count)
+                    check_deadline()
+                    feed_candidates = staged_candidates
+                    for call_id, package in packages:
                         evidence.append(package)
-                        if output_model is not None:
-                            evidence_by_call[call.id] = package.model_copy(deep=True)
-                            if feed_candidates is not None:
-                                stage = "candidate_source_mismatch"
-                                before_count = feed_candidates.count
-                                bounded_call(lambda: feed_candidates.add(call.id, evidence_by_call[call.id]))
-                                feed_candidates.record_search(True, len(package.evidence), feed_candidates.count - before_count)
+                        evidence_by_call[call_id] = package.model_copy(deep=True)
+                    # Exactly one Tool response per REAL Provider call, even
+                    # when that call fanned out to multiple server searches.
+                    outcomes = search_plan.provider_outcomes(dict(packages))
+                else:
+                    # Default Chat/legacy mode still validates and commits each
+                    # sequential call before starting the next dependent call.
+                    outcomes = []
+                    for call, outcome, trace in results:
+                        outcomes.append(outcome)
+                        state.called_tools.append(trace)
+                        if outcome.error:
+                            state.errors.append(outcome.error)
+                            if outcome.error.code in ("tool_timeout", "patient_context_mismatch"):
+                                return finish("failed")
+                        if outcome.success and call.name == ToolName.SEARCH_EVIDENCE.value:
+                            stage = "evidence_validation_error"
+                            package = bounded_call(lambda: EvidencePackage.model_validate(outcome.data))
+                            evidence.append(package)
+                            if output_model is not None:
+                                evidence_by_call[call.id] = package.model_copy(deep=True)
+                        stage = "executor_error"
                 stage = "prompt_builder_error"
                 followup = bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes))
-                if feed_candidates is not None:
-                    followup = bounded_call(lambda: minimize_feed_tool_messages(followup, outcomes))
                 state.messages.extend(followup)
         except RequestTimeout:
             state.final_answer = None

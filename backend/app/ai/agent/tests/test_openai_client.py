@@ -245,9 +245,10 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         for index, payload in enumerate(case.requests):
             self.assertEqual(payload["reasoning_effort"], "none")
             self.assertEqual(payload["model"], "configured-test-model")
-            self.assertEqual(payload["tool_choice"], {"type": "function", "function": {"name": "search_evidence"}} if index == 0 else "auto")
-            self.assertFalse(payload["parallel_tool_calls"])
-            self.assertEqual(payload["tools"], case.execution.runner.registry.definitions())
+            self.assertEqual(payload["tool_choice"], "required" if index == 0 else "auto")
+            self.assertTrue(payload["parallel_tool_calls"])
+            from ..feed_search_policy import feed_tool_definitions
+            self.assertEqual(payload["tools"], feed_tool_definitions(case.execution.runner.registry.definitions()))
         self.assertIn(case.prepare.return_value, [m["content"] for m in case.requests[0]["messages"] if m["role"] == "user"])
         followup = case.requests[1]["messages"]
         assistant = next(m for m in followup if m.get("tool_calls"))

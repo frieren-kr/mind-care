@@ -55,6 +55,7 @@ class ToolSpec:
     contract: ToolContract
     handler: Callable[[AgentContext, Any], Any]
     test_only: bool = False
+    parallel_safe: bool = False
 
 
 class ToolRegistry:
@@ -68,6 +69,8 @@ class ToolRegistry:
                 raise ValueError("A ToolSpec with a ToolContract is required")
             if not callable(spec.handler):
                 raise ValueError("Tool handler must be callable")
+            if type(spec.parallel_safe) is not bool:
+                raise ValueError("parallel_safe must be a boolean")
             for model in (spec.contract.input_model, spec.contract.output_model):
                 if not isinstance(model, type) or not issubclass(model, BaseModel) or model is BaseModel:
                     raise ValueError("Tool models must be concrete Pydantic model classes")

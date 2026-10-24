@@ -29,7 +29,8 @@ class FeedSearchPolicyTests(unittest.TestCase):
             self.assertEqual(result.execution.errors[-1].code, "feed_search_required")
             self.assertEqual(result.execution.total_tool_calls, 0)
             self.assertEqual(len(client.requests), 1)
-            self.assertEqual(client.options[0].required_tool, "search_evidence")
+            self.assertIsNone(client.options[0].required_tool)
+            self.assertEqual(client.options[0].tool_choice, "required")
             first = client.requests[0][0]
             self.assertFalse(any(m.kind == "evidence" for m in first))
             self.assertFalse(any("FeedDecisionDraft" in (m.content or "") for m in first))
@@ -49,7 +50,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
                 self.assertEqual(state["search_progress"], {
                     "phase": "exhausted" if calls == 3 else "evaluating",
                     "search_calls_used": calls, "search_calls_remaining": 3-calls,
-                    "successful_searches": calls, "failed_searches": 0})
+                    "successful_searches": calls, "failed_searches": 0, "model_tool_calls_used": calls})
                 self.assertEqual(state["last_search"]["returned_evidence_count"], len(pmids))
                 self.assertEqual(state["last_search"]["new_eligible_candidate_count"],
                                  1 if pmids == ["A"] and calls == 1 else 0)
@@ -76,7 +77,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual(result.sources[0].source_ref.tool_call_id, "opaque_1")
         self.assertEqual([p["tool_choice"] for p in requests], [
-            {"type":"function", "function":{"name":"search_evidence"}}, "auto", "auto", "none"])
+            "required", "auto", "auto", "none"])
         self.assertEqual(len(requests), 4)
         first_wire = requests[0]["messages"]
         self.assertFalse(any("FeedDecisionDraft" in (m.get("content") or "") for m in first_wire))
@@ -87,7 +88,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
             self.assertEqual(sum('"untrusted_feed_candidates"' in (m.get("content") or "")
                                  for m in payload["messages"]), 1)
         for payload in requests:
-            self.assertFalse(payload["parallel_tool_calls"])
+            self.assertTrue(payload["parallel_tool_calls"])
             self.assertEqual(payload["reasoning_effort"], "none")
             self.assertEqual(payload["tools"][0]["function"]["name"], "search_evidence")
         OpenAIClient(sdk, model="offline-model").generate(
@@ -134,7 +135,8 @@ class FeedSearchPolicyTests(unittest.TestCase):
                     self.assertEqual([m.content for m in first if m.role == "user"], [prepared])
                     self.assertTrue(any("첫 검색을 반드시 실행" in (m.content or "") for m in first))
                     self.assertEqual(definitions[0]["function"]["name"], "search_evidence")
-                    self.assertEqual(client.options[0].required_tool, "search_evidence")
+                    self.assertIsNone(client.options[0].required_tool)
+                    self.assertEqual(client.options[0].tool_choice, "required")
                     self.assertFalse(any(m.kind == "evidence" for m in first))
                     for marker in ('"decisions"', 'decisions=[]', 'FeedDecisionDraft', '"candidate_count"', '"candidates"'):
                         self.assertFalse(any(marker in (m.content or "") for m in first), marker)
