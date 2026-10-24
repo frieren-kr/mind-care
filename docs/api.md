@@ -3,7 +3,7 @@
 > 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`는 박주현, `users.py`는 김한슬).
 > 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), DB 함수 계약은 [`db.md`](db.md).
 
-**프론트 연결 상태 (2026-10-24)**: 피드(/recommendations), 논문 상세(/papers/{id}), 내 정보(/feed/{user_id}), 피드 갱신 주기(PATCH /users/{id}) API 연결 완료. 검색 모드 기준으로 응답 형식 확인, AI 모드 화면(personal_reason·category)은 AI 연결 후 확인 예정.
+**프론트 연결 상태 (2026-10-24)**: 피드(/recommendations), 논문 상세(/papers/{paper_id}), 내 정보(/feed/{user_id}), 피드 갱신 주기(PATCH /users/{user_id}/feed-settings) API 연결 완료. 검색 모드 기준으로 응답 형식 확인, AI 모드 화면(personal_reason·category)은 AI 연결 후 확인 예정.
 개발 환경(`APP_ENV=development`)에서만 `backend/main.py`가 CORS를 허용한다 (출처 `http://localhost:8081`·`http://127.0.0.1:8081`, 웹 화면 테스트용).
 
 ## API 주소 목록
