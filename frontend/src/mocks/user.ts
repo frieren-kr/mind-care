@@ -1,12 +1,5 @@
 // 목업 데이터. 화면 확인용 예시이며, 백엔드 API가 준비되면 교체한다.
-import type { ChatMessage, Dashboard, Profile, SelfCheckQuestion } from '@/types';
-
-export const mockProfile: Profile = {
-  user_name: '김마음',
-  user_type: 'caregiver',
-  reading_level: 'easy',
-  patient: { relation: '어머니', stage: '경도', symptoms: ['반복 질문', '수면 문제'] },
-};
+import type { ChatMessage, Dashboard, SelfCheckQuestion } from '@/types';
 
 export const mockDashboard: Dashboard = {
   user_name: '김마음',
