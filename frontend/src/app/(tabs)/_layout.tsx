@@ -35,7 +35,7 @@ export default function TabLayout() {
         name="feed"
         options={{
           title: '피드',
-          headerTitle: '이번 주 연구',
+          headerTitle: '맞춤 연구',
           tabBarIcon: TabIcon({ ios: 'newspaper.fill', android: 'newspaper', web: 'newspaper' }),
         }}
       />

@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import papers, recommendations, users
 from app.config import settings
@@ -39,6 +40,21 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+
+def _add_dev_cors(app: FastAPI) -> None:
+    """개발 환경에서만 CORS 허용 (웹에서 화면 테스트용, Expo web 기본 포트 8081)."""
+    if settings.app_env != "development":
+        return
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:8081", "http://127.0.0.1:8081"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+_add_dev_cors(app)
 
 
 @app.get("/health")

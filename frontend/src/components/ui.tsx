@@ -1,19 +1,67 @@
-import { Pressable, ScrollView, StyleSheet, View, type ViewProps } from 'react-native';
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+  type ViewProps,
+} from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
 import { Evidence, MaxContentWidth, MinTouch, Radius, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import type { EvidenceLevel } from '@/types';
 
-/** 화면 공통 스크롤 컨테이너 */
-export function Screen({ children }: { children: React.ReactNode }) {
+/** 화면 공통 스크롤 컨테이너. onRefresh를 주면 당겨서 새로고침이 켜진다 */
+export function Screen({
+  children,
+  refreshing = false,
+  onRefresh,
+}: {
+  children: React.ReactNode;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+}) {
   const theme = useTheme();
   return (
     <ScrollView
       style={{ backgroundColor: theme.background }}
-      contentContainerStyle={styles.screenContent}>
+      contentContainerStyle={styles.screenContent}
+      refreshControl={
+        onRefresh ? (
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.primary} />
+        ) : undefined
+      }>
       {children}
     </ScrollView>
+  );
+}
+
+/** 불러오는 중. hint는 오래 걸릴 때 기다려 달라는 안내 */
+export function LoadingView({ message = '불러오는 중이에요…', hint }: { message?: string; hint?: string }) {
+  const theme = useTheme();
+  return (
+    <View style={styles.status} accessibilityRole="progressbar" accessibilityLabel={message}>
+      <ActivityIndicator size="large" color={theme.primary} />
+      <ThemedText type="bold">{message}</ThemedText>
+      {hint ? (
+        <ThemedText type="small" themeColor="textSecondary" style={styles.hint}>
+          {hint}
+        </ThemedText>
+      ) : null}
+    </View>
+  );
+}
+
+/** 오류 안내 + 다시 시도 */
+export function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <Card>
+      <ThemedText type="subtitle">불러오지 못했어요</ThemedText>
+      <ThemedText themeColor="textSecondary">{message}</ThemedText>
+      {onRetry ? <Button label="다시 시도" variant="secondary" onPress={onRetry} /> : null}
+    </Card>
   );
 }
 
@@ -120,6 +168,14 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
+  },
+  status: {
+    alignItems: 'center',
+    gap: Spacing.three,
+    paddingVertical: Spacing.five,
+  },
+  hint: {
+    textAlign: 'center',
   },
   card: {
     borderRadius: Radius.card,
