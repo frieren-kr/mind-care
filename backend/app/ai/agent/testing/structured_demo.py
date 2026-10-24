@@ -23,7 +23,8 @@ def main():
             ModelTurn(tool_calls=[ToolCall(id="demo_logs", name=ToolName.RECENT_CARE_LOGS.value, arguments={})]),
             ModelTurn(tool_calls=[ToolCall(id="demo_search", name=ToolName.SEARCH_EVIDENCE.value,
                                           arguments={"query": "synthetic sleep", "top_k": 5})]),
-            ModelTurn(text=output.model_dump_json()),
+            ModelTurn(text=(output.model_dump_json() if isinstance(output, ChatAnswerV1) else
+                '{"decisions":[{"include":true,"personal_reason":"[FAKE] 제공된 합성 수면 기록과 관련 있어요.","category":"care"}]}')),
         ])
         result = AgentLoopRunner(client, fake_registry()).run_structured(
             "[FAKE] 합성 기록과 관련 근거를 보여주세요.", context, output_model=type(output))

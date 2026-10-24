@@ -5,6 +5,7 @@ from typing import cast
 from ._execution import RequestTimeout, bounded_call, check_deadline, positive_seconds, request_deadline
 from .clients.base import LLMClient
 from .executor import ToolExecutor
+from .feed_candidates import FeedCandidates, FeedDecisionError, minimize_feed_tool_messages
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
@@ -44,6 +45,7 @@ class AgentLoopRunner:
         state = AgentState(request_id=context.request_id)
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
+        feed_candidates = FeedCandidates() if output_model is FeedAnswerV2 else None
         structured_output: ChatAnswerV1 | FeedAnswerV2 | None = None
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
@@ -92,6 +94,8 @@ class AgentLoopRunner:
                 # 구조화 참조는 call ID가 있는 Tool Result만 사용한다. legacy의 근거 묶음은 유지한다.
                 messages = state.messages + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
+                if feed_candidates is not None:
+                    messages = messages + [bounded_call(feed_candidates.message)]
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
                 try:
@@ -117,8 +121,16 @@ class AgentLoopRunner:
                     if output_model is not None:
                         stage = "structured_output_error"
                         try:
-                            structured_output, sources = bounded_call(
-                                lambda: validate_final_output(turn.text, output_model, evidence_by_call))
+                            if feed_candidates is not None:
+                                structured_output, sources = bounded_call(
+                                    lambda: feed_candidates.finalize(turn.text, evidence_by_call))
+                            else:
+                                structured_output, sources = bounded_call(
+                                    lambda: validate_final_output(turn.text, output_model, evidence_by_call))
+                        except FeedDecisionError as error:
+                            state.errors.append(AgentError(code=error.code,
+                                message="Feed 판단 형식 또는 서버 후보 출처가 계약과 일치하지 않습니다."))
+                            return finish("invalid_response")
                         except (ValueError, TypeError, RecursionError):
                             state.errors.append(AgentError(code="invalid_structured_output",
                                 message="최종 답변의 구조 또는 출처 참조가 계약과 일치하지 않습니다."))
@@ -166,8 +178,14 @@ class AgentLoopRunner:
                         evidence.append(package)
                         if output_model is not None:
                             evidence_by_call[call.id] = package.model_copy(deep=True)
+                            if feed_candidates is not None:
+                                stage = "candidate_source_mismatch"
+                                bounded_call(lambda: feed_candidates.add(call.id, evidence_by_call[call.id]))
                 stage = "prompt_builder_error"
-                state.messages.extend(bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes)))
+                followup = bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes))
+                if feed_candidates is not None:
+                    followup = bounded_call(lambda: minimize_feed_tool_messages(followup, outcomes))
+                state.messages.extend(followup)
         except RequestTimeout:
             state.final_answer = None
             error = AgentError(code="request_timeout", message="Agent 전체 실행 시간이 초과되었습니다.")

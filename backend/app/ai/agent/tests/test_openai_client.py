@@ -195,9 +195,8 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
 
     @staticmethod
     def final_payload():
-        return {"schema_version": "2", "response_type": "feed", "items": [{
-            "source_ref": {"tool_call_id": "search_1", "evidence_index": 0},
-            "personal_reason": "Synthetic care relevance", "category": "care",
+        return {"decisions": [{
+            "include": True, "personal_reason": "Synthetic care relevance", "category": "care",
         }]}
 
     def scenario(self, *, final_text=None, arguments=None):
@@ -208,7 +207,7 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
             requests.append(json.loads(request.content))
             if len(requests) == 1:
                 message = {"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "search_1", "type": "function", "function": {
+                    "id": "call_sdk_opaque_feed", "type": "function", "function": {
                         "name": "search_evidence", "arguments": arguments}}]}
                 return httpx.Response(200, json=completion(message, "tool_calls"))
             self.assertEqual(len(requests), 2)
@@ -248,14 +247,18 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["model"], "configured-test-model")
             self.assertEqual(payload["tool_choice"], "auto")
             self.assertEqual(payload["tools"], case.execution.runner.registry.definitions())
-        self.assertEqual(case.requests[0]["messages"][-1]["content"], case.prepare.return_value)
+        self.assertIn(case.prepare.return_value, [m["content"] for m in case.requests[0]["messages"] if m["role"] == "user"])
         followup = case.requests[1]["messages"]
-        self.assertEqual(followup[-2]["tool_calls"][0]["id"], "search_1")
-        self.assertEqual(followup[-1]["role"], "tool")
-        self.assertEqual(followup[-1]["tool_call_id"], "search_1")
-        envelope = json.loads(followup[-1]["content"])
+        assistant = next(m for m in followup if m.get("tool_calls"))
+        tool = next(m for m in followup if m["role"] == "tool")
+        self.assertEqual(assistant["tool_calls"][0]["id"], "call_sdk_opaque_feed")
+        self.assertEqual(tool["tool_call_id"], "call_sdk_opaque_feed")
+        envelope = json.loads(tool["content"])
         self.assertTrue(envelope["success"])
-        self.assertEqual(envelope["data"], case.evidence.model_dump(mode="json"))
+        projection = json.loads(followup[-1]["content"])
+        self.assertEqual(projection["candidate_count"], 1)
+        self.assertEqual(projection["candidates"][0]["title"], case.evidence.evidence[0].title)
+        self.assertNotIn("evidence", envelope["data"])
         case.handoff.assert_called_once()
         context, result = case.handoff.call_args.args
         self.assertEqual(context, FEED_CONTEXT)
@@ -263,7 +266,10 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         self.assertEqual(result.execution.total_tool_calls, 1)
         self.assertEqual(result.execution.errors, [])
         self.assertIsInstance(result.output, FeedAnswerV2)
-        self.assertEqual(result.output.model_dump(mode="json"), self.final_payload())
+        self.assertEqual(result.output.model_dump(mode="json"), {
+            "schema_version": "2", "response_type": "feed", "items": [{
+                "source_ref": {"tool_call_id": "call_sdk_opaque_feed", "evidence_index": 0},
+                "personal_reason": "Synthetic care relevance", "category": "care"}]})
         self.assertIsNone(result.execution.final_answer)
         self.assertEqual(result.sources[0].source_ref, result.output.items[0].source_ref)
         self.assertEqual(result.sources[0].pmid, case.evidence.evidence[0].pmid)
@@ -278,13 +284,13 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         for change in ("missing_call", "out_of_range", "v1", "headline", "summary_bullets"):
             payload = self.final_payload()
             if change == "missing_call":
-                payload["items"][0]["source_ref"]["tool_call_id"] = "missing"
+                payload["decisions"][0]["tool_call_id"] = "missing"
             elif change == "out_of_range":
-                payload["items"][0]["source_ref"]["evidence_index"] = 1
+                payload["decisions"][0]["evidence_index"] = 1
             elif change == "v1":
                 payload["schema_version"] = "1"
             else:
-                payload["items"][0][change] = ["Retired summary"] if change == "summary_bullets" else "Retired title"
+                payload["decisions"][0][change] = ["Retired summary"] if change == "summary_bullets" else "Retired title"
             invalid.append(json.dumps(payload))
         for final_text in invalid:
             with self.subTest(final_text=final_text):
@@ -295,7 +301,8 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
                 self.assertEqual(len(case.requests), 2)
                 result = case.results[0]
                 self.assertEqual(result.execution.status, "invalid_response")
-                self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
+                self.assertEqual(result.execution.errors[-1].code,
+                                 "invalid_feed_json" if final_text == "{invalid JSON" else "invalid_feed_decision")
                 self.assertIsNone(result.output)
                 self.assertEqual(result.sources, [])
                 case.retriever.search_evidence.assert_called_once()
@@ -307,12 +314,12 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
             case.workflow.run(FEED_CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
         self.assertEqual(len(case.requests), 2)
-        envelope = json.loads(case.requests[1]["messages"][-1]["content"])
+        envelope = json.loads(next(m["content"] for m in case.requests[1]["messages"] if m["role"] == "tool"))
         self.assertFalse(envelope["success"])
         self.assertEqual(envelope["error"]["code"], "invalid_arguments")
         result = case.results[0]
         self.assertEqual(result.execution.status, "invalid_response")
-        self.assertEqual(result.execution.errors[-1].code, "invalid_structured_output")
+        self.assertEqual(result.execution.errors[-1].code, "candidate_count_mismatch")
         self.assertIsNone(result.output)
         self.assertEqual(result.sources, [])
         case.retriever.search_evidence.assert_not_called()

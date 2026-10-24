@@ -28,7 +28,7 @@ Feed에서는 search_evidence만 사용한다. 연구 검색에 적합한 일반
 총 Tool Call budget은 최대 3회다. 한 turn의 여러 call도 이 총량에 포함된다.
 3번째 Tool 결과를 받은 후 최종 답변은 허용되며 4번째 Tool Call은 실행되지 않는다.
 검색 요청의 top_k는 5를 사용한다. 이는 Prompt 정책이며 서버 강제를 보장하는 것은 아니다.
-검색 종료 후 FeedAnswerV2 structured output을 생성한다.
+검색 종료 후 최신 후보 순서대로 FeedDecisionDraft를 작성한다. 서버가 FeedAnswerV2 structured output을 생성한다.
 빈 검색 결과를 효과 없음/안전함/임상적 부재의 증거로 해석하지 않는다."""
 
 

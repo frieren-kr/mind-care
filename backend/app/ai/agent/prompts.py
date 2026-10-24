@@ -3,6 +3,7 @@ import json
 from typing import Protocol, Sequence
 
 from .outputs import FeedAnswerV2, FinalOutputModel
+from .feed_candidates import build_feed_decision_policy
 from .schemas import AgentContext, Message, ModelTurn, ToolOutcome
 from .tools.contracts import EvidencePackage, ToolResultEnvelope
 
@@ -19,6 +20,8 @@ Tool 오류나 근거 부족을 숨기지 않는다. 최종 답변은 공개 설
 
 def build_structured_output_policy(output_model: FinalOutputModel) -> Message:
     """서버가 선택한 출력 계약만 정책으로 추가. 검색 데이터는 포함하지 않는다."""
+    if output_model is FeedAnswerV2:
+        return build_feed_decision_policy()
     policy = """최종 답변은 아래 JSON Schema를 따르는 단일 JSON object로 반환한다.
 Tool 선택/추가 호출은 기존 방식으로 계속하고, Tool Call이 없는 마지막 text만 JSON으로 작성한다.
 markdown fence, 숨겨진 reasoning, UI 디자인, disclaimer, follow_up 필드는 만들지 않는다.
@@ -33,13 +36,6 @@ new_research와 guideline은 출처의 evidence_type대로 구분하며 임의 �
 Chat citation_refs가 비어 있어도 된다. answer에는 [1], [2] 같은 인용 번호를 생성하지 않는다.
 citation_refs만 출처 연결의 기준이며 Frontend는 서버가 해석한 sources를 별도 출처 영역에 표시한다.
 서버 참조 검증은 문장과 근거의 의학적 일치까지 보장하지 않는다.
-"""
-    if output_model is FeedAnswerV2:
-        policy += """Feed의 personal_reason은 실제 제공된 개인화 Context와 검색 근거에 기반한다.
-Cold Start(개인화 정보 없음)에서도 일반 치매·인지건강·간병 연구 뉴스를 탐색하고 생성할 수 있다.
-개인화 정보가 없으면 검색 근거의 일반적인 정보적 관련성을 설명하고 사용자/환자 사실을 만들지 않는다.
-개인화 정보가 비어 있다는 이유만으로 items=[]를 강제하지 않는다.
-적절한 검색 근거가 없거나 출력 계약을 충족할 수 없으면 items=[]. 모든 item은 유효한 검색 Evidence를 인용한다.
 """
     return Message(role="system", kind="policy", content=policy + json.dumps(
         output_model.model_json_schema(), ensure_ascii=False, allow_nan=False))
