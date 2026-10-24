@@ -286,10 +286,10 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         for method, generations in (("message", 1), ("add", 1), ("finalize", 2)):
             release, finished = Event(), Event()
             original = getattr(FeedCandidates, method)
-            def blocked(instance, *args):
+            def blocked(instance, *args, **kwargs):
                 try:
                     release.wait(3)
-                    return original(instance, *args)
+                    return original(instance, *args, **kwargs)
                 finally:
                     finished.set()
             with self.subTest(method=method), patch.object(FeedCandidates, method, blocked):

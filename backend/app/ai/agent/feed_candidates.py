@@ -168,7 +168,7 @@ class FeedCandidates:
         eligible = {candidate.evidence.pmid for topic in topics for candidate in topic}
         self._pools, self._items, self._pmids = pools, selected, eligible
 
-    def message(self, remaining: int = 3) -> Message:
+    def message(self, remaining: int = 3, *, model_tool_calls: int | None = None) -> Message:
         # One latest projection is appended to the current request, never history.
         # Field removal is not a free-text PII sanitizer. All excerpts remain untrusted.
         rows = []
@@ -186,6 +186,7 @@ class FeedCandidates:
                 "search_calls_used": self.successful_searches + self.failed_searches,
                 "search_calls_remaining": remaining,
                 "successful_searches": self.successful_searches, "failed_searches": self.failed_searches,
+                **({'model_tool_calls_used': model_tool_calls} if model_tool_calls is not None else {}),
             },
             "candidate_status": ("not_searched" if not (self.successful_searches + self.failed_searches)
                                  else "available" if rows else "empty"),

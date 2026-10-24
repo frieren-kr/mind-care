@@ -50,7 +50,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
                 self.assertEqual(state["search_progress"], {
                     "phase": "exhausted" if calls == 3 else "evaluating",
                     "search_calls_used": calls, "search_calls_remaining": 3-calls,
-                    "successful_searches": calls, "failed_searches": 0})
+                    "successful_searches": calls, "failed_searches": 0, "model_tool_calls_used": calls})
                 self.assertEqual(state["last_search"]["returned_evidence_count"], len(pmids))
                 self.assertEqual(state["last_search"]["new_eligible_candidate_count"],
                                  1 if pmids == ["A"] and calls == 1 else 0)

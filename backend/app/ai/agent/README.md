@@ -1509,8 +1509,8 @@ MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·
 ToolSpec은 기본 parallel_safe=False이며 build_evidence_registry의 검색만 명시적으로 True다.
 독립적인 검색에만 이 정책을 부여해야 한다. 기존 Chat 동작/Tool 계약은 바꾸지 않는다.
 
-Feed는 모든 검색 입력을 실행 전에 검증한다. 검색어당 top_k 기본값/상한은 8이며,
-요청 전체 조회 예산은 24편이다. 명시적으로 요청한 1~8은 보존하고 8 초과는 전체 묶음 실행 전에 거부한다.
+Feed는 모든 검색 입력을 실행 전에 검증한다. 정본 배열 입력의 검색어당 top_k는 서버가 8로 고정하며,
+요청 전체 조회 예산은 24편이다. 기존 단일 query 호환 입력에서만 명시한 1~8을 보존하고 8 초과를 거부한다.
 1/2/3개 검색은 각각 최대 8/16/24편을 확보한다. 예전 묶음별 조회량 배분은 사용하지 않는다.
 Query/ID는 보존하고 Executor 인자 사본에만 기본값을 넣는다. 공용 Tool/Chat의 기본값 5와 1~20 계약은 유지한다.
 검색량 예산은 후속 turn에도 누적하며 Tool Call/round 상한은 각각 3회다. 반환량이 요청량을 넘으면 실패한다.
@@ -1589,3 +1589,41 @@ Feed 조기 종료에서는 완료 결과를 실제 도착 순서로 검증한�
 Trace는 종료 시점까지 관측된 완료만 요청 순서로 보존한다. 진행 중/미실행 호출의 Trace를 만들지 않는다.
 늦은 결과는 Agent 상태·후보·메시지에 반영하지 않고, 슬롯은 해당 워커/Handler 종료 시 finally에서 반환한다.
 Python 실행 중인 Handler는 강제 중단하지 않으며 Chat의 recoverable/기본 순차 정책은 그대로다.
+
+### Feed queries 배열 입력과 내부 검색 분배
+
+Feed의 search_evidence는 Provider에 queries 문자열 배열(1~3개)만 노출한다.
+Chat/Registry/Executor의 정본 search_evidence(query, top_k)는 그대로다. Feed 요청 시 Tool definition 사본의
+입력 스키마만 교체하고, 배열 항목을 기존 단일 검색 Executor 호출로 변환한다. Handler/RAG/DB는 바꾸지 않는다.
+전체 최소화된 Context에서 주제·검색어·개수를 결정하는 주체는 기존 LLM이며, 서버의 정적 주제 선정,
+추가 Context 정제, 별도의 Planner LLM 또는 Workflow는 없다. 검색어당 8편, 실제 검색 시도 최대 3회/24편,
+Tool round 최대 3회다. 첫 배열이 2개면 후속 검색은 1개만 가능하고, 3개면 다음 모델 호출은 최종 판단만 한다.
+
+배열 검증은 엄격한 문자열/길이 1~2000/항목 수 1~3/비공백/중복을 검사한다. 중복 비교에만 공백 축약과
+casefold를 사용하며, 유효 검색어 원문은 수정하지 않는다. 요청 전체에서 이미 검색한 동일 검색어도 거부한다.
+항목 내부 줄바꿈/세미콜론은 거부하고 별도 배열 항목을 요구한다. 일반 쉼표로는 분리하지 않는다.
+기존 query/top_k 입력은 이전 호출자를 위한 서버 호환 경로로만 남고 새 Feed Schema에 노출하지 않는다.
+배열과 레거시 필드를 섞거나 잘못된 queries를 보내면 호환 경로로 fallback하지 않고 실패한다.
+
+"dementia wandering nighttime agitation fall prevention day care programs"처럼 구분자 없이 합친 항목의
+의미적 주제 수는 문자열 검증만으로 확인할 수 없다. 형식 통과는 독립 주제 분리 성공을 뜻하지 않는다.
+이를 한 검색으로 실행·집계하며 자동 분리/고정 query 생성/재계획 LLM은 하지 않는다. 모델이 결과를 본 뒤
+문제를 인식하면 기존 잔여 예산 안에서 후속 queries를 선택할 수 있다. 실제 모델의 분리 능력은 별도 검증 대상이다.
+
+Provider 배치 Call ID와 서버 내부 feed-rag:<turn>:<call>:<query-index> ID를 구분한다.
+내부 ID는 이미 사용한 출처 ID 및 실제 Provider ID와 충돌하지 않게 생성한다. EvidencePackage는 검색별
+원본 index 그대로 별도 저장하고 기존 Resolver/FeedCandidates에 전달한다. 응답 source_ref는 이 서버 출처 ID를 쓴다.
+Provider 메시지에는 내부 Call을 assistant Tool Call로 추가하지 않는다. 실제 배치 Call ID 하나당 응답도 하나이며,
+서버가 만든 query_index/returned_evidence_count만 포함한 작은 acknowledgment를 전달한다. 원본 Evidence는 서버에 남긴다.
+
+AgentResult.total_tool_calls와 Trace는 실제 단일 검색 Executor 진입 시도 기준이다. 미시작 호출은 세지 않으며
+Handler admission 이전 timeout에서는 DB/RAG 실제 진입까지 보장하는 수치가 아니다. 모델이 요청한 Call은
+원래 assistant 메시지에서 별도 확인하고, 성공 후 LLM search_progress.model_tool_calls_used에 승인된 모델 Call 수를
+전달한다. search_calls_used/remaining은 검색 횟수다. 예: 모델 배치 1개/queries 3개 → 모델 Call 1, 검색 시도 3,
+검색 round 1, 정상 LLM 호출 2회. 외부 FeedAnswerV2/Backend 응답 DTO에 진단 필드를 추가하지 않는다.
+
+내부 검색은 기존 병렬 admission/fail-fast/timeout/deadline/late-result 격리를 재사용한다. 모든 내부 검색 성공과
+원본 검증 후에만 전체 묶음을 원자적으로 반영한다. 부분 Evidence/후속 Provider 응답은 실패 시 발행하지 않는다.
+공유 Retriever가 parallel_safe=False인 경우 기존 순차 실행 안전 설정을 존중한다. Chat 기본 순차 정책은 유지한다.
+FakeLLM 및 실제 SDK+MockTransport는 배열 계약·분배·프로토콜만 검증한다. 실제 LLM이 배회·실종/낙상/야간 흥분을
+독립 배열 항목으로 생성하는지, 실제 RAG 반환/등급 분포·추천 수·LLM 호출 수·지연은 서버 통합 테스트에서 측정해야 한다.

@@ -178,7 +178,7 @@ class IterativeResearchTests(unittest.TestCase):
 
     def test_fourth_tool_call_is_not_executed(self):
         execution, client, searches = research_runner([
-            ModelTurn(tool_calls=[search_call(f"search_{i}")]) for i in range(1, 5)])
+            ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}")]) for i in range(1, 5)])
         result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")
         self.assertEqual(result.execution.total_tool_calls, 3)
@@ -197,10 +197,10 @@ class IterativeResearchTests(unittest.TestCase):
                     calls = []
                     for _ in range(batch):
                         identifier += 1
-                        calls.append(search_call(f"search_{identifier}"))
+                        calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}"))
                     turns.append(ModelTurn(tool_calls=calls))
                 if status == "completed":
-                    turns.append(final_turn())  # Same query/PMID is one stable candidate.
+                    turns.append(final_turn(count=count))
                 execution, _, searches = research_runner(turns)
                 result = execution(CONTEXT, prepared_input())
                 self.assertEqual(result.execution.status, status)

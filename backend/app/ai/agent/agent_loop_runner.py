@@ -7,8 +7,9 @@ from typing import cast
 from ._execution import RequestTimeout, ParallelStopped, bounded_call, bounded_parallel, check_deadline, positive_seconds, request_deadline
 from .clients.base import LLMClient, GenerationOptions, generate_with_options
 from .executor import ToolExecutor
-from .feed_search_policy import MAX_FEED_RETRIEVAL, bounded_feed_searches
-from .feed_candidates import FeedCandidates, FeedDecisionError, minimize_feed_tool_messages
+from .feed_search_policy import (MAX_FEED_RETRIEVAL, FeedSearchBudgetExceeded,
+                                 feed_tool_definitions, prepare_feed_searches)
+from .feed_candidates import FeedCandidates, FeedDecisionError
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
@@ -100,6 +101,8 @@ class AgentLoopRunner:
         evidence_by_call: dict[str, EvidencePackage] = {}
         feed_candidates = FeedCandidates() if output_model is FeedAnswerV2 else None
         feed_retrieval_used = 0
+        feed_model_calls = 0
+        feed_query_keys: set[str] = set()
         structured_output: ChatAnswerV1 | FeedAnswerV2 | None = None
         sources: list[ResolvedEvidence] = []
         seen_ids: set[str] = set()
@@ -149,7 +152,7 @@ class AgentLoopRunner:
                 messages = state.messages + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
                 if feed_candidates is not None:
-                    remaining = min(self.max_total_tool_calls - state.total_tool_calls,
+                    remaining = min(min(3, self.max_total_tool_calls) - state.total_tool_calls,
                                     self.max_tool_rounds - state.tool_round)
                     if feed_candidates.successful_searches:
                         # Feed evaluation policy/projection belong to this request only,
@@ -158,9 +161,12 @@ class AgentLoopRunner:
                                               if message.role == "user"), len(messages))
                         messages.insert(user_position, bounded_call(
                             lambda: build_structured_output_policy(output_model)))
-                        messages.append(bounded_call(lambda: feed_candidates.message(remaining)))
+                        messages.append(bounded_call(lambda: feed_candidates.message(
+                            remaining, model_tool_calls=feed_model_calls)))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
+                if feed_candidates is not None:
+                    definitions = bounded_call(lambda: feed_tool_definitions(definitions))
                 try:
                     if feed_candidates is not None:
                         options = GenerationOptions(
@@ -227,13 +233,23 @@ class AgentLoopRunner:
                 calls = turn.tool_calls
                 if feed_candidates is not None:
                     try:
-                        calls = bounded_call(lambda: bounded_feed_searches(
-                            calls, remaining_budget=MAX_FEED_RETRIEVAL - feed_retrieval_used))
+                        search_plan = bounded_call(lambda: prepare_feed_searches(
+                            calls, turn=state.tool_round + 1,
+                            remaining_calls=min(3, self.max_total_tool_calls) - state.total_tool_calls,
+                            remaining_budget=MAX_FEED_RETRIEVAL - feed_retrieval_used,
+                            previous_queries=feed_query_keys,
+                            reserved_ids=seen_ids | set(evidence_by_call)))
+                        calls = search_plan.searches
+                    except FeedSearchBudgetExceeded:
+                        state.errors.append(AgentError(code='tool_limit', message='Feed 실제 검색 예산을 초과했습니다.'))
+                        return finish('limit_reached')
                     except (ValueError, TypeError):
                         state.errors.append(AgentError(code="invalid_arguments",
                             message="Feed 검색 입력 또는 검색량이 계약과 일치하지 않습니다."))
                         return finish("failed")
                     feed_retrieval_used += sum(call.arguments["top_k"] for call in calls)
+                    feed_model_calls += len(turn.tool_calls)
+                    feed_query_keys.update(search_plan.query_keys)
                 seen_ids.update(ids)
                 state.tool_round += 1
                 stage = "executor_error"
@@ -266,7 +282,9 @@ class AgentLoopRunner:
                     for call_id, package in packages:
                         evidence.append(package)
                         evidence_by_call[call_id] = package.model_copy(deep=True)
-                    outcomes = [outcome for _, outcome, _ in results]
+                    # Exactly one Tool response per REAL Provider call, even
+                    # when that call fanned out to multiple server searches.
+                    outcomes = search_plan.provider_outcomes(dict(packages))
                 else:
                     # Default Chat/legacy mode still validates and commits each
                     # sequential call before starting the next dependent call.
@@ -287,8 +305,6 @@ class AgentLoopRunner:
                         stage = "executor_error"
                 stage = "prompt_builder_error"
                 followup = bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes))
-                if feed_candidates is not None:
-                    followup = bounded_call(lambda: minimize_feed_tool_messages(followup, outcomes))
                 state.messages.extend(followup)
         except RequestTimeout:
             state.final_answer = None

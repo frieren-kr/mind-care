@@ -158,7 +158,7 @@ class SearchEvidenceIntegrationTests(TestCase):
 
     def test_feed_budget_is_owned_by_existing_execution_not_handler(self):
         search = Mock(return_value=package())
-        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}")]) for i in range(1, 5)]
+        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}")]) for i in range(1, 5)]
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")

@@ -38,8 +38,16 @@ Feed에서는 search_evidence만 사용한다. 첫 검색을 반드시 실행한
 모든 증상마다 논문 1편을 강제하지 않는다. 직접 근거가 부족하면 관련 없는 연구로 빈자리를 채우지 않는다.
 사용자마다 실제로 다른 신호에 맞춰 주제와 query를 바꾼다. 일반적인 dementia/caregiver query만 반복하지 않는다.
 여러 사용자에게 모두 유익한 같은 논문은 허용하며 사용자 간 이력 조회나 전역 중복 제거는 하지 않는다.
-첫 턴에 중요도 순서로 1~3개 search_evidence call을 생성할 수 있다. 주제가 1개면 1개만 요청한다.
-top_k는 검색어당 기본 8, 최대 8이다. 요청 전체 조회 예산은 최대 24편이며 큰 top_k는 거부한다.
+전체 최소화된 개인화 Context를 해석해 첫 search_evidence Tool Call의 arguments에 queries 배열을 작성한다.
+중요도 순서로 독립 연구 목적 1~3개를 각각 별도 배열 항목으로 작성한다. 단일 주제면 1개만 요청한다.
+배회·낙상·야간 흥분처럼 다른 연구 목적을 한 문자열에 합치지 않는다. 동의어와 밀접한 하위 개념은 묶을 수 있다.
+잘못된 예: {"queries":["dementia wandering nighttime agitation fall prevention day care programs"]}
+올바른 예: {"queries":["wandering prevention in people with dementia", "fall prevention in people with dementia", "nighttime agitation management in dementia"]}
+예시 검색어는 형식 예시이며 실제 주제/개수는 Context에 따라 직접 결정한다. 예시를 고정 검색어로 복사하지 않는다.
+별도 JSON text/Planner 호출 없이 Tool arguments 자체로 전달한다. query/top_k 필드는 Feed 배열 계약에 넣지 않는다.
+검색어당 top_k는 서버가 8로 고정한다. 요청 전체 실제 RAG 검색은 최대 3회, 조회 예산은 최대 24편이다.
+한 Tool Call의 queries 3개는 실제 검색 3회를 사용한다. search_calls_remaining은 실제 검색 잔여 예산이다.
+후속 검색도 남은 예산 안의 queries 배열로 요청한다. 이미 검색한 동일 query를 반복하지 않는다.
 서버는 연구 유형을 검토하고 주제별 검색 순위와 커버리지를 살려 중복을 제거한 최신 후보 최대 5편만 제공한다.
 이미 충분하면 즉시 판단한다. 미탐색 핵심 주제와 관련 후보 부족이 확인되고 남은 예산이 있을 때만 후속 검색한다.
 사소한 query 표현 변경으로 반복하지 않는다. 후보가 5편이라는 사실만으로 충분함을 단정하지 않는다.

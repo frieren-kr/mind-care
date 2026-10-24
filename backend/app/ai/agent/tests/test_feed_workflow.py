@@ -139,7 +139,7 @@ class FeedWorkflowTests(unittest.TestCase):
                 calls = []
                 for _ in range(batch):
                     identifier += 1
-                    calls.append(search_call(f"search_{identifier}"))
+                    calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}"))
                 turns.append(ModelTurn(tool_calls=calls))
             deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn()])
             self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)

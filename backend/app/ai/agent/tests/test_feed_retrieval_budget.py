@@ -108,8 +108,8 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
             return package([f'{args.query}-{i}' for i in range(args.top_k)])
         client = FakeLLMClient(turns)
         result = AgentLoopRunner(client, registry(handler)).run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
-        self.assertEqual(result.execution.status, 'failed')
-        self.assertEqual(result.execution.errors[-1].code, 'invalid_arguments')
+        self.assertEqual(result.execution.status, 'limit_reached')
+        self.assertEqual(result.execution.errors[-1].code, 'tool_limit')
         self.assertEqual(searched, [8, 8, 8])
 
     def test_oversized_retriever_return_fails_atomically_before_candidate_publish(self):
