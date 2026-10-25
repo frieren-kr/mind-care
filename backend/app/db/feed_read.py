@@ -32,6 +32,8 @@ from app.feed_schemas import (
     DEFAULT_CAPS,
     MAX_MANAGED_PATIENTS,
     MEDICATION_STOPPED_WITHIN_DAYS,
+    RECENT_FEED_LIMIT,
+    RECENT_FEED_WINDOW_DAYS,
     SAFETY_WINDOW_DAYS,
     VISIT_FUTURE_WINDOW_DAYS,
     VISIT_PAST_WINDOW_DAYS,
@@ -285,6 +287,25 @@ _LONG_TERM_SUMMARY = """
 """
 
 
+# 기간은 (reference_time - days, reference_time]. 미래 시각의 행은 빠진다.
+# get_feed_context_snapshot()과 get_recent_feed_papers()가 같이 쓴다.
+_RECENT_FEED_PAPERS = """
+    SELECT p.id AS paper_id,
+           CASE WHEN p.source = 'pubmed' THEN p.external_id END AS pmid,
+           p.title,
+           max(f.created_at) AS last_recommended_at,
+           count(*) AS times_recommended
+      FROM feed_items AS f
+      JOIN papers AS p ON p.id = f.paper_id
+     WHERE f.user_id = %(user_id)s
+       AND f.created_at >  %(since)s
+       AND f.created_at <= %(reference_time)s
+     GROUP BY p.id
+     ORDER BY last_recommended_at DESC, p.id
+     LIMIT %(limit)s
+"""
+
+
 # ============================================================
 # 일괄 조회
 # ============================================================
@@ -435,6 +456,15 @@ def get_feed_context_snapshot(
                                                  "reference_date": reference_date,
                                                  "reference_time": reference_time})
                 summary_row = cur.fetchone()
+
+                # 10) 최근 추천 이력 — 같은 reference_time 기준
+                cur.execute(_RECENT_FEED_PAPERS, {
+                    "user_id": user_id,
+                    "since": reference_time - timedelta(days=RECENT_FEED_WINDOW_DAYS),
+                    "reference_time": reference_time,
+                    "limit": RECENT_FEED_LIMIT,
+                })
+                recent_rows = cur.fetchall()
     except (ValueError, FeedUserNotFound, FeedPatientLimitExceeded):
         raise
     except psycopg.Error as err:
@@ -479,6 +509,7 @@ def get_feed_context_snapshot(
             long_term_summary=(
                 None if summary_row is None else FeedReadLongTermSummary(**summary_row)
             ),
+            recently_recommended=[FeedRecentPaper(**r) for r in recent_rows],
         )
     except ValidationError as err:
         raise FeedReadError(
@@ -486,9 +517,9 @@ def get_feed_context_snapshot(
         ) from err
 
     logger.info(
-        "get_feed_context_snapshot: user_id=%s 환자 %d명, 돌봄기록 %d/%d건, 요약 %s",
+        "get_feed_context_snapshot: user_id=%s 환자 %d명, 돌봄기록 %d/%d건, 요약 %s, 최근 추천 %d편",
         user_id, len(patients), len(care_log_rows), care_log_total,
-        "있음" if summary_row else "없음",
+        "있음" if summary_row else "없음", len(recent_rows),
     )
     return snapshot
 
@@ -737,26 +768,12 @@ def get_latest_feed_batch(
     return FeedBatch(batch_id=batch_id, generated_at=generated_at, items=items)
 
 
-# 기간은 (reference_time - days, reference_time]. 미래 시각의 행은 빠진다.
-_RECENT_FEED_PAPERS = """
-    SELECT p.id AS paper_id,
-           CASE WHEN p.source = 'pubmed' THEN p.external_id END AS pmid,
-           p.title,
-           max(f.created_at) AS last_recommended_at,
-           count(*) AS times_recommended
-      FROM feed_items AS f
-      JOIN papers AS p ON p.id = f.paper_id
-     WHERE f.user_id = %(user_id)s
-       AND f.created_at >  %(since)s
-       AND f.created_at <= %(reference_time)s
-     GROUP BY p.id
-     ORDER BY last_recommended_at DESC, p.id
-     LIMIT %(limit)s
-"""
-
-
 def get_recent_feed_papers(
-    user_id: UUID, *, days: int = 30, limit: int = 50, reference_time: Optional[datetime] = None
+    user_id: UUID,
+    *,
+    days: int = RECENT_FEED_WINDOW_DAYS,
+    limit: int = RECENT_FEED_LIMIT,
+    reference_time: Optional[datetime] = None,
 ) -> list[FeedRecentPaper]:
     """최근 days일 안에 이 사용자에게 추천한 논문을 논문별로 묶어 돌려준다 (읽기 전용).
 

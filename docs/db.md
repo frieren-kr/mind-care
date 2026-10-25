@@ -262,6 +262,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   | 방문 | 지난 진료(`is_visited = true` AND `visit_date` ∈ `[reference_date - 365일, reference_date]`) **또는** 예정 진료(`is_visited = false` AND `visit_date` ∈ `[reference_date, reference_date + 90일]`) | `visit_date DESC, created_at DESC, id` | 환자당 20 |
   | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
   | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
+  | 최근 추천 (`recently_recommended`, 2026-10-26) | 이 사용자의 `feed_items.created_at` ∈ `(reference_time - 30일, reference_time]`, **논문별로 묶음**. `get_recent_feed_papers()`와 같은 SQL을 **같은 트랜잭션**에서 실행 | `last_recommended_at DESC, paper_id` | 50편 (`total_count` 없음, 없으면 `[]`) |
 - **안전 이벤트: 플래그가 전부 false인 날(= 확인했고 사건 없음)은 적격이 아니다** (`total_count`에도 안 들어간다).
 - **★ 조건 변경 (2026-10-13) — 진료·복약은 상태와 날짜가 맞는 기록만 적격이다.** 허웅 님
   `ProductionFeedContextSource`는 아래 조합이 하나라도 오면 **스냅샷 전체를 거부**한다. 그래서 조회와
