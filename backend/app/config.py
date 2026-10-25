@@ -19,9 +19,11 @@ class Settings(BaseSettings):
     # LLM / Embedding
     openai_api_key: str = ""
     gemini_api_key: str = ""
-    # 논문 요약 배치와 개인화 피드가 함께 쓰는 OpenAI 모델. 기본값은 두지 않는다.
-    # 비어 있으면 배치는 안내 후 중단하고, 피드는 검색 방식으로 응답한다.
+    # 논문 요약 배치용 OpenAI 모델. 비어 있으면 배치는 안내 후 중단한다.
     openai_summary_model: str = ""
+    # 개인화 피드용 모델(선택). 비어 있으면 openai_summary_model을 쓴다.
+    # 두 모델 모두 비어 있으면 피드는 검색 방식으로 응답한다.
+    openai_agent_model: str = ""
     # 요약 배치 전용 키(선택). 있으면 요약 배치는 이 키를 쓰고, 비어 있으면 openai_api_key를 쓴다.
     openai_summary_api_key: str = ""
     # 임베딩 모델은 bge-m3 / 1024차원으로 확정 (2026-10-01, AI 담당 김현서와 합의).
