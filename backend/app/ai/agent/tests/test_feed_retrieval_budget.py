@@ -12,7 +12,7 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceSearchInput
 from ..workflows.feed_execution import FeedExecutionV1
-from .test_feed_candidates import decisions, package
+from .test_feed_candidates import decisions, package, review_turn
 from . import test_parallel_feed as parallel
 from .test_parallel_feed import calls, registry
 from .test_workflows import CONTEXT
@@ -87,7 +87,8 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         turns = []
         for i in range(3):
             call = calls(1)[0].model_copy(update={'id': str(i), 'arguments': {'query': f'topic {i}'}})
-            turns.append(ModelTurn(tool_calls=[call]))
+            turn = ModelTurn(tool_calls=[call])
+            turns.append(review_turn(turn, i) if i else turn)
         turns.append(ModelTurn(text=json.dumps(decisions(5, range(5)))))
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, registry(
@@ -98,10 +99,10 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         self.assertEqual(client.options[-1].tool_choice, 'none')
 
     def test_retrieval_budget_cannot_reset_on_followup_even_with_larger_generic_runner_limits(self):
-        # Defense in depth: shared Runner defaults can exceed Feed's 3-call
-        # wrapper, but cannot make its Feed-only retrieval budget exceed 24.
+        # A generic Runner cannot exceed the Feed-specific three-round cap.
         turns = [ModelTurn(tool_calls=[ToolCall(id=str(i), name='search_evidence',
             arguments={'query': f'topic {i}'})]) for i in range(4)]
+        turns = [review_turn(turn, i) if i else turn for i, turn in enumerate(turns)]
         searched = []
         def handler(context, args):
             searched.append(args.top_k)

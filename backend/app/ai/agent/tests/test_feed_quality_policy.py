@@ -128,7 +128,7 @@ class FeedQualityPolicyTests(unittest.TestCase):
         self.assertEqual(projection['candidate_count'],2)
         self.assertNotIn('Protocol for a sleep intervention trial',str(projection['candidates']))
         self.assertNotIn('evidence_level',EvidenceItem.model_fields)
-        self.assertTrue(all(set(row)=={'title','study_type','derived_evidence_grade','evidence_excerpt'} for row in projection['candidates']))
+        self.assertTrue(all(set(row)=={'candidate_index','status','title','study_type','derived_evidence_grade','evidence_excerpt'} for row in projection['candidates']))
         policy=build_feed_decision_policy().content
         for term in ('other는 분류 미확인','프로토콜을 완료된 효과 검증 연구보다 우선하지 않는다','실제 DB evidence_level/화면 표시 등급이 아니며'):
             self.assertIn(term,policy)

@@ -72,7 +72,7 @@ class FeedGradePriorityTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 2)
         payload = json.loads(client.requests[1][0][-1].content)
         self.assertEqual([r['derived_evidence_grade'] for r in payload['candidates']], ['A', 'B', None])
-        self.assertTrue(all(set(row) == {'title', 'study_type', 'derived_evidence_grade', 'evidence_excerpt'}
+        self.assertTrue(all(set(row) == {'candidate_index', 'status', 'title', 'study_type', 'derived_evidence_grade', 'evidence_excerpt'}
                             for row in payload['candidates']))
         self.assertEqual([s.pmid for s in result.sources], ['review', 'trial', 'unknown'])
         self.assertTrue(all('derived_evidence_grade' not in i.model_dump() for i in result.output.items))

@@ -73,7 +73,7 @@ class SearchEvidenceIntegrationTests(TestCase):
         client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final_turn()])
         execution = FeedExecutionV1(client, self.registry(search))
         result = execution(self.context, prepared_input())
-        self.assertEqual((execution.runner.max_tool_rounds, execution.runner.max_total_tool_calls), (3, 3))
+        self.assertEqual((execution.runner.max_tool_rounds, execution.runner.max_total_tool_calls), (3, 9))
         self.assertEqual(result.execution.status, "completed")
         self.assertIsInstance(result.output, FeedAnswerV2)
         self.assertEqual(result.execution.errors, [])
@@ -158,7 +158,7 @@ class SearchEvidenceIntegrationTests(TestCase):
 
     def test_feed_budget_is_owned_by_existing_execution_not_handler(self):
         search = Mock(return_value=package())
-        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}")]) for i in range(1, 5)]
+        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}", revision=i-1)]) for i in range(1, 5)]
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")

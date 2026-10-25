@@ -7,20 +7,27 @@ from typing import Annotated
 from pydantic import Field, StrictStr, field_validator
 
 from .schemas import AgentModel, ToolCall, ToolOutcome
+from .feed_candidates import FeedReview
 from .outputs import _json_object, _reject_constant
 from .tools.contracts import EvidenceSearchInput
 
 FEED_SEARCH_TOP_K = 8
-MAX_FEED_RETRIEVAL = 24
+MAX_FEED_SEARCH_ROUNDS = 3
+MAX_FEED_SEARCHES_PER_ROUND = 3
+MAX_FEED_SEARCHES = 9
+MAX_FEED_RETRIEVAL = MAX_FEED_SEARCHES * FEED_SEARCH_TOP_K
 
 
 class FeedSearchInput(AgentModel):
+    review: FeedReview | None = Field(default=None, description=(
+        "후속 검색에는 최신 candidate_revision과 유지할 후보의 index/이유/category를 전달한다. "
+        "유지하지 않는 현재 후보는 검토 완료로 처리한다. 첫 검색에는 생략한다."))
     queries: list[Annotated[StrictStr, Field(min_length=1, max_length=2000)]] = Field(
         min_length=1, max_length=3, description=(
             "전체 최소화된 Context에서 LLM이 선택한 독립 연구 검색어 1~3개. "
             "연구 목적마다 별도 배열 항목을 작성한다. 간결한 영어 우선, 한국어도 허용. "
             "환자 증상은 환자 중심으로 표현하고 개인정보를 복사하지 않는다. "
-            "검색어당 서버 top_k=8; 요청 전체 실제 검색은 최대 3회다."))
+            "검색어당 서버 top_k=8; 라운드당 최대 3회, 3라운드/요청 전체 최대 9회다."))
 
     @field_validator('queries', mode='before')
     @classmethod
@@ -64,6 +71,7 @@ class FeedSearchPlan:
     # Every batch owns one REAL Provider call; searches own server-only IDs.
     batches: list[tuple[ToolCall, list[ToolCall]]]
     query_keys: set[str]
+    review: FeedReview | None = None
 
     @property
     def searches(self) -> list[ToolCall]:
@@ -81,7 +89,7 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
                           remaining_budget: int, previous_queries: set[str],
                           reserved_ids: set[str]) -> FeedSearchPlan:
     """Validate the WHOLE model turn before admission; never infer topics."""
-    batches, keys = [], set()
+    batches, keys, reviews = [], set(), []
     occupied = reserved_ids | {call.id for call in calls}
     for call_index, call in enumerate(calls):
         if call.name != 'search_evidence':
@@ -93,7 +101,10 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
         else:
             raw = call.arguments
         if isinstance(raw, dict) and 'queries' in raw:
-            queries = FeedSearchInput.model_validate(raw).queries
+            parsed = FeedSearchInput.model_validate(raw)
+            queries = parsed.queries
+            if parsed.review is not None:
+                reviews.append(parsed.review)
             searches = []
             for index, query in enumerate(queries):
                 identifier = f'feed-rag:{turn}:{call_index}:{index}'
@@ -107,6 +118,11 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
             # in the Feed schema. Never split their query on commas/delimiters.
             if call.id in reserved_ids:
                 raise ValueError('Feed source ID already used')
+            if isinstance(raw, dict):
+                raw = dict(raw)
+                review = raw.pop('review', None)
+                if review is not None:
+                    reviews.append(FeedReview.model_validate(review))
             searches = bounded_feed_searches([call.model_copy(update={'arguments': raw})])
         for search in searches:
             key = query_key(search.arguments['query'])
@@ -114,8 +130,11 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
                 raise ValueError('Feed query already searched')
             keys.add(key)
         batches.append((call, searches))
-    plan = FeedSearchPlan(batches, keys)
-    if (len(plan.searches) > remaining_calls or
+    if reviews and any(review != reviews[0] for review in reviews):
+        raise ValueError("Conflicting Feed reviews in one model turn")
+    plan = FeedSearchPlan(batches, keys, reviews[0] if reviews else None)
+    if (not 1 <= len(plan.searches) <= MAX_FEED_SEARCHES_PER_ROUND
+            or len(plan.searches) > remaining_calls or
             sum(s.arguments['top_k'] for s in plan.searches) > remaining_budget):
         raise FeedSearchBudgetExceeded('Feed actual search budget exceeded')
     return plan
@@ -123,7 +142,7 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
 
 def bounded_feed_searches(calls: list[ToolCall], *, remaining_budget: int = MAX_FEED_RETRIEVAL
                           ) -> list[ToolCall]:
-    """Validate the entire turn before I/O: <=8 per search, <=24 per request.
+    """Validate the entire turn before I/O: <=8 per search, <=72 per request (<=24 per round).
 
     Query text/Call IDs are preserved. Original assistant messages retain the
     requested arguments; Executor-bound copies supply the Feed-only default 8.

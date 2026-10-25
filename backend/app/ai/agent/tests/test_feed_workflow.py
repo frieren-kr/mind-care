@@ -76,7 +76,7 @@ class FeedWorkflowTests(unittest.TestCase):
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidate_count"], 1)
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep orchestration fixture")
-                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research")]))
+                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research", revision=1, retain=(0,))]))
                 elif len(self.requests) == 2:
                     test.assertEqual([m.tool_call_id for m in messages if m.role == "tool"],
                                      ["search_1", "search_2"])
@@ -135,11 +135,12 @@ class FeedWorkflowTests(unittest.TestCase):
     def test_three_calls_allow_final_after_third_result(self):
         for batches in ((1, 1, 1), (3,)):
             turns, identifier = [], 0
-            for batch in batches:
+            for revision, batch in enumerate(batches):
                 calls = []
                 for _ in range(batch):
                     identifier += 1
-                    calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}"))
+                    calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}",
+                                             revision=revision, retain=(0,)))
                 turns.append(ModelTurn(tool_calls=calls))
             deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn()])
             self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)

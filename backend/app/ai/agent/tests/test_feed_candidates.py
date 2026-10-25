@@ -27,6 +27,16 @@ def decisions(count, selected=()):
                           if i in selected else {"include": False} for i in range(count)]}
 
 
+def review_turn(turn, revision, retain=()):
+    turn = turn.model_copy(deep=True)
+    raw = turn.tool_calls[0].arguments
+    raw = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    raw['review'] = {'candidate_revision': revision, 'retain': [
+        {'candidate_index': i, 'personal_reason': f'Retained reason {i}', 'category': 'care'} for i in retain]}
+    turn.tool_calls[0].arguments = raw
+    return turn
+
+
 class FeedCandidateContractTests(unittest.TestCase):
     def table(self, pmids=("A", "B", "C")):
         table = FeedCandidates()
@@ -123,7 +133,7 @@ class FeedCandidateContractTests(unittest.TestCase):
         value = json.loads(message.content)
         self.assertEqual(value["context_type"], "untrusted_feed_candidates")
         row = value["candidates"][0]
-        self.assertEqual(set(row), {"title", "study_type", "derived_evidence_grade", "evidence_excerpt"})
+        self.assertEqual(set(row), {"candidate_index", "status", "title", "study_type", "derived_evidence_grade", "evidence_excerpt"})
         self.assertEqual(tuple(len(row[k]) for k in ('title', 'study_type', 'evidence_excerpt')), (300, 80, 1200))
         self.assertIsNone(row['derived_evidence_grade'])
         for private in ("PRIVATE_PMID", "PRIVATE_CALL_ID", "PRIVATE_DOI", "PRIVATE_ABSTRACT"):
@@ -231,7 +241,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertNotIn('"evidence"', tools[0].content)
 
     def test_three_searches_have_one_latest_rebalanced_candidate_list(self):
-        turns = [self.search(str(i), str(i)) for i in range(3)]
+        turns = [review_turn(self.search(str(i), str(i)), i) if i else self.search(str(i), str(i)) for i in range(3)]
         turns.append(ModelTurn(text=json.dumps(decisions(5, (0, 1, 2)))))
         packages = {str(i): package([str(i * 5 + j) for j in range(5)]) for i in range(3)}
         result, client, _ = self.run_feed(turns, packages)
@@ -244,7 +254,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
             if count == 0:
                 continue
             self.assertEqual(projections[0]["candidate_count"], 5)
-            ranks = ([0, 1, 2, 3, 4], [0, 0, 1, 1, 2], [0, 0, 0, 1, 1])[count - 1]
+            ranks = [0, 1, 2, 3, 4]  # Each prior five was reviewed and excluded.
             self.assertEqual([row["title"] for row in projections[0]["candidates"]],
                              [f"Synthetic paper {rank}" for rank in ranks])
 

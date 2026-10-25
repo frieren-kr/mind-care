@@ -236,7 +236,7 @@ class ParallelFeedTests(unittest.TestCase):
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(len(wire), 2)
         self.assertEqual(wire[0]['tool_choice'], 'required')
-        self.assertEqual(wire[1]['tool_choice'], 'none')
+        self.assertEqual(wire[1]['tool_choice'], 'auto')
         self.assertTrue(all(w['parallel_tool_calls'] and w['reasoning_effort']=='none' for w in wire))
         self.assertEqual(sorted(top_k), [('topic 0',8),('topic 1',8),('topic 2',8)])
         self.assertNotIn('FeedDecisionDraft', str(wire[0]['messages']))
