@@ -101,6 +101,24 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 | `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
 | `save_feed_batch(user_id, items: list[FeedItemIn])` | AI 피드 한 묶음 (`paper_id, personal_reason?, category?, relevance_score?`). 목록 순서대로 `rank` 1부터. **트랜잭션 하나** — 없는 사용자·논문이 있으면 `ValueError`, 아무것도 저장 안 됨. 빈 목록도 `ValueError` | `SavedFeedBatch(batch_id, generated_at)` |
 | `get_latest_feed_batch(user_id, *, max_age: timedelta, reference_time)` | `reference_time`은 **tz-aware**. `created_at > reference_time - max_age`인 가장 최근 묶음 | `FeedBatch(batch_id, generated_at, items)` — items는 `rank` 순, 항목마다 `personal_reason, category, relevance_score, is_saved, paper: PaperDetailResponse`. 없으면 `None` |
+| `get_recent_feed_papers(user_id, *, days=30, limit=50, reference_time=None)` | 읽기 전용. 기간은 `(reference_time - days, reference_time]` — 미래 시각의 행은 빠진다. `reference_time`은 **tz-aware**, `None`이면 지금. `days`·`limit`은 1 이상 정수(아니면 `ValueError`) | `list[FeedRecentPaper(paper_id, pmid?, title, last_recommended_at, times_recommended)]` — **논문별로 묶음**(같은 논문이 여러 묶음에 있어도 1개), 최근 추천 순, 최대 `limit`개. `pmid`는 `source='pubmed'`일 때만 값(아니면 `None`). 이력 없음·없는 사용자는 `[]` |
+
+**`get_recent_feed_papers()` 사용 예시** (Feed Agent가 같은 논문을 반복 추천하지 않게):
+
+```python
+from app.db.feed_read import get_recent_feed_papers
+
+recent = get_recent_feed_papers(user_id, days=30, reference_time=reference_time)  # 피드와 같은 기준 시각
+
+# (a) Agent 입력(1단계 context)에 넣는다 — LLM이 "이미 추천한 논문"을 알게
+context["recently_recommended"] = [
+    {"pmid": r.pmid, "title": r.title, "times_recommended": r.times_recommended} for r in recent
+]
+
+# (b) 후보를 고를 때 pmid로 뺀다 — LLM에 맡기지 않고 코드로 확실히
+seen = {r.pmid for r in recent if r.pmid}
+candidates = [c for c in candidates if c.pmid not in seen]
+```
 
 스키마 (요약) — **모든 id는 `UUID`**:
 - **PaperIn** (`papers` 입력): `source, external_id, title, abstract?, published_date?, url?, journal?, doi?, publication_types, mesh_terms` — `id`/`collected_at`은 DB가 채운다.

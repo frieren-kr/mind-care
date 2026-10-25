@@ -251,3 +251,13 @@ class FeedBatch(BaseModel):
     batch_id: UUID
     generated_at: AwareDatetime
     items: list[FeedBatchItem]
+
+
+class FeedRecentPaper(BaseModel):
+    """get_recent_feed_papers() 항목 1개 = 최근 이 사용자에게 추천한 논문 1편 (논문별로 묶음)."""
+
+    paper_id: UUID
+    pmid: Optional[str] = Field(description="papers.external_id (source='pubmed'일 때만, 아니면 None)")
+    title: str
+    last_recommended_at: AwareDatetime = Field(description="기간 안에서 가장 최근에 추천한 시각 (feed_items.created_at)")
+    times_recommended: int = Field(description="기간 안에서 추천한 횟수 (feed_items 행 수)")

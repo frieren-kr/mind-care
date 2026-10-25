@@ -16,7 +16,7 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다. 이 모듈의 함�
 import json
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -48,6 +48,7 @@ from app.feed_schemas import (
     FeedBatch,
     FeedBatchItem,
     FeedItemIn,
+    FeedRecentPaper,
     SavedFeedBatch,
 )
 from app.schemas import PaperDetailResponse
@@ -734,3 +735,59 @@ def get_latest_feed_batch(
         del row["batch_id"], row["generated_at"]
         items.append(FeedBatchItem(**meta, paper=PaperDetailResponse(**row)))
     return FeedBatch(batch_id=batch_id, generated_at=generated_at, items=items)
+
+
+# 기간은 (reference_time - days, reference_time]. 미래 시각의 행은 빠진다.
+_RECENT_FEED_PAPERS = """
+    SELECT p.id AS paper_id,
+           CASE WHEN p.source = 'pubmed' THEN p.external_id END AS pmid,
+           p.title,
+           max(f.created_at) AS last_recommended_at,
+           count(*) AS times_recommended
+      FROM feed_items AS f
+      JOIN papers AS p ON p.id = f.paper_id
+     WHERE f.user_id = %(user_id)s
+       AND f.created_at >  %(since)s
+       AND f.created_at <= %(reference_time)s
+     GROUP BY p.id
+     ORDER BY last_recommended_at DESC, p.id
+     LIMIT %(limit)s
+"""
+
+
+def get_recent_feed_papers(
+    user_id: UUID, *, days: int = 30, limit: int = 50, reference_time: Optional[datetime] = None
+) -> list[FeedRecentPaper]:
+    """최근 days일 안에 이 사용자에게 추천한 논문을 논문별로 묶어 돌려준다 (읽기 전용).
+
+    같은 논문이 여러 묶음에 있으면 1개로 묶고, 마지막 추천 시각과 횟수를 붙인다.
+    Feed Agent가 같은 논문을 반복 추천하지 않게 할 때 쓴다.
+
+    Args:
+        user_id: 대상 사용자 (users.id). 없는 사용자면 빈 목록.
+        days: 기간 (일). 기간은 (reference_time - days, reference_time].
+        limit: 최대 몇 편까지.
+        reference_time: 기준 시각 (tz-aware). None이면 지금. 이보다 미래인 행은 뺀다.
+
+    Returns:
+        list[FeedRecentPaper] — 최근 추천 순 (last_recommended_at 내림차순).
+
+    Raises:
+        ValueError: days·limit이 1 이상의 정수가 아니거나, reference_time에 시간대가 없는 경우.
+    """
+    for name, value in (("days", days), ("limit", limit)):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{name}은 1 이상의 정수여야 합니다: {value!r}")
+    if reference_time is None:
+        reference_time = datetime.now(timezone.utc)
+    elif reference_time.tzinfo is None or reference_time.utcoffset() is None:
+        raise ValueError("reference_time에 시간대가 없습니다 (tz-aware datetime이어야 합니다).")
+
+    params = {"user_id": user_id, "since": reference_time - timedelta(days=days),
+              "reference_time": reference_time, "limit": limit}
+    with get_connection() as conn:
+        conn.read_only = True
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_RECENT_FEED_PAPERS, params)
+            rows = cur.fetchall()
+    return [FeedRecentPaper(**row) for row in rows]
