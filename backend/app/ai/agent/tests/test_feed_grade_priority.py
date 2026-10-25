@@ -25,7 +25,7 @@ class FeedGradePriorityTests(unittest.TestCase):
         source = evidence(rows)
         table = FeedCandidates()
         table.add('original', source)
-        output, refs = table.finalize(json.dumps(decisions(table.count, range(table.count))), {'original': source})
+        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), {'original': source})
         self.assertEqual([r.source_ref for r in refs], [i.source_ref for i in output.items])
         return [r.pmid for r in refs], table, source
 
@@ -61,7 +61,7 @@ class FeedGradePriorityTests(unittest.TestCase):
             ('B', ' RCT ', .8), ('A', 'guideline', .8), ('null', None, .8), ('future', 'unregistered', .8)])
         self.assertEqual(selected, ['A', 'B', 'C', 'D', 'u'])
         rows = json.loads(table.message().content)['candidates']
-        self.assertEqual([r['derived_evidence_grade'] for r in rows], ['A', 'B', 'C', 'D', None])
+        self.assertEqual([r['derived_evidence_grade'] for r in rows], ['A', 'B', 'C', 'D', None, None, None])
 
     def test_actual_provider_payload_has_derived_grades_without_identity_or_db_grade(self):
         client = FakeLLMClient([ModelTurn(tool_calls=parallel.calls(1)),

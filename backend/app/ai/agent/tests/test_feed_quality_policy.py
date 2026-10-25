@@ -52,7 +52,7 @@ class FeedQualityPolicyTests(unittest.TestCase):
         self.assertEqual(searches,[(query,5)])
         self.assertEqual([s.source_ref for s in result.sources],[i.source_ref for i in result.output.items])
         projection=json.loads(next(m.content for m in client.requests[1][0] if m.kind=='evidence'))
-        self.assertLessEqual(projection['candidate_count'],5)
+        self.assertLessEqual(projection['candidate_count'],15)
         self.assertLessEqual(len(result.output.items),5)
         self.assertEqual(next(m.content for m in client.requests[0][0] if m.role=='user'),prepared)
         return result,client,projection

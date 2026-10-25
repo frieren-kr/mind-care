@@ -53,7 +53,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
 
     def test_three_rounds_nine_parallel_searches_seventy_two_results(self):
         turns = [search([f'r{r}q{i}' for i in range(3)], f'provider-{r}', r if r else None) for r in range(3)]
-        turns.append(ModelTurn(text=json.dumps(decisions(5, range(5)))))
+        turns.append(ModelTurn(text=json.dumps(decisions(15, range(5)))))
         barriers, entered, lock = [Barrier(3) for _ in range(3)], [], Lock()
         def handler(context, args):
             with lock: entered.append((args.query, args.top_k))
@@ -68,7 +68,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 4)
         self.assertEqual([o.tool_choice for o in client.options], ['required', 'auto', 'auto', 'none'])
         projections = [json.loads(messages[-1].content) for messages, _ in client.requests[1:]]
-        for key, expected in (('candidate_count', [5, 5, 5]), ('candidate_revision', [1, 2, 3]), ('reviewed_count', [5, 10, 15])):
+        for key, expected in (('candidate_count', [15, 15, 15]), ('candidate_revision', [1, 2, 3]), ('reviewed_count', [15, 30, 45])):
             self.assertEqual([p[key] for p in projections], expected)
         for key, expected in (('search_calls_used', [3, 6, 9]), ('search_calls_remaining', [6, 3, 0]),
                               ('search_rounds_remaining', [2, 1, 0])):
@@ -79,17 +79,17 @@ class FeedReviewRoundsTests(unittest.TestCase):
             _, round_id, call_id, query_id = source.source_ref.tool_call_id.split(':')
             self.assertEqual(source.pmid, f'r{int(round_id)-1}q{query_id}-{source.source_ref.evidence_index}')
 
-    def test_retention_and_old_unreviewed_backfill_keep_original_sources(self):
+    def test_retention_and_reviewed_duplicate_exclusion_keep_original_sources(self):
         initial = package(list('abcdefgh'))
         original = initial.model_dump_json()
         result, client = self.run_feed([search(['a'], 'first'), search(['b'], 'next', 1, (1,)),
-            ModelTurn(text=json.dumps(decisions(5, range(5))))], lambda c, a: initial if a.query == 'a' else package(['new', 'b', 'a']))
+            ModelTurn(text=json.dumps(decisions(2, range(2))))], lambda c, a: initial if a.query == 'a' else package(['new', 'b', 'a']))
         self.assertEqual(result.execution.status, 'completed')
-        self.assertEqual([s.pmid for s in result.sources], ['b', 'new', 'f', 'g', 'h'])
+        self.assertEqual([s.pmid for s in result.sources], ['b', 'new'])
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources],
-            [('feed-rag:1:0:0', 1), ('feed-rag:2:0:0', 0), ('feed-rag:1:0:0', 5), ('feed-rag:1:0:0', 6), ('feed-rag:1:0:0', 7)])
+            [('feed-rag:1:0:0', 1), ('feed-rag:2:0:0', 0)])
         latest = json.loads(client.requests[-1][0][-1].content)
-        self.assertEqual((latest['candidate_count'], latest['retained_count'], latest['reviewed_count']), (5, 1, 9))
+        self.assertEqual((latest['candidate_count'], latest['retained_count'], latest['reviewed_count']), (2, 1, 9))
         self.assertEqual(latest['candidates'][0], {'candidate_index': 0, 'status': 'retained', 'personal_reason': '유지 이유 1', 'category': 'prevention'})
         self.assertEqual(initial.model_dump_json(), original)
         self.assertEqual((result.output.items[0].personal_reason, result.output.items[0].category), ('Reason 0', 'care'))
@@ -107,20 +107,20 @@ class FeedReviewRoundsTests(unittest.TestCase):
 
     def test_all_five_retained_are_bounded_ordered_and_finally_optional(self):
         result, client = self.run_feed([search(['a'], 'first'), search(['b'], 'next', 1, (4, 0, 2, 1, 3)),
-            ModelTurn(text=json.dumps(decisions(5, (1, 3))))],
+            ModelTurn(text=json.dumps(decisions(13, (1, 3))))],
             lambda c, a: package(list('abcde')) if a.query == 'a' else package([f'new-{i}' for i in range(8)]))
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual([s.pmid for s in result.sources], ['b', 'd'])
         latest = json.loads(client.requests[-1][0][-1].content)
-        self.assertEqual((latest['retained_count'], latest['candidate_count']), (5, 5))
-        self.assertTrue(all(row['status'] == 'retained' and 'evidence_excerpt' not in row for row in latest['candidates']))
+        self.assertEqual((latest['retained_count'], latest['candidate_count']), (5, 13))
+        self.assertTrue(all(row['status'] == 'retained' and 'evidence_excerpt' not in row for row in latest['candidates'][:5]))
 
-    def test_empty_followup_reuses_old_unreviewed_candidates_without_forcing_five(self):
+    def test_empty_followup_does_not_reintroduce_reviewed_candidates(self):
         result, _ = self.run_feed([search(['a'], 'first'), search(['b'], 'next', 1, (1,)),
-            ModelTurn(text=json.dumps(decisions(4, range(4))))],
+            ModelTurn(text=json.dumps(decisions(1, (0,))))],
             lambda c, a: package(list('abcdefgh')) if a.query == 'a' else package([]))
         self.assertEqual(result.execution.status, 'completed')
-        self.assertEqual([s.pmid for s in result.sources], ['b', 'f', 'g', 'h'])
+        self.assertEqual([s.pmid for s in result.sources], ['b'])
 
     def test_review_history_keeps_exact_discarded_occurrence_not_just_pmid(self):
         table, first = FeedCandidates(), package(['a', 'b'])

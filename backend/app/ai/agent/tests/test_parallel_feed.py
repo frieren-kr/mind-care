@@ -42,7 +42,7 @@ class ParallelFeedTests(unittest.TestCase):
 
     def run_feed(self, handler, count=3, *, safe=True, **options):
         client = FakeLLMClient([ModelTurn(tool_calls=calls(count)),
-                                ModelTurn(text=json.dumps(decisions(5, range(5))))])
+                                ModelTurn(text=json.dumps(decisions(min(count*8, 15), range(5))))])
         execution = FeedExecutionV1(client, registry(handler, safe), **options)
         result = execution(CONTEXT, '{"patients":[]}')
         return result, client
@@ -205,11 +205,11 @@ class ParallelFeedTests(unittest.TestCase):
         for call_id, pmids in [('A',[None,'same','a','b','c','d']), ('B',['same','x','y']), ('C',['z'])]:
             source[call_id] = package(pmids)
             table.add(call_id, source[call_id])
-        result, refs = table.finalize(json.dumps(decisions(5, range(5))), source)
+        result, refs = table.finalize(json.dumps(decisions(8, range(5))), source)
         self.assertEqual([s.pmid for s in refs], ['same','z','a','x','b'])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in result.items],
                          [('A',1),('C',0),('A',2),('B',1),('A',3)])
-        self.assertEqual(json.loads(table.message().content)['candidate_count'], 5)
+        self.assertEqual(json.loads(table.message().content)['candidate_count'], 8)
 
     def test_registry_marks_only_explicit_production_search_parallel_safe(self):
         self.assertTrue(build_evidence_registry().get('search_evidence').parallel_safe)
@@ -225,7 +225,7 @@ class ParallelFeedTests(unittest.TestCase):
                 return httpx.Response(200,json=completion({'role':'assistant','content':None,'tool_calls':[
                     {'id':c.id,'type':'function','function':{'name':c.name,'arguments':json.dumps(c.arguments)}}
                     for c in calls(3)]}, 'tool_calls'))
-            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(5,range(5)))}))
+            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(15,range(5)))}))
         sdk = OpenAI(api_key='offline-placeholder',http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         def handler(context,args):

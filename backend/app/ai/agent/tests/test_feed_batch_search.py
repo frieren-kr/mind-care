@@ -42,7 +42,7 @@ class FeedBatchSearchTests(unittest.TestCase):
                     barrier.wait(2)
                     return package([f'{args.query}-{i}' for i in range(8)])
                 result, client = self.run_turns([ModelTurn(tool_calls=[batch([f'topic {i}' for i in range(count)])]),
-                    ModelTurn(text=json.dumps(decisions(5, range(5))))], handler)
+                    ModelTurn(text=json.dumps(decisions(min(count * 8, 15), range(5))))], handler)
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertCountEqual(reached, [(f'topic {i}', 8) for i in range(count)])
                 self.assertEqual(result.execution.total_tool_calls, count)
@@ -77,7 +77,7 @@ class FeedBatchSearchTests(unittest.TestCase):
             return package([f'{i}-{j}' for j in range(8)])
         try:
             result, _ = self.run_turns([ModelTurn(tool_calls=[batch(['0','1','2'])]),
-                ModelTurn(text=json.dumps(decisions(5, range(5))))], handler)
+                ModelTurn(text=json.dumps(decisions(15, range(5))))], handler)
         finally:
             release_a.set(); release_b.set()
         self.assertEqual(finished, [2,0,1])

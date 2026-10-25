@@ -13,7 +13,9 @@ from .outputs import (Category, ContentText, EvidenceReference, FeedAnswerV2, Fe
 from .schemas import AgentModel, Message, ToolOutcome
 from .tools.contracts import EvidenceItem, EvidencePackage, ToolResultEnvelope
 
-MAX_FEED_CANDIDATES = 5
+MAX_FEED_REVIEW_CANDIDATES = 15
+MAX_FEED_RETAINED_CANDIDATES = 5
+MAX_FEED_RECOMMENDATIONS = 5
 _EXCLUDED_STUDIES = frozenset(("protocol", "expert_opinion", "animal"))
 # RAG rounds scores to 4 decimals. One last-place unit is the entire
 # allowed span of a comparable group, not an empirical clinical threshold.
@@ -82,18 +84,18 @@ class FeedDecisionDraft(AgentModel):
     """Internal LLM output only. Never returned as StructuredAgentResult.output."""
 
     decisions: list[Annotated[IncludedFeedDecision | ExcludedFeedDecision,
-                              Field(discriminator="include")]] = Field(max_length=MAX_FEED_CANDIDATES)
+                              Field(discriminator="include")]] = Field(max_length=MAX_FEED_REVIEW_CANDIDATES)
 
 
 class RetainedFeedCandidate(AgentModel):
-    candidate_index: Annotated[StrictInt, Field(ge=0, lt=MAX_FEED_CANDIDATES)]
+    candidate_index: Annotated[StrictInt, Field(ge=0, lt=MAX_FEED_REVIEW_CANDIDATES)]
     personal_reason: ContentText = Field(max_length=1000)
     category: Category
 
 
 class FeedReview(AgentModel):
     candidate_revision: Annotated[StrictInt, Field(ge=1)]
-    retain: list[RetainedFeedCandidate] = Field(max_length=MAX_FEED_CANDIDATES)
+    retain: list[RetainedFeedCandidate] = Field(max_length=MAX_FEED_RETAINED_CANDIDATES)
 
     @model_validator(mode="after")
     def unique_indices(self):
@@ -121,7 +123,7 @@ class FeedCandidate:
 
 
 class FeedCandidates:
-    """Request-owned original pools and a deterministic, latest <=5 projection."""
+    """Request-owned original pools and a deterministic, latest <=15 review projection, with <=5 retained/recommended."""
 
     def __init__(self):
         self._items: list[FeedCandidate] = []
@@ -187,13 +189,13 @@ class FeedCandidates:
         seen = {c.evidence.pmid for c in selected}
         for rank in range(max((len(topic) for topic in topics), default=0)):
             for topic in topics:
-                if len(selected) == MAX_FEED_CANDIDATES:
+                if len(selected) == MAX_FEED_REVIEW_CANDIDATES:
                     break
                 if rank < len(topic) and topic[rank].evidence.pmid not in seen:
                     candidate = topic[rank]
                     seen.add(candidate.evidence.pmid)
                     selected.append(candidate)
-            if len(selected) == MAX_FEED_CANDIDATES:
+            if len(selected) == MAX_FEED_REVIEW_CANDIDATES:
                 break
         self._items = selected
 
@@ -285,7 +287,7 @@ class FeedCandidates:
             draft = FeedDecisionDraft.model_validate(payload)
         except (ValueError, TypeError, RecursionError):
             raise FeedDecisionError("invalid_feed_decision") from None
-        if sum(decision.include for decision in draft.decisions) > 5:
+        if sum(decision.include for decision in draft.decisions) > MAX_FEED_RECOMMENDATIONS:
             raise FeedDecisionError("too_many_selected")
         try:
             # Revalidate the original mapping even for excluded candidates. Identity
@@ -319,9 +321,10 @@ Tool 선택/추가 호출은 기존 방식으로 계속한다. 검증용 재호�
 search_progress는 서버의 실제 검색 상태다. 검색 전 후보 0건을 최종 빈 결과로 판단하지 않는다.
 성공한 검색 후 후보가 없어도 남은 예산과 앞선 query를 보고 더 일반적인 검색이 유용한지 판단한다.
 추가 검색은 선택이며 완전히 동일한 query 반복이나 예산을 채우기 위한 검색을 하지 않는다.
-현재 후보가 1~2편만 적합해도 충분하면 종료한다. 5편이 모두 부적합해도 새 검색을 선택할 수 있다.
+현재 후보가 1~2편만 적합해도 충분하면 종료한다. 최대 15편이 모두 부적합해도 새 검색을 선택할 수 있다.
 추가 검색 Tool arguments에는 review={candidate_revision:현재 버전, retain:[{candidate_index,personal_reason,category}]}를 넣는다.
-retain은 현재 목록 중 실제로 유지할 후보만 나열한다. 모두 제외하면 빈 배열이다. 잘못된 index/중복/다른 버전은 거부한다.
+검토 후보는 유지 후보를 포함해 최대 15편, 다음 라운드 유지 후보와 최종 추천은 각각 최대 5편이다.
+retain은 현재 목록 중 실제로 유지할 후보를 최대 5편만 나열한다. 모두 제외하면 빈 배열이다. 잘못된 index/중복/다른 버전은 거부한다.
 추가 검색이 같은 turn에 여러 Tool Call이면 review는 한 곳에 넣거나 동일한 값으로 반복한다.
 검토한 PMID는 신규 후보에서 제외된다. 유지 후보만 다시 포함할 수 있고 미검토 기존 검색 결과도 재활용한다.
 retained 행은 이전 판단 이유/category와 위치만 제공한다. 원문은 반복 전달하지 않는다.
