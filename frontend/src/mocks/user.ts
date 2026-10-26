@@ -1,5 +1,5 @@
 // 목업 데이터. 화면 확인용 예시이며, 백엔드 API가 준비되면 교체한다.
-import type { ChatMessage, Dashboard, SelfCheckQuestion } from '@/types';
+import type { ChatMessage, Dashboard } from '@/types';
 
 export const mockDashboard: Dashboard = {
   user_name: '김마음',
@@ -9,37 +9,6 @@ export const mockDashboard: Dashboard = {
   next_check_date: '2026-10-28',
   today_log_written: false,
 };
-
-// 실제 자가점검 문항은 팀에서 검증된 도구로 확정한 뒤 교체한다 (설계서 11장 #1).
-export const mockQuestions: SelfCheckQuestion[] = [
-  {
-    id: 'q1',
-    text: '최근 며칠 전의 일을 기억하기 어려우신가요?',
-    options: [
-      { label: '아니다', score: 0 },
-      { label: '가끔 그렇다', score: 1 },
-      { label: '자주 그렇다', score: 2 },
-    ],
-  },
-  {
-    id: 'q2',
-    text: '물건을 둔 곳을 자주 잊으시나요?',
-    options: [
-      { label: '아니다', score: 0 },
-      { label: '가끔 그렇다', score: 1 },
-      { label: '자주 그렇다', score: 2 },
-    ],
-  },
-  {
-    id: 'q3',
-    text: '전에 하던 일(요리, 계산 등)이 예전보다 서툴러졌나요?',
-    options: [
-      { label: '아니다', score: 0 },
-      { label: '가끔 그렇다', score: 1 },
-      { label: '자주 그렇다', score: 2 },
-    ],
-  },
-];
 
 export const mockChat: ChatMessage[] = [
   { id: 'm1', role: 'user', text: '어머니가 같은 질문을 반복해요' },

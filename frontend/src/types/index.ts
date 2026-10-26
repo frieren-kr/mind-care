@@ -162,6 +162,8 @@ export type FeedSettings = {
 export type SelfCheckQuestion = {
   id: string;
   text: string;
+  /** 문항 아래 작은 글씨 설명 (예시·제외 조건) */
+  note?: string;
   options: { label: string; score: number }[];
 };
 
