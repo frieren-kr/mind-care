@@ -13,7 +13,7 @@ from .outputs import (Category, ContentText, EvidenceReference, FeedAnswerV2, Fe
 from .schemas import AgentModel, Message, ToolOutcome
 from .tools.contracts import EvidenceItem, EvidencePackage, ToolResultEnvelope
 
-MAX_FEED_REVIEW_CANDIDATES = 15
+MAX_FEED_REVIEW_CANDIDATES = 10
 MAX_FEED_RETAINED_CANDIDATES = 5
 MAX_FEED_RECOMMENDATIONS = 5
 _EXCLUDED_STUDIES = frozenset(("protocol", "expert_opinion", "animal"))
@@ -322,7 +322,7 @@ search_progress는 서버의 실제 검색 상태다. 검색 전 후보 0건을 
 평가는 개별 연구 적합성 → 추천 조합의 유용성 → 추가 검색 가치와 종료 타당성 순으로 수행한다.
 추가 검색은 선택이며 완전히 동일한 query 반복이나 예산을 채우기 위한 검색을 하지 않는다.
 추가 검색 Tool arguments에는 review={candidate_revision:현재 버전, retain:[{candidate_index,personal_reason,category}]}를 넣는다.
-검토 후보는 유지 후보를 포함해 최대 15편, 다음 라운드 유지 후보와 최종 추천은 각각 최대 5편이다.
+검토 후보는 유지 후보를 포함해 최대 10편, 다음 라운드 유지 후보와 최종 추천은 각각 최대 5편이다.
 retain은 현재 목록 중 실제로 유지할 후보를 최대 5편만 나열한다. 모두 제외하면 빈 배열이다. 잘못된 index/중복/다른 버전은 거부한다.
 추가 검색이 같은 turn에 여러 Tool Call이면 review는 한 곳에 넣거나 동일한 값으로 반복한다.
 검토한 PMID는 신규 후보에서 제외된다. 유지 후보만 다시 포함할 수 있고 미검토 기존 검색 결과도 재활용한다.
