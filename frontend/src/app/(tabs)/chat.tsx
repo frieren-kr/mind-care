@@ -39,7 +39,7 @@ export default function ChatScreen() {
             <ThemedText style={m.role === 'user' && { color: theme.onPrimary }}>{m.text}</ThemedText>
             {m.citations && (
               <View style={styles.citations}>
-                <ThemedText type="smallBold">📚 출처</ThemedText>
+                <ThemedText type="smallBold">출처</ThemedText>
                 {m.citations.map((c) => (
                   <View key={c.no} style={styles.citation}>
                     <ThemedText type="small">
@@ -92,7 +92,8 @@ const styles = StyleSheet.create({
   },
   bubble: {
     maxWidth: '88%',
-    borderRadius: Radius.card,
+    // 챗봇 말풍선은 둥글게 (나머지 화면은 각지게)
+    borderRadius: Radius.bubble,
     padding: Spacing.three,
     gap: Spacing.two,
   },

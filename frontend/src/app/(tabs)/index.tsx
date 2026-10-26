@@ -13,13 +13,13 @@ export default function DashboardScreen() {
       <ThemedText type="title">안녕하세요, {d.user_name}님</ThemedText>
 
       <Card>
-        <ThemedText type="subtitle">📰 이번 주 새 연구 {d.new_papers_count}편</ThemedText>
+        <ThemedText type="subtitle">이번 주 새 연구 {d.new_papers_count}편</ThemedText>
         <ThemedText themeColor="textSecondary">{d.top_paper.title}</ThemedText>
         <Button label="피드 보기" onPress={() => router.navigate('/feed')} />
       </Card>
 
       <Card>
-        <ThemedText type="subtitle">🧠 자가점검</ThemedText>
+        <ThemedText type="subtitle">자가점검</ThemedText>
         {d.last_self_check ? (
           <ThemedText themeColor="textSecondary">
             최근 {d.last_self_check.date} · {checkLevelLabel[d.last_self_check.level]}
@@ -32,7 +32,7 @@ export default function DashboardScreen() {
       </Card>
 
       <Card>
-        <ThemedText type="subtitle">📝 오늘의 돌봄 기록</ThemedText>
+        <ThemedText type="subtitle">오늘의 돌봄 기록</ThemedText>
         <ThemedText themeColor="textSecondary">
           {d.today_log_written ? '오늘 기록을 남겼어요' : '오늘 어머니의 상태를 기록해 보세요'}
         </ThemedText>
@@ -41,7 +41,7 @@ export default function DashboardScreen() {
       </Card>
 
       <Card>
-        <ThemedText type="subtitle">💬 궁금한 점을 물어보세요</ThemedText>
+        <ThemedText type="subtitle">궁금한 점을 물어보세요</ThemedText>
         <Button label="챗봇에게 묻기" variant="secondary" onPress={() => router.navigate('/chat')} />
       </Card>
     </Screen>

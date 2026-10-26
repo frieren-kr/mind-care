@@ -151,6 +151,15 @@ export function Chip({
   );
 }
 
+/** 섹션 제목. 이모지 대신 작은 강조색 글자로 구역을 나눈다 */
+export function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <ThemedText type="smallBold" themeColor="primary">
+      {children}
+    </ThemedText>
+  );
+}
+
 /** 의료 면책 고지 */
 export function Disclaimer({ text }: { text: string }) {
   return (
