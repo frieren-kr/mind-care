@@ -7,6 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
+import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
 import type { PatientContext } from '@/types';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
@@ -46,6 +47,7 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
 export default function MyScreen() {
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error, loading, reload } = useApi(loadProfile);
+  const { scale: textScale, setScale: setTextScale } = useTextScale();
   const [savedDays, setSavedDays] = useState<number | null>(null);
   const [savingDays, setSavingDays] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -119,6 +121,17 @@ export default function MyScreen() {
           </Card>
         </>
       ) : null}
+
+      {/* 글자 크기는 서버와 상관없는 이 폰의 설정이라 프로필을 못 불러와도 보여 준다 */}
+      <Card>
+        <ThemedText type="subtitle">글자 크기</ThemedText>
+        <View style={styles.wrapRow}>
+          {TEXT_SCALES.map((s) => (
+            <Chip key={s.key} label={s.label} selected={textScale === s.key} onPress={() => setTextScale(s.key)} />
+          ))}
+        </View>
+        <ThemedText themeColor="textSecondary">이 크기로 연구 소식을 보여 드려요.</ThemedText>
+      </Card>
 
       {/* '어떤 설명이 편하세요? (쉽게/자세하게)'는 난이도별 요약을 만들지 정해질 때까지 숨긴다 (10/26) */}
       <Card>
