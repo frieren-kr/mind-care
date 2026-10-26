@@ -1,14 +1,5 @@
 // 목업 데이터. 화면 확인용 예시이며, 백엔드 API가 준비되면 교체한다.
-import type { ChatMessage, Dashboard } from '@/types';
-
-export const mockDashboard: Dashboard = {
-  user_name: '김마음',
-  new_papers_count: 4,
-  top_paper: { id: 'p1', title: "반복 질문엔 '다시 설명'보다 '안심시키기'가 효과" },
-  last_self_check: { date: '2026-09-28', level: 'caution' },
-  next_check_date: '2026-10-28',
-  today_log_written: false,
-};
+import type { ChatMessage } from '@/types';
 
 export const mockChat: ChatMessage[] = [
   { id: 'm1', role: 'user', text: '어머니가 같은 질문을 반복해요' },

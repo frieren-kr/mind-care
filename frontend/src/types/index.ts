@@ -167,14 +167,6 @@ export type SelfCheckQuestion = {
   options: { label: string; score: number }[];
 };
 
-export type SelfCheckResult = {
-  date: string;
-  score: number;
-  level: 'normal' | 'caution' | 'visit';
-  message: string;
-  recommend_visit: boolean;
-};
-
 export type Citation = {
   no: number;
   title: string;
@@ -188,15 +180,5 @@ export type ChatMessage = {
   role: 'user' | 'assistant';
   text: string;
   citations?: Citation[];
-};
-
-/** GET /dashboard */
-export type Dashboard = {
-  user_name: string;
-  new_papers_count: number;
-  top_paper: { id: string; title: string };
-  last_self_check: { date: string; level: SelfCheckResult['level'] } | null;
-  next_check_date: string;
-  today_log_written: boolean;
 };
 
