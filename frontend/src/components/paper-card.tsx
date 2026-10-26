@@ -4,14 +4,13 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Card, EvidenceBadge } from '@/components/ui';
 import { CategoryLabel } from '@/constants/labels';
-import { Radius, Spacing } from '@/constants/theme';
+import { Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { displayTitle, type FeedItem } from '@/types';
 
-/** 피드 카드. 💡 개인화 설명 줄이 마인드 케어의 핵심 차별점이라 눈에 띄게 둔다. */
+/** 피드 카드. 개인화 설명(personal_reason)이 마인드 케어의 핵심 차별점이라 강조 띠로 눈에 띄게 둔다. */
 export function PaperCard({ item }: { item: FeedItem }) {
   const theme = useTheme();
-  const meta = [item.journal, item.published_at].filter(Boolean).join(' · ');
   // personal_reason은 추천 응답에만 있어서, 상세 화면 '우리 상황에서는?'에 쓰도록 같이 넘긴다
   const params = item.personal_reason ? { id: item.id, reason: item.personal_reason } : { id: item.id };
 
@@ -19,12 +18,14 @@ export function PaperCard({ item }: { item: FeedItem }) {
     <Link href={{ pathname: '/paper/[id]', params }} asChild>
       <Pressable accessibilityRole="button" accessibilityLabel={displayTitle(item)}>
         {({ pressed }) => (
-          <Card style={pressed && styles.pressed}>
+          <Card style={[styles.card, pressed && { backgroundColor: theme.backgroundSelected }]}>
             {item.category || item.evidence_grade ? (
               <View style={styles.meta}>
-                <ThemedText type="smallBold" themeColor="textSecondary">
-                  {item.category ? CategoryLabel[item.category] : ''}
-                </ThemedText>
+                {item.category ? (
+                  <ThemedText type="smallBold" themeColor="primary">
+                    {CategoryLabel[item.category]}
+                  </ThemedText>
+                ) : null}
                 {item.evidence_grade ? <EvidenceBadge level={item.evidence_grade} /> : null}
               </View>
             ) : null}
@@ -38,17 +39,25 @@ export function PaperCard({ item }: { item: FeedItem }) {
               </ThemedText>
             ) : null}
 
+            {/* 추천 이유는 2~3문장이라 카드에서는 2줄까지만. 전체는 상세 화면 '우리 상황에서는?' */}
             {item.personal_reason ? (
-              <View style={[styles.reason, { backgroundColor: theme.highlight }]}>
-                <ThemedText type="small">💡 {item.personal_reason}</ThemedText>
+              <View style={[styles.reason, { backgroundColor: theme.highlight, borderLeftColor: theme.accent }]}>
+                <ThemedText type="small" numberOfLines={2}>
+                  {item.personal_reason}
+                </ThemedText>
               </View>
             ) : null}
 
-            {meta ? (
-              <ThemedText type="small" themeColor="textSecondary">
-                {meta}
+            <View style={[styles.footer, { borderTopColor: theme.border }]}>
+              <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.journal}>
+                {item.journal}
               </ThemedText>
-            ) : null}
+              {item.published_at ? (
+                <ThemedText type="small" themeColor="textSecondary">
+                  {item.published_at}
+                </ThemedText>
+              ) : null}
+            </View>
           </Card>
         )}
       </Pressable>
@@ -57,17 +66,27 @@ export function PaperCard({ item }: { item: FeedItem }) {
 }
 
 const styles = StyleSheet.create({
+  card: {
+    gap: Spacing.three,
+  },
   meta: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
     gap: Spacing.two,
   },
   reason: {
-    borderRadius: Radius.card / 2,
-    padding: Spacing.two,
+    borderLeftWidth: 3,
+    paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
   },
-  pressed: {
-    opacity: 0.8,
+  footer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.two,
+  },
+  journal: {
+    flex: 1,
   },
 });

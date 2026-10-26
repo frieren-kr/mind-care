@@ -1,13 +1,15 @@
-import { useCallback, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { currentUserId, getUserProfile, updateFeedSettings } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
+import { Button, Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
-import type { PatientContext, ReadingLevel } from '@/types';
+import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
+import type { PatientContext } from '@/types';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
 const refreshDayOptions = [1, 2, 3, 4, 5, 6, 7];
@@ -39,6 +41,11 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
           {nextVisit.hospital_name ? ` · ${nextVisit.hospital_name}` : ''}
         </ThemedText>
       ) : null}
+      <Button
+        label="정보 수정"
+        variant="secondary"
+        onPress={() => router.push({ pathname: '/patient/form', params: { id: patient.id } })}
+      />
     </Card>
   );
 }
@@ -46,9 +53,18 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
 export default function MyScreen() {
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error, loading, reload } = useApi(loadProfile);
-  // 설명 난이도는 저장할 API가 아직 없어서 화면 안에서만 바뀐다
-  const [level, setLevel] = useState<ReadingLevel>('easy');
-
+  // 돌보는 분 추가·수정 화면에서 돌아오면 다시 불러온다 (처음 열 때는 useApi가 이미 불러온다)
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) {
+        firstFocus.current = false;
+        return;
+      }
+      reload();
+    }, [reload]),
+  );
+  const { scale: textScale, setScale: setTextScale } = useTextScale();
   const [savedDays, setSavedDays] = useState<number | null>(null);
   const [savingDays, setSavingDays] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -83,7 +99,16 @@ export default function MyScreen() {
             </ThemedText>
           </Card>
 
-          <ThemedText type="subtitle">돌보는 분 ({profile.patients.length}명)</ThemedText>
+          <View style={styles.headerRow}>
+            <ThemedText type="subtitle" style={styles.flex}>
+              돌보는 분 ({profile.patients.length}명)
+            </ThemedText>
+            <Button
+              label="+ 추가"
+              variant="secondary"
+              onPress={() => router.push({ pathname: '/patient/form' })}
+            />
+          </View>
           {profile.patients.map((context, index) => (
             <PatientCard key={context.patient.id} context={context} index={index} />
           ))}
@@ -123,14 +148,18 @@ export default function MyScreen() {
         </>
       ) : null}
 
+      {/* 글자 크기는 서버와 상관없는 이 폰의 설정이라 프로필을 못 불러와도 보여 준다 */}
       <Card>
-        <ThemedText type="subtitle">어떤 설명이 편하세요?</ThemedText>
-        <View style={styles.row}>
-          <Chip label="쉽게" selected={level === 'easy'} onPress={() => setLevel('easy')} />
-          <Chip label="자세하게" selected={level === 'detail'} onPress={() => setLevel('detail')} />
+        <ThemedText type="subtitle">글자 크기</ThemedText>
+        <View style={styles.wrapRow}>
+          {TEXT_SCALES.map((s) => (
+            <Chip key={s.key} label={s.label} selected={textScale === s.key} onPress={() => setTextScale(s.key)} />
+          ))}
         </View>
+        <ThemedText themeColor="textSecondary">이 크기로 연구 소식을 보여 드려요.</ThemedText>
       </Card>
 
+      {/* '어떤 설명이 편하세요? (쉽게/자세하게)'는 난이도별 요약을 만들지 정해질 때까지 숨긴다 (10/26) */}
       <Card>
         <ThemedText type="subtitle">도움이 필요하면</ThemedText>
         <ThemedText>치매상담콜센터 1899-9988 (24시간)</ThemedText>
@@ -141,9 +170,13 @@ export default function MyScreen() {
 }
 
 const styles = StyleSheet.create({
-  row: {
+  headerRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: Spacing.two,
+  },
+  flex: {
+    flex: 1,
   },
   wrapRow: {
     flexDirection: 'row',

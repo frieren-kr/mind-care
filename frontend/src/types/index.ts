@@ -95,6 +95,19 @@ export type Patient = {
   interests: string[];
 };
 
+/**
+ * 돌보는 분 추가·수정 때 보내는 값 (user_schemas.PatientIn / PatientUpdate).
+ * null이면 값을 비운다. symptoms·interests는 목록 전체를 새 목록으로 바꾼다.
+ */
+export type PatientInput = {
+  name: string | null;
+  dementia_stage: DementiaStage | null;
+  /** 'YYYY-MM-DD', 미래 날짜 불가 */
+  diagnosis_date: string | null;
+  symptoms: string[];
+  interests: string[];
+};
+
 export type Medication = {
   id: string;
   drug_name: string;
@@ -162,39 +175,46 @@ export type FeedSettings = {
 export type SelfCheckQuestion = {
   id: string;
   text: string;
+  /** 문항 아래 작은 글씨 설명 (예시·제외 조건) */
+  note?: string;
   options: { label: string; score: number }[];
 };
 
-export type SelfCheckResult = {
-  date: string;
-  score: number;
-  level: 'normal' | 'caution' | 'visit';
-  message: string;
-  recommend_visit: boolean;
+/**
+ * 챗봇 답변의 근거 자료 한 건. 서버가 검색 원본에서 복사한 값이다 (AI 쪽 outputs.ResolvedEvidence).
+ * LLM이 만든 값이 아니며, 없는 값은 null 그대로 온다 (가짜 링크를 만들지 않는다).
+ */
+export type ChatSource = {
+  /** new_research: 최신 연구(논문), guideline: 공식 지침 */
+  evidence_type: 'new_research' | 'guideline';
+  title: string;
+  pmid: string | null;
+  doi: string | null;
+  journal: string | null;
+  publication_year: number | null;
+  study_type: string | null;
+  /** 지침을 낸 기관 (guideline일 때) */
+  organization: string | null;
+  source_url: string | null;
+  full_text_available: boolean;
 };
 
-export type Citation = {
-  no: number;
-  title: string;
-  type: 'guideline' | 'paper';
-  evidence_level: EvidenceLevel;
-  url: string;
+/**
+ * 챗봇 API 응답 (제안 형식). answer = ChatAnswerV1.answer,
+ * sources = 인용 순서(citation_refs 순서)대로 서버가 조립한 근거. 0개도 정상이다.
+ */
+export type ChatResponse = {
+  answer: string;
+  sources: ChatSource[];
 };
 
 export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   text: string;
-  citations?: Citation[];
-};
-
-/** GET /dashboard */
-export type Dashboard = {
-  user_name: string;
-  new_papers_count: number;
-  top_paper: { id: string; title: string };
-  last_self_check: { date: string; level: SelfCheckResult['level'] } | null;
-  next_check_date: string;
-  today_log_written: boolean;
+  /** assistant 답변의 근거. 화면에서 [1]부터 번호를 붙인다 (답변 본문 속 번호와는 연결하지 않는다) */
+  sources?: ChatSource[];
+  /** 답변을 받지 못한 경우 (오류 안내 말풍선) */
+  failed?: boolean;
 };
 
