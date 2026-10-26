@@ -42,7 +42,7 @@ class ParallelFeedTests(unittest.TestCase):
 
     def run_feed(self, handler, count=3, *, safe=True, **options):
         client = FakeLLMClient([ModelTurn(tool_calls=calls(count)),
-                                ModelTurn(text=json.dumps(decisions(min(count*8, 15), range(5))))])
+                                ModelTurn(text=json.dumps(decisions(min(count*8, 10), range(5))))])
         execution = FeedExecutionV1(client, registry(handler, safe), **options)
         result = execution(CONTEXT, '{"patients":[]}')
         return result, client
@@ -225,7 +225,7 @@ class ParallelFeedTests(unittest.TestCase):
                 return httpx.Response(200,json=completion({'role':'assistant','content':None,'tool_calls':[
                     {'id':c.id,'type':'function','function':{'name':c.name,'arguments':json.dumps(c.arguments)}}
                     for c in calls(3)]}, 'tool_calls'))
-            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(15,range(5)))}))
+            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(10,range(5)))}))
         sdk = OpenAI(api_key='offline-placeholder',http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         def handler(context,args):

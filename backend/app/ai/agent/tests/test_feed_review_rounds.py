@@ -53,7 +53,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
 
     def test_three_rounds_nine_parallel_searches_seventy_two_results(self):
         turns = [search([f'r{r}q{i}' for i in range(3)], f'provider-{r}', r if r else None) for r in range(3)]
-        turns.append(ModelTurn(text=json.dumps(decisions(15, range(5)))))
+        turns.append(ModelTurn(text=json.dumps(decisions(10, range(5)))))
         barriers, entered, lock = [Barrier(3) for _ in range(3)], [], Lock()
         def handler(context, args):
             with lock: entered.append((args.query, args.top_k))
@@ -68,7 +68,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 4)
         self.assertEqual([o.tool_choice for o in client.options], ['required', 'auto', 'auto', 'none'])
         projections = [json.loads(messages[-1].content) for messages, _ in client.requests[1:]]
-        for key, expected in (('candidate_count', [15, 15, 15]), ('candidate_revision', [1, 2, 3]), ('reviewed_count', [15, 30, 45])):
+        for key, expected in (('candidate_count', [10, 10, 10]), ('candidate_revision', [1, 2, 3]), ('reviewed_count', [10, 20, 30])):
             self.assertEqual([p[key] for p in projections], expected)
         for key, expected in (('search_calls_used', [3, 6, 9]), ('search_calls_remaining', [6, 3, 0]),
                               ('search_rounds_remaining', [2, 1, 0])):
@@ -107,12 +107,12 @@ class FeedReviewRoundsTests(unittest.TestCase):
 
     def test_all_five_retained_are_bounded_ordered_and_finally_optional(self):
         result, client = self.run_feed([search(['a'], 'first'), search(['b'], 'next', 1, (4, 0, 2, 1, 3)),
-            ModelTurn(text=json.dumps(decisions(13, (1, 3))))],
+            ModelTurn(text=json.dumps(decisions(10, (1, 3))))],
             lambda c, a: package(list('abcde')) if a.query == 'a' else package([f'new-{i}' for i in range(8)]))
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual([s.pmid for s in result.sources], ['b', 'd'])
         latest = json.loads(client.requests[-1][0][-1].content)
-        self.assertEqual((latest['retained_count'], latest['candidate_count']), (5, 13))
+        self.assertEqual((latest['retained_count'], latest['candidate_count']), (5, 10))
         self.assertTrue(all(row['status'] == 'retained' and 'evidence_excerpt' not in row for row in latest['candidates'][:5]))
 
     def test_empty_followup_does_not_reintroduce_reviewed_candidates(self):

@@ -43,8 +43,8 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         policy = FeedPromptBuilder().build_system_prompt(CONTEXT)
         for clause in ('검색 횟수 최소화 자체를 목표로 하지 않는다', '중요한 연구 목적의 충족 여부',
                        '추가 검색의 기대 가치', '첫 라운드도 근거가 충분하면 종료',
-                       '후보가 15편이라는 사실만으로 충분함을 단정하지 않는다',
-                       '후보가 15편 미만이어도 충분하면 종료', '별도 평가/재생성 호출은 만들지 않는다'):
+                       '후보가 10편이라는 사실만으로 충분함을 단정하지 않는다',
+                       '후보가 10편 미만이어도 충분하면 종료', '별도 평가/재생성 호출은 만들지 않는다'):
             self.assertIn(clause, policy)
         self.assertNotIn('일반적인 목표는 검색 생성 1회와 최종 판단 1회', policy)
         self.assertNotIn('decisions', policy)  # Post-search schema stays out of the planning policy.
@@ -83,14 +83,14 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         for selected in ((0, 3, 6), (0,), (0, 3), ()):
             with self.subTest(selected=selected):
                 result, client, reached = self.run_feed([search(['patient', 'family', 'general'], 'first'),
-                    ModelTurn(text=json.dumps(decisions(15, selected)))], self.first_pools())
+                    ModelTurn(text=json.dumps(decisions(10, selected)))], self.first_pools())
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertEqual((result.execution.tool_rounds, result.execution.total_tool_calls, len(client.requests)), (1, 3, 2))
                 self.assertEqual([o.tool_choice for o in client.options], ['required', 'auto'])
                 self.assertEqual(len(result.output.items), len(selected))
                 self.assertCountEqual(reached, [('patient', 8), ('family', 8), ('general', 8)])
                 last = json.loads(client.requests[-1][0][-1].content)
-                self.assertEqual((last['candidate_count'], last['search_progress']['search_calls_remaining']), (15, 6))
+                self.assertEqual((last['candidate_count'], last['search_progress']['search_calls_remaining']), (10, 6))
                 policy = next(m.content for m in client.requests[-1][0] if m.role == 'system' and 'FeedDecisionDraft' in (m.content or ''))
                 self.assertIn('0편 선택 예정이면', policy)
                 self.assertIn('추천 조합의 실질적 정보 중복', policy)
@@ -100,7 +100,7 @@ class FeedDecisionPolicyTests(unittest.TestCase):
     def test_scripted_mixed_patient_and_caregiver_selection_preserves_actual_source(self):
         # Script chooses patient rows 0 and 3; this does NOT prove the model can identify them.
         result, client, _ = self.run_feed([search(['patient', 'family', 'general'], 'first'),
-            ModelTurn(text=json.dumps(decisions(15, (0, 3))))], self.first_pools())
+            ModelTurn(text=json.dumps(decisions(10, (0, 3))))], self.first_pools())
         self.assertEqual([s.pmid for s in result.sources], ['patient-0', 'patient-1'])
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources],
                          [('feed-rag:1:0:0', 0), ('feed-rag:1:0:0', 1)])
@@ -112,14 +112,14 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         pools['patient sleep intervention in MCI'] = package(['new-0', 'new-1', 'new-2', 'patient-0'])
         result, client, reached = self.run_feed([search(['patient', 'family', 'general'], 'first'),
             search(['patient sleep intervention in MCI'], 'next', 1, (0,)),
-            ModelTurn(text=json.dumps(decisions(4, (0, 2))))], pools)
+            ModelTurn(text=json.dumps(decisions(9, (0, 5))))], pools)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual((len(client.requests), result.execution.total_tool_calls), (3, 4))
         self.assertEqual([s.pmid for s in result.sources], ['patient-0', 'new-1'])
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources],
                          [('feed-rag:1:0:0', 0), ('feed-rag:2:0:0', 1)])
         latest = json.loads(client.requests[-1][0][-1].content)
-        self.assertEqual((latest['retained_count'], latest['candidate_count']), (1, 4))
+        self.assertEqual((latest['retained_count'], latest['candidate_count']), (1, 9))
         self.assertEqual(latest['candidates'][0]['status'], 'retained')
         self.assertNotIn('evidence_excerpt', latest['candidates'][0])
         self.assertEqual(len({s.pmid for s in result.sources}), 2)
@@ -143,7 +143,7 @@ class FeedDecisionPolicyTests(unittest.TestCase):
 
     def test_six_includes_still_fail_and_final_json_has_no_evaluation_metadata(self):
         for extra_field in (False, True):
-            payload = decisions(15, (0,) if extra_field else range(6))
+            payload = decisions(10, (0,) if extra_field else range(6))
             if extra_field: payload['evaluation'] = {'stop_reason': 'should not be exposed'}
             result, client, _ = self.run_feed([search(['patient', 'family', 'general'], 'first'),
                 ModelTurn(text=json.dumps(payload))], self.first_pools())

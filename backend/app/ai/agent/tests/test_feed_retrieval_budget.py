@@ -38,7 +38,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
                     barrier.wait(2)
                     return package([f'{args.query}-{i}' for i in range(args.top_k)])
                 client = FakeLLMClient([ModelTurn(tool_calls=calls(count)),
-                    ModelTurn(text=json.dumps(decisions(min(count*8, 15), range(5))))])
+                    ModelTurn(text=json.dumps(decisions(min(count*8, 10), range(5))))])
                 result = FeedExecutionV1(client, registry(handler))(CONTEXT, '{}')
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertCountEqual(searched, [(f'topic {i}', 8) for i in range(count)])
@@ -46,14 +46,14 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
                 self.assertEqual(result.execution.total_tool_calls, count)
                 self.assertEqual(len(client.requests), 2)
                 projection = json.loads(client.requests[1][0][-1].content)
-                self.assertEqual(projection['candidate_count'], min(count*8, 15))
+                self.assertEqual(projection['candidate_count'], min(count*8, 10))
                 self.assertEqual(len(result.output.items), 5)
-                # All 8/16/24 originals stay internal; only 8/15/15 are projected.
+                # All 8/16/24 originals stay internal; only 8/10/10 are projected.
                 for source in result.sources:
                     query = f'topic {source.source_ref.tool_call_id[-1]}'
                     self.assertEqual(source.pmid, f'{query}-{source.source_ref.evidence_index}')
                 serialized = json.dumps([m.model_dump(mode='json') for m in client.requests[1][0]])
-                self.assertEqual(sum(len(json.loads(m.content)['candidates']) for m in client.requests[1][0] if m.kind == 'evidence'), min(count*8, 15))
+                self.assertEqual(sum(len(json.loads(m.content)['candidates']) for m in client.requests[1][0] if m.kind == 'evidence'), min(count*8, 10))
 
     def test_default_is_feed_only_and_query_ids_arguments_are_not_mutated(self):
         original = calls(1)[0]

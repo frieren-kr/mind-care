@@ -69,7 +69,7 @@ class FeedCandidateContractTests(unittest.TestCase):
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in output.items],
                          [("provider_real_call", 1), ("next", 0), ("next", 1), ("next", 3)])
 
-    def test_multiple_pools_rebalance_to_fifteen_with_original_indices(self):
+    def test_multiple_pools_rebalance_to_ten_with_original_indices(self):
         table, source = FeedCandidates(), {}
         for call in range(3):
             source[str(call)] = package([str(call * 5 + i) for i in range(5)])
@@ -77,9 +77,9 @@ class FeedCandidateContractTests(unittest.TestCase):
         before = table.message()
         source["overflow"] = package(["15", "16"])
         table.add("overflow", source["overflow"])
-        self.assertEqual(json.loads(before.content)["candidate_count"], 15)
-        self.assertEqual(json.loads(table.message().content)["candidate_count"], 15)
-        output, refs = table.finalize(json.dumps(decisions(15, (0, 1, 2, 4))), source)
+        self.assertEqual(json.loads(before.content)["candidate_count"], 10)
+        self.assertEqual(json.loads(table.message().content)["candidate_count"], 10)
+        output, refs = table.finalize(json.dumps(decisions(10, (0, 1, 2, 4))), source)
         self.assertEqual([r.pmid for r in refs], ["0", "5", "10", "1"])
         self.assertEqual([i.source_ref.tool_call_id for i in output.items], ["0", "1", "2", "0"])
 
@@ -199,7 +199,7 @@ class FeedCandidateContractTests(unittest.TestCase):
 
     def test_draft_schema_has_no_identifier_and_external_schema_is_unchanged(self):
         schema = FeedDecisionDraft.model_json_schema()
-        self.assertEqual(schema["properties"]["decisions"]["maxItems"], 15)
+        self.assertEqual(schema["properties"]["decisions"]["maxItems"], 10)
         for definition in schema["$defs"].values():
             self.assertFalse(definition["additionalProperties"])
         for name in ("source_ref", "tool_call_id", "pmid", "evidence_index"):
@@ -260,7 +260,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
 
     def test_three_calls_in_one_turn_use_two_generations_and_keep_call_order(self):
         calls = [ToolCall(id=f"sdk_{i}", name="search_evidence", arguments={"query": str(i)}) for i in range(3)]
-        turns = [ModelTurn(tool_calls=calls), ModelTurn(text=json.dumps(decisions(15, (0, 1, 2))))]
+        turns = [ModelTurn(tool_calls=calls), ModelTurn(text=json.dumps(decisions(10, (0, 1, 2))))]
         packages = {str(i): package([str(i * 5 + j) for j in range(5)]) for i in range(3)}
         result, client, _ = self.run_feed(turns, packages, max_tool_rounds=3, max_total_tool_calls=3)
         self.assertEqual(result.execution.status, "completed")
