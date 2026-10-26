@@ -132,6 +132,53 @@ def is_dementia_related(mesh_terms: list[str] | None, title: str = "", abstract:
     return bool(COGNITIVE_RE.search(text))
 
 
+# ---- 보호자 중심 논문인지 (환자 증상을 검색했는데 보호자 본인 이야기가 올라오는 문제) ----
+# 임베딩은 '수면'이라는 주제는 잘 잡지만 "누구의 수면인지"(환자/보호자)는 잘 구분하지 못한다.
+# 그래서 제목으로 연구 대상을 판단해, 환자 증상 검색일 때 보호자 중심 논문을 뒤로 미룬다.
+#   - "Sleep of informal caregivers of people with dementia"  → 보호자 중심 (보호자가 주어)
+#   - "Reminiscence therapy for people with dementia and their caregivers" → 환자+보호자 함께 (미루지 않음)
+#   - 교대근무자·간호사·요양 인력 연구도 환자 대상이 아니므로 같이 미룬다.
+CAREGIVER_RE = re.compile(
+    r"\b(care ?givers?|caregiving|carers?|care partners?|family members?|families|spouses?|daughters?|"
+    r"informal care|shift ?work\w*|nurses?|nursing staff|care staff|care workers?|health ?care workers?|"
+    r"workforce|employees?)\b", re.I
+)
+# 보호자가 주어인 표현: "caregivers of people with dementia", "carers for ..."
+CAREGIVER_SUBJECT_RE = re.compile(
+    r"\b(care ?givers?|carers?|care partners?|family members?|families|spouses?|caregiving)\s+(of|for|to)\b", re.I
+)
+PATIENT_RE = re.compile(
+    r"\b(people|persons?|patients?|individuals?|older (adults|people)|residents?|adults)\b"
+    r"(\s+\w+){0,3}\s+(with|living with|affected by)\b|\bdyad\w*|\bpatients?\b", re.I
+)
+# 검색어가 보호자 본인을 찾는 것이면 미루지 않는다 (예: 보호자 부담·우울, 보호자 지원 프로그램)
+CAREGIVER_QUERY_RE = re.compile(
+    r"\b(care ?givers?|caregiving|carers?|care partners?|family|spouses?|respite)\b|보호자|간병인|가족|돌봄 부담|간병 부담",
+    re.I,
+)
+
+
+def is_caregiver_focused(title: str | None) -> bool:
+    """제목상 연구 대상이 환자가 아니라 보호자·돌봄 인력이면 True.
+
+    ① 보호자 단어가 없으면 False
+    ② "caregivers of ..."처럼 보호자가 주어면 True
+    ③ 환자 표현(people with dementia, patients 등)이 같이 있으면 환자+보호자 연구 → False
+    ④ 그 밖에 보호자 단어만 있으면 True
+    """
+    title = title or ""
+    if not CAREGIVER_RE.search(title):
+        return False
+    if CAREGIVER_SUBJECT_RE.search(title):
+        return True
+    return not PATIENT_RE.search(title)
+
+
+def query_targets_caregiver(query: str | None) -> bool:
+    """검색어가 보호자 본인(부담·우울·지원 프로그램 등)을 찾는 것이면 True."""
+    return bool(CAREGIVER_QUERY_RE.search(query or ""))
+
+
 class Evidence(NamedTuple):
     study_type: str               # 위 LEVEL의 키 중 하나
     evidence_level: Optional[int] # 1(강함) ~ 6(약함), 판단 불가면 None
