@@ -4,14 +4,57 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Text,
+  TextInput,
   View,
+  type TextInputProps,
   type ViewProps,
 } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { Evidence, MaxContentWidth, MinTouch, Radius, Spacing } from '@/constants/theme';
+import { Evidence, FontFamily, FontSize, MaxContentWidth, MinTouch, Radius, Spacing } from '@/constants/theme';
+import { useTextScale } from '@/hooks/use-text-scale';
 import { useTheme } from '@/hooks/use-theme';
 import type { EvidenceLevel } from '@/types';
+
+/**
+ * 글자 입력칸. 글자 크기 설정을 따른다.
+ * 안드로이드는 입력칸의 안내 문구(placeholder)를 앱 글꼴이 아니라 폰 시스템 글꼴로 그려서,
+ * 안내 문구는 입력칸 위에 직접 겹쳐 그린다 (값이 비었을 때만).
+ */
+export function TextField({ style, placeholder, value, accessibilityLabel, ...rest }: TextInputProps) {
+  const theme = useTheme();
+  const { multiplier } = useTextScale();
+  const fontSize = Math.round(FontSize.body * multiplier);
+  // 바깥 배치(flex·width)는 감싸는 View에, 나머지는 입력칸에
+  const { flex, width, ...inputStyle } = StyleSheet.flatten(style) ?? {};
+  return (
+    <View style={{ flex, width }}>
+      <TextInput
+        value={value}
+        accessibilityLabel={accessibilityLabel ?? placeholder}
+        style={[
+          styles.input,
+          { color: theme.text, backgroundColor: theme.backgroundElement, borderColor: theme.border, fontSize },
+          inputStyle,
+        ]}
+        {...rest}
+      />
+      {!value && placeholder ? (
+        <View
+          style={[
+            StyleSheet.absoluteFill,
+            styles.placeholder,
+            { alignItems: inputStyle.textAlign === 'center' ? 'center' : 'flex-start' },
+          ]}>
+          <Text numberOfLines={1} style={{ color: theme.textSecondary, fontFamily: FontFamily.regular, fontSize }}>
+            {placeholder}
+          </Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
 
 /** 화면 공통 스크롤 컨테이너. onRefresh를 주면 당겨서 새로고침이 켜진다 */
 export function Screen({
@@ -177,6 +220,18 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
+  },
+  input: {
+    minHeight: MinTouch,
+    borderWidth: 1,
+    borderRadius: Radius.card,
+    paddingHorizontal: Spacing.three,
+    fontFamily: FontFamily.regular,
+  },
+  placeholder: {
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.three,
+    pointerEvents: 'none',
   },
   status: {
     alignItems: 'center',
