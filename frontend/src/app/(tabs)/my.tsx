@@ -7,7 +7,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
-import type { PatientContext, ReadingLevel } from '@/types';
+import type { PatientContext } from '@/types';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
 const refreshDayOptions = [1, 2, 3, 4, 5, 6, 7];
@@ -46,9 +46,6 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
 export default function MyScreen() {
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error, loading, reload } = useApi(loadProfile);
-  // 설명 난이도는 저장할 API가 아직 없어서 화면 안에서만 바뀐다
-  const [level, setLevel] = useState<ReadingLevel>('easy');
-
   const [savedDays, setSavedDays] = useState<number | null>(null);
   const [savingDays, setSavingDays] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -123,14 +120,7 @@ export default function MyScreen() {
         </>
       ) : null}
 
-      <Card>
-        <ThemedText type="subtitle">어떤 설명이 편하세요?</ThemedText>
-        <View style={styles.row}>
-          <Chip label="쉽게" selected={level === 'easy'} onPress={() => setLevel('easy')} />
-          <Chip label="자세하게" selected={level === 'detail'} onPress={() => setLevel('detail')} />
-        </View>
-      </Card>
-
+      {/* '어떤 설명이 편하세요? (쉽게/자세하게)'는 난이도별 요약을 만들지 정해질 때까지 숨긴다 (10/26) */}
       <Card>
         <ThemedText type="subtitle">도움이 필요하면</ThemedText>
         <ThemedText>치매상담콜센터 1899-9988 (24시간)</ThemedText>
@@ -141,10 +131,6 @@ export default function MyScreen() {
 }
 
 const styles = StyleSheet.create({
-  row: {
-    flexDirection: 'row',
-    gap: Spacing.two,
-  },
   wrapRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
