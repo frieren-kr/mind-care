@@ -105,7 +105,7 @@ export default function PaperDetailScreen() {
       <View style={styles.actions}>
         <Button
           label="이 연구에 대해 질문하기"
-          onPress={() => router.navigate({ pathname: '/chat', params: { paperId: paper.id } })}
+          onPress={() => router.navigate({ pathname: '/chat', params: { paperTitle: displayTitle(paper) } })}
         />
         {pubmedUrl ? (
           <Button

@@ -4,6 +4,7 @@
 import { ApiError, request } from '@/api/client';
 import { DEV_USER_ID } from '@/api/config';
 import type {
+  ChatResponse,
   FeedSettings,
   PaperDetail,
   Patient,
@@ -64,6 +65,24 @@ export function updatePatient(userId: string, patientId: string, data: PatientIn
   return request(`/users/${userId}/patients/${patientId}`, {
     method: 'PATCH',
     body: data,
+  });
+}
+
+/**
+ * 챗봇에게 질문 — POST /chat/{user_id}, 본문 {message, patient_id?}.
+ * ★ 백엔드에 아직 없는 API다 (AI 쪽 ChatWorkflowV1은 골격만 있음). 응답 형식은 ChatAnswerV1.answer와
+ * StructuredAgentResult.sources(인용 순서)를 그대로 내보내는 것으로 제안했다. 스트리밍 없이 한 번에 온다.
+ */
+export function sendChatMessage(
+  userId: string,
+  message: string,
+  patientId: string | null = null,
+): Promise<ChatResponse> {
+  return request(`/chat/${userId}`, {
+    method: 'POST',
+    body: { message, patient_id: patientId },
+    // LLM + 검색 도구를 여러 번 부를 수 있어 오래 걸린다
+    timeoutMs: 90_000,
   });
 }
 
