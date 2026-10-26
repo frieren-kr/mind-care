@@ -1,10 +1,11 @@
-import { useCallback, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { currentUserId, getUserProfile, updateFeedSettings } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
+import { Button, Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
@@ -40,6 +41,11 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
           {nextVisit.hospital_name ? ` · ${nextVisit.hospital_name}` : ''}
         </ThemedText>
       ) : null}
+      <Button
+        label="정보 수정"
+        variant="secondary"
+        onPress={() => router.push({ pathname: '/patient/form', params: { id: patient.id } })}
+      />
     </Card>
   );
 }
@@ -47,6 +53,17 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
 export default function MyScreen() {
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error, loading, reload } = useApi(loadProfile);
+  // 돌보는 분 추가·수정 화면에서 돌아오면 다시 불러온다 (처음 열 때는 useApi가 이미 불러온다)
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) {
+        firstFocus.current = false;
+        return;
+      }
+      reload();
+    }, [reload]),
+  );
   const { scale: textScale, setScale: setTextScale } = useTextScale();
   const [savedDays, setSavedDays] = useState<number | null>(null);
   const [savingDays, setSavingDays] = useState<number | null>(null);
@@ -82,7 +99,16 @@ export default function MyScreen() {
             </ThemedText>
           </Card>
 
-          <ThemedText type="subtitle">돌보는 분 ({profile.patients.length}명)</ThemedText>
+          <View style={styles.headerRow}>
+            <ThemedText type="subtitle" style={styles.flex}>
+              돌보는 분 ({profile.patients.length}명)
+            </ThemedText>
+            <Button
+              label="+ 추가"
+              variant="secondary"
+              onPress={() => router.push({ pathname: '/patient/form' })}
+            />
+          </View>
           {profile.patients.map((context, index) => (
             <PatientCard key={context.patient.id} context={context} index={index} />
           ))}
@@ -144,6 +170,14 @@ export default function MyScreen() {
 }
 
 const styles = StyleSheet.create({
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  flex: {
+    flex: 1,
+  },
   wrapRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',

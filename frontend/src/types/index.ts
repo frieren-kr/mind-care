@@ -95,6 +95,19 @@ export type Patient = {
   interests: string[];
 };
 
+/**
+ * 돌보는 분 추가·수정 때 보내는 값 (user_schemas.PatientIn / PatientUpdate).
+ * null이면 값을 비운다. symptoms·interests는 목록 전체를 새 목록으로 바꾼다.
+ */
+export type PatientInput = {
+  name: string | null;
+  dementia_stage: DementiaStage | null;
+  /** 'YYYY-MM-DD', 미래 날짜 불가 */
+  diagnosis_date: string | null;
+  symptoms: string[];
+  interests: string[];
+};
+
 export type Medication = {
   id: string;
   drug_name: string;

@@ -6,6 +6,8 @@ import { DEV_USER_ID } from '@/api/config';
 import type {
   FeedSettings,
   PaperDetail,
+  Patient,
+  PatientInput,
   RecommendationResponse,
   UserProfileContext,
 } from '@/types';
@@ -43,6 +45,26 @@ export function getPaper(paperId: string): Promise<PaperDetail> {
 /** GET /feed/{user_id} — 간병인 + 담당 환자 전원의 현재 상태 */
 export function getUserProfile(userId: string): Promise<UserProfileContext> {
   return request(`/feed/${userId}`);
+}
+
+/**
+ * 돌보는 분 추가 — POST /users/{user_id}/patients (본문 PatientIn).
+ * ★ 백엔드에 아직 없는 API다 (2026-10-26 기준, 한슬 님께 요청 예정). 주소는 /feed_patient/{user_id}/{patient_id}처럼
+ * 간병인 id를 주소에 넣는 방식으로 제안했다. 만들어지기 전에는 "서버에 아직 이 기능이 없어요" 오류가 난다.
+ */
+export function createPatient(userId: string, data: PatientInput): Promise<Patient> {
+  return request(`/users/${userId}/patients`, {
+    method: 'POST',
+    body: { caregiver_id: userId, ...data },
+  });
+}
+
+/** 돌보는 분 정보 수정 — PATCH /users/{user_id}/patients/{patient_id} (본문 PatientUpdate). ★ 아직 없는 API */
+export function updatePatient(userId: string, patientId: string, data: PatientInput): Promise<Patient> {
+  return request(`/users/${userId}/patients/${patientId}`, {
+    method: 'PATCH',
+    body: data,
+  });
 }
 
 /** PATCH /users/{user_id}/feed-settings — 피드 갱신 주기(1~7일) 저장 */
