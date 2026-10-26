@@ -151,7 +151,7 @@ def delete_seed_users(user_ids: list[UUID] | None = None) -> int:
 
 def print_summary(user_ids: list[UUID]) -> None:
     """저장된 내용을 user_functions로 다시 읽어 요약한다 (API 테스트에 쓸 user_id 확인용)."""
-    print("\n[적재된 시드 프로필] — user_functions로 다시 읽은 결과")
+    print("\n[적재된 시드 프로필] - user_functions로 다시 읽은 결과")
     for user_id in user_ids:
         user = uf.get_user(user_id)
         if user is None:
@@ -210,7 +210,7 @@ def main() -> None:
     for profile in profiles:
         email = profile["user"]["email"].strip().lower()
         if email in existing:
-            print(f"  [건너뜀] {email} — 이미 있습니다 (다시 만들려면 --reset)")
+            print(f"  [건너뜀] {email} - 이미 있습니다 (다시 만들려면 --reset)")
             user_ids.append(existing[email])
             continue
         try:

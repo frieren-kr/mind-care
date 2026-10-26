@@ -276,15 +276,31 @@ class OfflineFeedHandoffTests(unittest.TestCase):
 
         for target, options in {
             "app.api.recommendations.settings": {"new": SimpleNamespace(
-                openai_api_key="offline-placeholder", openai_summary_model="gpt-5.6-luna")},
+                openai_api_key="offline-placeholder", openai_summary_model="gpt-5.6-luna", openai_agent_model="")},
             "app.api.recommendations.OpenAI": {"side_effect": make_sdk},
-            "socket.socket.connect": {"side_effect": AssertionError("Live network forbidden")},
+            # Windows asyncio의 내부 socketpair는 허용하고 실제 HTTP 전송만 차단한다.
+            "httpx.HTTPTransport.handle_request": {"side_effect": AssertionError("Live HTTP forbidden")},
+            "httpx.AsyncHTTPTransport.handle_async_request": {"side_effect": AssertionError("Live HTTP forbidden")},
         }.items():
             patcher = patch(target, **options)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def test_configured_dependency_runs_sdk_search_handoff_and_returns_ai(self):
+        self.assert_configured_dependency_returns_ai()
+
+    def test_configured_dependency_allows_loopback_socketpair(self):
+        """Windows의 내부 TCP socketpair 경로를 Linux에서도 검증한다."""
+        import socket
+
+        fallback = getattr(socket, "_fallback_socketpair", None)
+        if fallback is None:
+            self.skipTest("이 Python 버전은 _fallback_socketpair를 제공하지 않음")
+        with patch.object(socket, "socketpair", wraps=fallback) as socketpair:
+            self.assert_configured_dependency_returns_ai()
+        socketpair.assert_called()
+
+    def assert_configured_dependency_returns_ai(self):
         import httpx
         from app.ai.agent.tests.test_openai_client import completion
         from app.ai.agent.tests.test_feed_execution import final_turn
@@ -318,7 +334,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(r["model"] == "gpt-5.6-luna" for r in requests))
         self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["search_evidence"])
-        rag.assert_called_once_with(query="Dementia sleep research", k=5)
+        rag.assert_called_once_with(query="Dementia sleep research", k=8)
         save.assert_called_once()
         self.search.assert_not_called()
         self.assertIs(get_feed_execution(), get_feed_execution())

@@ -448,6 +448,7 @@ class ProductionStageOneTests(unittest.TestCase):
                 [{"patient_id": row.patient_id, "total": getattr(row, field).total_count} for row in patients],
             ))
         all_rows.append([log.model_dump() for log in raw.recent_care_logs.items])
+        all_rows.append([])  # 신규 recently_recommended 조회 결과
         cursor.fetchall.side_effect = all_rows
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value = cursor
@@ -484,4 +485,13 @@ class ProductionStageOneTests(unittest.TestCase):
         handoff.assert_called_once()
         self.assertEqual(captured.recent_care_context.care_logs.coverage.total_count, 11)
         self.assertEqual(captured.long_term_summary.summary, "PRIVATE_MONTHLY_SUMMARY")
-        self.assertEqual(cursor.execute.call_count, 14)
+        self.assertEqual(cursor.execute.call_count, 15)
+        self.assertEqual([call.args[0] for call in cursor.execute.call_args_list], [
+            feed_read._USER_EXISTS, feed_read._CAREGIVER_PROFILE, feed_read._PATIENTS,
+            feed_read._ASSESSMENTS, feed_read._ASSESSMENTS_COUNT,
+            feed_read._SAFETY, feed_read._SAFETY_COUNT,
+            feed_read._MEDICATIONS, feed_read._MEDICATIONS_COUNT,
+            feed_read._VISITS, feed_read._VISITS_COUNT,
+            feed_read._CARE_LOGS, feed_read._CARE_LOGS_COUNT,
+            feed_read._LONG_TERM_SUMMARY, feed_read._RECENT_FEED_PAPERS,
+        ])

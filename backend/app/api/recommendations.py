@@ -77,7 +77,8 @@ def _example(detail: str) -> dict:
 def get_feed_execution() -> Optional[FeedExecution]:
     """FeedWorkflow의 2단계(feed_execution)를 돌려주는 FastAPI 의존성.
 
-    backend/.env의 OPENAI_API_KEY와 OPENAI_SUMMARY_MODEL로 실제 실행기를 조립한다.
+    backend/.env의 OPENAI_API_KEY와 OPENAI_AGENT_MODEL로 실제 실행기를 조립한다.
+    OPENAI_AGENT_MODEL이 비어 있으면 OPENAI_SUMMARY_MODEL을 사용한다.
     키/모델이 없거나 초기화가 실패하면 None (검색 방식). 설정 변경 후 서버 재시작 필요.
     실행기와 SDK는 프로세스 안에서 재사용한다. 조립만으로 외부 API를 호출하지 않는다.
     1단계가 정식(간병인 기준) 경로이므로, 실행기는 feed_scope="caregiver_all"
@@ -85,7 +86,7 @@ def get_feed_execution() -> Optional[FeedExecution]:
     테스트에서는 app.dependency_overrides[get_feed_execution]으로 바꿔 끼운다.
     """
     api_key = settings.openai_api_key.strip()
-    model = settings.openai_summary_model.strip()
+    model = settings.openai_agent_model.strip() or settings.openai_summary_model.strip()
     if not api_key or not model:
         logger.info("추천 AI 설정 없음 → 검색 방식으로 응답")
         return None

@@ -111,6 +111,47 @@ class FeedReadTestBase(unittest.TestCase):
 
 
 # ============================================================
+# 최근 추천 이력 (recently_recommended)
+# ============================================================
+
+
+class RecentlyRecommendedTests(FeedReadTestBase):
+    """스냅샷의 recently_recommended. feed_items 시각은 REFERENCE_TIME 기준으로 직접 넣는다."""
+
+    def setUp(self):
+        super().setUp()
+        with get_connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM papers ORDER BY id LIMIT 2")
+            self.papers = [row[0] for row in cur.fetchall()]
+        if len(self.papers) < 2:
+            self.skipTest("논문이 2편 미만입니다 — 팀 덤프 복원 필요")
+
+    def _recommend(self, paper_id, days_ago, user_id=None):
+        self._insert("feed_items", user_id=user_id or self.user_id, paper_id=paper_id,
+                     created_at=REFERENCE_TIME - timedelta(days=days_ago))
+
+    def test_no_history_is_empty_list(self):
+        self.assertEqual(snapshot(self.user_id).recently_recommended, [])
+
+    def test_recent_papers_are_included_in_order(self):
+        self._recommend(self.papers[0], 10)
+        self._recommend(self.papers[1], 2)
+        self._recommend(self.papers[0], 5)
+        self._recommend(self.papers[1], 31)   # 기간 밖
+        self._recommend(self.papers[0], -1)   # 미래
+        recent = snapshot(self.user_id).recently_recommended
+        self.assertEqual([(r.paper_id, r.times_recommended) for r in recent],
+                         [(self.papers[1], 1), (self.papers[0], 2)])
+        self.assertEqual(recent[1].last_recommended_at, REFERENCE_TIME - timedelta(days=5))
+
+    def test_other_users_history_is_not_mixed(self):
+        other = self._create_user()
+        self._recommend(self.papers[0], 1, user_id=other)
+        self.assertEqual(snapshot(self.user_id).recently_recommended, [])
+        self.assertEqual([r.paper_id for r in snapshot(other).recently_recommended], [self.papers[0]])
+
+
+# ============================================================
 # 기본 동작 / 빈 결과
 # ============================================================
 

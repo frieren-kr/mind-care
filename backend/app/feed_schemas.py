@@ -53,6 +53,10 @@ MEDICATION_STOPPED_WITHIN_DAYS = 90
 VISIT_PAST_WINDOW_DAYS = 365
 VISIT_FUTURE_WINDOW_DAYS = 90
 
+# 최근 추천 이력 (reference_time 기준) — 스냅샷의 recently_recommended, get_recent_feed_papers() 기본값
+RECENT_FEED_WINDOW_DAYS = 30
+RECENT_FEED_LIMIT = 50
+
 
 class FeedReadModel(BaseModel):
     """AI 쪽 AgentModel과 같은 설정 — 모르는 필드는 거부한다."""
@@ -198,6 +202,16 @@ class FeedReadLongTermSummary(FeedReadModel):
     generated_at: AwareDatetime
 
 
+class FeedRecentPaper(BaseModel):
+    """get_recent_feed_papers() 항목 1개 = 최근 이 사용자에게 추천한 논문 1편 (논문별로 묶음)."""
+
+    paper_id: UUID
+    pmid: Optional[str] = Field(description="papers.external_id (source='pubmed'일 때만, 아니면 None)")
+    title: str
+    last_recommended_at: AwareDatetime = Field(description="기간 안에서 가장 최근에 추천한 시각 (feed_items.created_at)")
+    times_recommended: int = Field(description="기간 안에서 추천한 횟수 (feed_items 행 수)")
+
+
 class FeedReadSnapshot(FeedReadModel):
     """get_feed_context_snapshot()이 돌려주는 한 벌.
 
@@ -209,6 +223,8 @@ class FeedReadSnapshot(FeedReadModel):
     managed_patients: FeedReadCollection[FeedReadManagedPatient]
     recent_care_logs: FeedReadCollection[FeedReadCareLog]
     long_term_summary: Optional[FeedReadLongTermSummary]
+    # 최근 RECENT_FEED_WINDOW_DAYS일 안에 추천한 논문 (최근 순, 최대 RECENT_FEED_LIMIT편). 반복 추천 방지용.
+    recently_recommended: list[FeedRecentPaper] = Field(default_factory=list)
 
 
 # ============================================================
