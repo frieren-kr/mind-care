@@ -39,7 +39,7 @@ class MigrationDbCase(unittest.TestCase):
                         ("기존 테스트 사용자", f"feed-settings-{uuid4().hex}@example.com"))
             self.user_id = cur.fetchone()[0]
             migration = Path(__file__).parents[1] / "app/db/migrations/010_user_feed_refresh_days.sql"
-            self.migration_sql = migration.read_text()
+            self.migration_sql = migration.read_text(encoding="utf-8")
             cur.execute(self.migration_sql)
 
         @contextmanager
