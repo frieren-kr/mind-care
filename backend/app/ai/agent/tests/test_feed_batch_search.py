@@ -16,7 +16,7 @@ from ..testing.fake_llm import FakeLLMClient
 from ..workflows.feed_execution import FeedExecutionV1
 from ..workflows.feed_prompts import FeedPromptBuilder
 from . import test_parallel_feed as parallel
-from .test_feed_candidates import decisions, package
+from .test_feed_candidates import decisions, package, review_turn
 from .test_openai_client import completion
 from .test_workflows import CONTEXT
 
@@ -42,7 +42,7 @@ class FeedBatchSearchTests(unittest.TestCase):
                     barrier.wait(2)
                     return package([f'{args.query}-{i}' for i in range(8)])
                 result, client = self.run_turns([ModelTurn(tool_calls=[batch([f'topic {i}' for i in range(count)])]),
-                    ModelTurn(text=json.dumps(decisions(5, range(5))))], handler)
+                    ModelTurn(text=json.dumps(decisions(min(count * 8, 10), range(5))))], handler)
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertCountEqual(reached, [(f'topic {i}', 8) for i in range(count)])
                 self.assertEqual(result.execution.total_tool_calls, count)
@@ -57,7 +57,7 @@ class FeedBatchSearchTests(unittest.TestCase):
                 progress = json.loads(messages[-1].content)['search_progress']
                 self.assertEqual(progress['model_tool_calls_used'], 1)
                 self.assertEqual(progress['search_calls_used'], count)
-                self.assertEqual(progress['search_calls_remaining'], 3-count)
+                self.assertEqual(progress['search_calls_remaining'], 9-count)
                 self.assertNotIn('feed-rag:', json.dumps([m.model_dump() for m in messages]))
                 for source in result.sources:
                     index = int(source.source_ref.tool_call_id.split(':')[-1])
@@ -77,7 +77,7 @@ class FeedBatchSearchTests(unittest.TestCase):
             return package([f'{i}-{j}' for j in range(8)])
         try:
             result, _ = self.run_turns([ModelTurn(tool_calls=[batch(['0','1','2'])]),
-                ModelTurn(text=json.dumps(decisions(5, range(5))))], handler)
+                ModelTurn(text=json.dumps(decisions(10, range(5))))], handler)
         finally:
             release_a.set(); release_b.set()
         self.assertEqual(finished, [2,0,1])
@@ -122,13 +122,13 @@ class FeedBatchSearchTests(unittest.TestCase):
             reached.append(args.query)
             return package([args.query])
         result, client = self.run_turns([ModelTurn(tool_calls=[batch(['a','b'], 'first')]),
-            ModelTurn(tool_calls=[batch(['c'], 'second')]),
+            review_turn(ModelTurn(tool_calls=[batch(['c'], 'second')]), 1, (0, 1)),
             ModelTurn(text=json.dumps(decisions(3, range(3))))], handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assertCountEqual(reached, ['a','b','c'])
         self.assertEqual((result.execution.tool_rounds, result.execution.total_tool_calls), (2,3))
         self.assertEqual(len(client.requests), 3)
-        self.assertEqual(client.options[-1].tool_choice, 'none')
+        self.assertEqual(client.options[-1].tool_choice, 'auto')
         last = client.requests[-1][0]
         self.assertEqual([m.tool_call_id for m in last if m.role == 'tool'], ['first','second'])
         self.assertEqual(json.loads(last[-1].content)['search_progress']['model_tool_calls_used'], 2)
@@ -159,7 +159,7 @@ class FeedBatchSearchTests(unittest.TestCase):
 
     def test_excess_actual_search_budget_rejects_entire_turn_before_io(self):
         for turns, expected in (([ModelTurn(tool_calls=[batch(['a','b']), batch(['c','d'], 'second')])], 0),
-                                 ([ModelTurn(tool_calls=[batch(['a','b'])]), ModelTurn(tool_calls=[batch(['c','d'], 'next')])], 2)):
+                                 ([ModelTurn(tool_calls=[batch(['a','b'])]), review_turn(ModelTurn(tool_calls=[batch(['c','d'], 'next'), batch(['e','f'], 'another')]), 1)], 2)):
             reached = []
             result, _ = self.run_turns(turns, lambda c,a: reached.append(a.query) or package([a.query]))
             self.assertEqual(result.execution.status, 'limit_reached')
@@ -267,8 +267,8 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual(len(wire), 2)
         self.assertCountEqual(reached, [('a',8),('b',8),('c',8)])
         schema = wire[0]['tools'][0]['function']['parameters']
-        self.assertEqual(set(schema['properties']), {'queries'})
+        self.assertEqual(set(schema['properties']), {'queries', 'review'})
         self.assertEqual((schema['properties']['queries']['minItems'],schema['properties']['queries']['maxItems']), (1,3))
         self.assertEqual([m['tool_call_id'] for m in wire[1]['messages'] if m['role']=='tool'], ['sdk-real'])
         self.assertNotIn('feed-rag:', json.dumps(wire[1]['messages']))
-        self.assertEqual([wire[0]['tool_choice'],wire[1]['tool_choice']], ['required','none'])
+        self.assertEqual([wire[0]['tool_choice'],wire[1]['tool_choice']], ['required','auto'])

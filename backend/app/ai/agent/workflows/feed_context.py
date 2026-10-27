@@ -9,13 +9,27 @@ Validation cannot prove DB ownership from opaque refs.
 from datetime import date, timedelta, timezone, tzinfo
 from decimal import Decimal
 from typing import Generic, Literal, TypeVar
+from uuid import UUID
 
 from pydantic import (
     AwareDatetime, ConfigDict, Field, StrictBool, StrictInt, StrictStr,
     ValidationInfo, model_validator,
 )
 
+from app.feed_schemas import RECENT_FEED_LIMIT, RECENT_FEED_WINDOW_DAYS
+
 from ..schemas import AgentModel
+
+
+def _validate_recent_feed_history(records, reference_time) -> None:
+    if len(records) > RECENT_FEED_LIMIT:
+        raise ValueError("Recent Feed history exceeds limit")
+    if len({row.paper_id for row in records}) != len(records):
+        raise ValueError("Duplicate recent Feed paper identity")
+    end = reference_time.astimezone(timezone.utc)
+    start = end - timedelta(days=RECENT_FEED_WINDOW_DAYS)
+    if any(not start < row.last_recommended_at.astimezone(timezone.utc) <= end for row in records):
+        raise ValueError("Recent Feed recommendation lies outside (reference - 30 days, reference]")
 
 
 class _ContextModel(AgentModel):
@@ -169,6 +183,14 @@ class LongTermPersonalizationSummary(_ContextModel):
         return self
 
 
+class RecentFeedRecommendationContext(_ContextModel):
+    paper_id: UUID
+    pmid: StrictStr | None
+    title: StrictStr
+    last_recommended_at: AwareDatetime
+    times_recommended: StrictInt = Field(ge=1)
+
+
 class FeedPersonalizationContextV1(_ContextModel):
     """Validate with server-only context={\"service_timezone\": tzinfo}.
 
@@ -182,6 +204,7 @@ class FeedPersonalizationContextV1(_ContextModel):
     managed_patient_profiles: ContextCollection[ManagedPatientContext]
     recent_care_context: RecentCareContext
     long_term_summary: LongTermPersonalizationSummary | None
+    recently_recommended: list[RecentFeedRecommendationContext]
 
     @model_validator(mode="after")
     def validate_context(self, info: ValidationInfo):
@@ -191,6 +214,7 @@ class FeedPersonalizationContextV1(_ContextModel):
             raise ValueError("server validation context must supply service_timezone (tzinfo)")
         reference_date = self.reference_time.astimezone(service_timezone).date()
         reference_utc = self.reference_time.astimezone(timezone.utc)
+        _validate_recent_feed_history(self.recently_recommended, self.reference_time)
         recent = self.recent_care_context
         if recent.period_end.astimezone(timezone.utc) != reference_utc:
             raise ValueError("recent period_end must equal reference_time")

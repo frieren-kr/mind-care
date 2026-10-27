@@ -277,7 +277,7 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         self.assertEqual(result.sources[0].pmid, case.evidence.evidence[0].pmid)
         self.assertEqual(result.sources[0].title, case.evidence.evidence[0].title)
         runner = case.execution.runner
-        self.assertEqual((runner.max_tool_rounds, runner.max_total_tool_calls), (3, 3))
+        self.assertEqual((runner.max_tool_rounds, runner.max_total_tool_calls), (3, 9))
         self.assertEqual((runner.executor.timeout_seconds, runner.request_timeout_seconds), (30, 120))
         self.assertEqual((case.sdk.timeout, case.sdk.max_retries), (90, 2))
 

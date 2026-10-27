@@ -11,6 +11,8 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
+from app.feed_schemas import RECENT_FEED_LIMIT
+
 from ..schemas import AgentModel
 
 
@@ -114,11 +116,27 @@ class SourceLongTermSummary(FeedSourceModel):
     generated_at: AwareDatetime
 
 
+class SourceRecentFeedPaper(FeedSourceModel):
+    paper_id: UUID
+    pmid: StrictStr | None
+    title: StrictStr
+    last_recommended_at: AwareDatetime
+    times_recommended: StrictInt = Field(ge=1)
+
+
 class FeedContextSourceSnapshot(FeedSourceModel):
     caregiver_profile: SourceCaregiverProfile | None
     managed_patients: SourceCollection[SourceManagedPatient]
     recent_care_logs: SourceCollection[SourceCareLog]
     long_term_summary: SourceLongTermSummary | None
+    recently_recommended: list[SourceRecentFeedPaper] = Field(max_length=RECENT_FEED_LIMIT)
+
+    @model_validator(mode="after")
+    def unique_recent_papers(self):
+        ids = [row.paper_id for row in self.recently_recommended]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate recent Feed paper identity")
+        return self
 
 
 class FeedContextSource(Protocol):

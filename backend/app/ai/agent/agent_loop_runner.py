@@ -7,7 +7,7 @@ from typing import cast
 from ._execution import RequestTimeout, ParallelStopped, bounded_call, bounded_parallel, check_deadline, positive_seconds, request_deadline
 from .clients.base import LLMClient, GenerationOptions, generate_with_options
 from .executor import ToolExecutor
-from .feed_search_policy import (MAX_FEED_RETRIEVAL, FeedSearchBudgetExceeded,
+from .feed_search_policy import (MAX_FEED_RETRIEVAL, MAX_FEED_SEARCH_ROUNDS, MAX_FEED_SEARCHES, FeedSearchBudgetExceeded,
                                  feed_tool_definitions, prepare_feed_searches)
 from .feed_candidates import FeedCandidates, FeedDecisionError
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
@@ -57,11 +57,13 @@ class AgentLoopRunner:
         return cast(AgentResult, self._run(user_input, context))
 
     def run_structured(self, user_input: str, context: AgentContext, *,
-                       output_model: FinalOutputModel) -> StructuredAgentResult:
+                       output_model: FinalOutputModel,
+                       previously_recommended_pmids: frozenset[str] = frozenset()) -> StructuredAgentResult:
         """명시적 opt-in. 기존 Client/Tool Loop로 실행하고 마지막 text만 검증한다."""
         if output_model not in (ChatAnswerV1, FeedAnswerV2):
             raise ValueError("Only ChatAnswerV1 and FeedAnswerV2 are supported")
-        return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model))
+        return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model,
+                    previously_recommended_pmids=previously_recommended_pmids))
 
     def _tool_results(self, calls, context, state, *, stop_on_failure):
         parallel = False
@@ -95,11 +97,13 @@ class AgentLoopRunner:
                     return
 
     def _run(self, user_input: str, context: AgentContext, *,
-             output_model: FinalOutputModel | None = None) -> AgentResult | StructuredAgentResult:
+             output_model: FinalOutputModel | None = None,
+             previously_recommended_pmids: frozenset[str] = frozenset()) -> AgentResult | StructuredAgentResult:
         state = AgentState(request_id=context.request_id)
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
-        feed_candidates = FeedCandidates() if output_model is FeedAnswerV2 else None
+        feed_candidates = (FeedCandidates(previously_recommended_pmids=previously_recommended_pmids)
+                           if output_model is FeedAnswerV2 else None)
         feed_retrieval_used = 0
         feed_model_calls = 0
         feed_query_keys: set[str] = set()
@@ -152,8 +156,8 @@ class AgentLoopRunner:
                 messages = state.messages + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
                 if feed_candidates is not None:
-                    remaining = min(min(3, self.max_total_tool_calls) - state.total_tool_calls,
-                                    self.max_tool_rounds - state.tool_round)
+                    rounds_remaining = max(0, min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) - state.tool_round)
+                    remaining = max(0, min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - state.total_tool_calls)
                     if feed_candidates.successful_searches:
                         # Feed evaluation policy/projection belong to this request only,
                         # after a successful search, never to persistent history.
@@ -162,7 +166,8 @@ class AgentLoopRunner:
                         messages.insert(user_position, bounded_call(
                             lambda: build_structured_output_policy(output_model)))
                         messages.append(bounded_call(lambda: feed_candidates.message(
-                            remaining, model_tool_calls=feed_model_calls)))
+                            remaining, model_tool_calls=feed_model_calls,
+                            rounds_used=state.tool_round, rounds_remaining=rounds_remaining)))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
                 if feed_candidates is not None:
@@ -170,7 +175,7 @@ class AgentLoopRunner:
                 try:
                     if feed_candidates is not None:
                         options = GenerationOptions(
-                            tool_choice=("none" if remaining == 0 else
+                            tool_choice=("none" if remaining == 0 or rounds_remaining == 0 else
                                          "auto" if feed_candidates.successful_searches else "required"),
                             parallel_tool_calls=self.allow_parallel_tools and self.max_parallel_calls > 1)
                         turn = bounded_call(lambda: generate_with_options(self.client, messages, definitions, options))
@@ -222,7 +227,7 @@ class AgentLoopRunner:
                     else:
                         state.final_answer = turn.text
                     return finish("completed")
-                if (state.tool_round >= self.max_tool_rounds or
+                if (state.tool_round >= (min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) if feed_candidates is not None else self.max_tool_rounds) or
                         state.total_tool_calls + len(turn.tool_calls) > self.max_total_tool_calls):
                     state.errors.append(AgentError(code="tool_limit", message="Tool 실행 상한에 도달했습니다."))
                     return finish("limit_reached")
@@ -235,11 +240,16 @@ class AgentLoopRunner:
                     try:
                         search_plan = bounded_call(lambda: prepare_feed_searches(
                             calls, turn=state.tool_round + 1,
-                            remaining_calls=min(3, self.max_total_tool_calls) - state.total_tool_calls,
+                            remaining_calls=min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - state.total_tool_calls,
                             remaining_budget=MAX_FEED_RETRIEVAL - feed_retrieval_used,
                             previous_queries=feed_query_keys,
                             reserved_ids=seen_ids | set(evidence_by_call)))
+                        staged_candidates = deepcopy(feed_candidates)
+                        bounded_call(lambda: staged_candidates.apply_review(search_plan.review, evidence_by_call))
                         calls = search_plan.searches
+                    except FeedDecisionError as error:
+                        state.errors.append(AgentError(code=error.code, message="Feed 후보 검토 정보가 계약과 일치하지 않습니다."))
+                        return finish("invalid_response")
                     except FeedSearchBudgetExceeded:
                         state.errors.append(AgentError(code='tool_limit', message='Feed 실제 검색 예산을 초과했습니다.'))
                         return finish('limit_reached')
@@ -271,13 +281,13 @@ class AgentLoopRunner:
                            for call, (_, package) in zip(calls, packages, strict=True)):
                         raise ValueError("Feed search returned more than its retrieval limit")
                     stage = "candidate_source_mismatch"
-                    staged_candidates = deepcopy(feed_candidates)
                     for call_id, package in packages:
                         before_count = staged_candidates.eligible_count
                         bounded_call(lambda: staged_candidates.add(call_id, package))
                         staged_candidates.record_search(True, len(package.evidence),
                             staged_candidates.eligible_count - before_count)
                     check_deadline()
+                    staged_candidates.finish_round()
                     feed_candidates = staged_candidates
                     for call_id, package in packages:
                         evidence.append(package)

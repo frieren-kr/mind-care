@@ -5,6 +5,7 @@ from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..registry import ToolName, ToolRegistry
 from ..schemas import AgentContext
 from .feed_prompts import FeedPromptBuilder
+from .feed_context_prepare import PreparedFeedInput
 
 
 class FeedExecutionError(RuntimeError):
@@ -26,7 +27,7 @@ class FeedExecutionV1:
                  allow_parallel_tools: bool = True, max_parallel_calls: int = 3):
         try:
             self.runner = AgentLoopRunner(client, registry, prompt_builder=FeedPromptBuilder(),
-                max_tool_rounds=3, max_total_tool_calls=3,
+                max_tool_rounds=3, max_total_tool_calls=9,
                 allow_parallel_tools=allow_parallel_tools, max_parallel_calls=max_parallel_calls,
                 tool_timeout_seconds=tool_timeout_seconds, request_timeout_seconds=request_timeout_seconds)
             self._validate_runner()
@@ -42,8 +43,8 @@ class FeedExecutionV1:
         names = [definition["function"]["name"] for definition in runner.registry.definitions()]
         if names != [ToolName.SEARCH_EVIDENCE.value]:
             raise ValueError("Feed runner requires search_evidence only")
-        if runner.max_tool_rounds != 3 or runner.max_total_tool_calls != 3:
-            raise ValueError("Feed runner requires round and total call limits of 3")
+        if runner.max_tool_rounds != 3 or runner.max_total_tool_calls != 9:
+            raise ValueError("Feed runner requires 3 rounds and 9 total search calls")
 
     def __call__(self, context: AgentContext, provider_input: str) -> StructuredAgentResult:
         try:
@@ -51,6 +52,9 @@ class FeedExecutionV1:
             self._validate_runner()
             if not isinstance(provider_input, str) or not provider_input.strip():
                 raise TypeError("Prepared Feed input required")
-            return self.runner.run_structured(provider_input, context, output_model=FeedAnswerV2)
+            pmids = (provider_input.previously_recommended_pmids
+                     if isinstance(provider_input, PreparedFeedInput) else frozenset())
+            return self.runner.run_structured(str(provider_input), context, output_model=FeedAnswerV2,
+                                               previously_recommended_pmids=pmids)
         except Exception:
             raise FeedExecutionError() from None

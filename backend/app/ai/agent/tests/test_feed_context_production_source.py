@@ -15,7 +15,7 @@ from uuid import UUID
 from psycopg import IsolationLevel
 
 from app.db import feed_read
-from app.feed_schemas import FeedReadSnapshot
+from app.feed_schemas import FeedReadSnapshot, FeedRecentPaper
 from app.user_schemas import APP_TIMEZONE
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
@@ -133,7 +133,7 @@ class ProductionSourceTests(unittest.TestCase):
     def test_zero_patients_is_successful_cold_start_without_caregiver(self):
         source, read = self.source(snapshot([], full=False))
         self.assertEqual(json.loads(prepare_production_feed_input(CONTEXT, context_loader(source))),
-                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         read.assert_called_once_with(**ARGS)
 
     def test_one_patient_source_preserves_all_counts_content_and_decimal(self):
@@ -358,7 +358,7 @@ class ProductionStageOneTests(unittest.TestCase):
         text = prepare_production_feed_input(CONTEXT, context_loader(source))
         payload = json.loads(text)
         self.assertEqual(payload["feed_scope"], "caregiver_all")
-        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients"})
+        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients", "recent_feed_titles"})
         self.assertEqual(set(payload["caregiver"]), {"relationship", "lifestyle_tags"})
         for row in payload["patients"]:
             self.assertEqual(set(row), {"patient_ref", "dementia_stage", "symptoms", "interests",
@@ -434,6 +434,11 @@ class ProductionStageOneTests(unittest.TestCase):
 
     def test_real_backend_function_is_called_through_production_stage_one_with_only_db_io_mocked(self):
         raw = snapshot([patient(P2), patient(P1)])
+        raw.recently_recommended = [FeedRecentPaper(
+            paper_id=UUID(int=100+index), pmid="PRIVATE_HISTORY_PMID" if index == 0 else None,
+            title=f"Stored history title {index}", last_recommended_at=NOW-timedelta(hours=index),
+            times_recommended=index+1,
+        ) for index in range(2)]
         patients = raw.managed_patients.items
         cursor = MagicMock()
         cursor.fetchone.side_effect = [{"ok": 1}, raw.caregiver_profile.model_dump(),
@@ -448,6 +453,7 @@ class ProductionStageOneTests(unittest.TestCase):
                 [{"patient_id": row.patient_id, "total": getattr(row, field).total_count} for row in patients],
             ))
         all_rows.append([log.model_dump() for log in raw.recent_care_logs.items])
+        all_rows.append([row.model_dump() for row in raw.recently_recommended])
         cursor.fetchall.side_effect = all_rows
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value = cursor
@@ -484,4 +490,19 @@ class ProductionStageOneTests(unittest.TestCase):
         handoff.assert_called_once()
         self.assertEqual(captured.recent_care_context.care_logs.coverage.total_count, 11)
         self.assertEqual(captured.long_term_summary.summary, "PRIVATE_MONTHLY_SUMMARY")
-        self.assertEqual(cursor.execute.call_count, 14)
+        self.assertEqual([row.model_dump() for row in captured.recently_recommended],
+                         [row.model_dump() for row in raw.recently_recommended])
+        self.assertEqual(result["recent_feed_titles"], [row.title for row in raw.recently_recommended])
+        self.assertEqual(execution.call_args.args[1].previously_recommended_pmids,
+                         frozenset({"PRIVATE_HISTORY_PMID"}))
+        self.assertNotIn("PRIVATE_HISTORY_PMID", execution.call_args.args[1])
+        self.assertEqual(cursor.execute.call_count, 15)
+        self.assertEqual([call.args[0] for call in cursor.execute.call_args_list], [
+            feed_read._USER_EXISTS, feed_read._CAREGIVER_PROFILE, feed_read._PATIENTS,
+            feed_read._ASSESSMENTS, feed_read._ASSESSMENTS_COUNT,
+            feed_read._SAFETY, feed_read._SAFETY_COUNT,
+            feed_read._MEDICATIONS, feed_read._MEDICATIONS_COUNT,
+            feed_read._VISITS, feed_read._VISITS_COUNT,
+            feed_read._CARE_LOGS, feed_read._CARE_LOGS_COUNT,
+            feed_read._LONG_TERM_SUMMARY, feed_read._RECENT_FEED_PAPERS,
+        ])

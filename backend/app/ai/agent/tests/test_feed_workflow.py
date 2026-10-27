@@ -44,7 +44,9 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(deps.read_calls[0]["user_id"], context.user_id)
         run.assert_called_once()
         prepared = deps.received["feed_execution"][1]
-        self.assertIs(run.call_args.args[0], prepared)
+        self.assertEqual(run.call_args.args[0], prepared)
+        self.assertIs(type(run.call_args.args[0]), str)
+        self.assertEqual(run.call_args.kwargs["previously_recommended_pmids"], frozenset())
         user = next(m for m in deps.client.requests[0][0] if m.kind == "user_input")
         self.assertEqual(user.content, prepared)
         patients = json.loads(prepared)["patients"]
@@ -76,7 +78,7 @@ class FeedWorkflowTests(unittest.TestCase):
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidate_count"], 1)
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep orchestration fixture")
-                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research")]))
+                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research", revision=1, retain=(0,))]))
                 elif len(self.requests) == 2:
                     test.assertEqual([m.tool_call_id for m in messages if m.role == "tool"],
                                      ["search_1", "search_2"])
@@ -135,11 +137,12 @@ class FeedWorkflowTests(unittest.TestCase):
     def test_three_calls_allow_final_after_third_result(self):
         for batches in ((1, 1, 1), (3,)):
             turns, identifier = [], 0
-            for batch in batches:
+            for revision, batch in enumerate(batches):
                 calls = []
                 for _ in range(batch):
                     identifier += 1
-                    calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}"))
+                    calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}",
+                                             revision=revision, retain=(0,)))
                 turns.append(ModelTurn(tool_calls=calls))
             deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn()])
             self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
@@ -330,7 +333,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
         messages = deps.client.requests[0][0]
         payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
-        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
         self.assertIn("일반적인 정보적 관련성", policy)

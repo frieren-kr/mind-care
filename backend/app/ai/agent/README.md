@@ -53,7 +53,7 @@ Factory/Handler의 공유 서비스나 Client는 서버 조립부 책임이며 �
 Chat은 공용 기본 예산 5 rounds / 10 calls를 사용한다. 동일 Turn의 독립 Tool들은 기존 Runner가
 순차 실행해 결과를 모은 뒤 다음 LLM 호출로 전달한다. 세 Tool은 1 round / 3 calls이며 중간 LLM
 재호출은 없다. 앞선 결과가 필요한 검색은 후속 Turn에서 LLM이 판단한다. Intent classifier,
-별도 Planner/Tool loop/ParallelToolExecutor는 없다. Feed의 3/3 설정·검색 전용 Registry는 변경하지 않는다.
+별도 Planner/Tool loop/ParallelToolExecutor는 없다. Feed의 3라운드/9검색 설정·검색 전용 Registry는 변경하지 않는다.
 ChatPromptBuilder는 DefaultPromptBuilder의 Tool followup을 재사용하고 raw AgentContext 초기 메시지만
 제외한다. 공용 Runner가 기존 Chat structured policy를 삽입한다. Tool/질문/Evidence는 비신뢰 데이터다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
@@ -139,7 +139,7 @@ Provider 입력에서 제외된 정보는 미제공이며 정상 0건이나 임�
 적절한 Evidence가 없거나 출력 계약을 충족할 수 없으면 items=[]를 허용한다.
 
 **Feed 실행.** `workflows/feed_execution.py`의 `FeedExecutionV1(client, registry, ...)`가
-FeedPromptBuilder와 3 rounds / 3 total calls를 지정하여 공용 Runner를 조립한다.
+FeedPromptBuilder와 3 rounds / 9 total search calls를 지정하여 공용 Runner를 조립한다.
 Feed 허용 Tool은 정확히 search_evidence 하나다. 생성 시와 실행 직전 실제 Executor와 Runner가
 동일한 Registry를 사용하고, 공개 Tool·Prompt·budget이 Feed 계약을 지키는지 확인한다.
 Workflow에는 별도 Runner, Retrieval Planner, Plan parameter, agent_stage 또는 미구현
@@ -149,7 +149,8 @@ Tool 반복/timeout/structured parser/evidence resolution은 공용 엔진에 �
 **Feed 후보 순서와 내부 판단.** `feed_candidates.py`의 `FeedCandidates`는 Runner 실행 한 번에만
 존재한다. 성공한 검색의 검증된 Snapshot을 요청 순서·원래 index로 보관한다. PMID가 비어 있으면
 제외하고 라운드 로빈에서 실제 선택된 PMID만 중복 제거한다. 매 검색 묶음 후 주제별 RAG 순위와 주제 우선순위를
-따라 라운드 로빈으로 최신 후보 최대 5개를 재구성한다. 후속 검색은 후보 순서를 바꿀 수 있으며
+따라 라운드 로빈으로 최신 검토 후보 최대 15개를 재구성한다. 후속 검색에서는 검토 완료 PMID를 신규 후보에서 제외하고,
+LLM이 유지한 후보와 미검토 기존/신규 결과를 합친다. 후속 검색은 후보 순서를 바꿀 수 있으며
 최종 decisions는 현재 목록의 위치에만 대응한다. 원본 `(tool_call_id, evidence_index)`와 전체 검증 근거는
 서버에 보관하고 요청 사이에 공유하지 않는다. PMID를 새로 만들거나 정규화하지 않는다.
 
@@ -160,7 +161,7 @@ ai_summary(없으면 abstract) 발췌 최대 1,200자만 제공한다. 식별 me
 자유 텍스트의 개인정보 제거를 보장하지 않는다. 후보 본문은 비신뢰 데이터이고 system 정책이 아니다.
 
 LLM은 `{"decisions":[{"include":true,"personal_reason":"...","category":"care"},{"include":false}]}`
-형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 후보 수만큼의 판단이 필요하고,
+형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 실제 검토 후보 수(최대 15편)만큼의 판단이 필요하고,
 제외 항목에는 이유/category/null도 허용하지 않는다. 선택 수가 5를 넘거나 길이가 다르면 실패한다.
 출처 ID·추가 필드·중복 JSON 키도 거부한다. 검색 성공 후 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다. 검색 미실행은 정상 완료할 수 없다.
 서버는 후보 순서로 원본 참조를 결합하고 Snapshot 일치 및 기존 `resolve_evidence_references()`를
@@ -234,12 +235,32 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 
 `workflows/feed_context.py`는 caregiver/user-scoped **입력** 계약이다. 공통 실행 `schemas.py`,
 Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Loader는 이 전체 계약으로
-최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 네 구성이다.
+최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 다섯 구성이다.
 
 - `caregiver_profile`: 저장된 간병인 프로필, row가 없으면 명시적 `null`
 - `managed_patient_profiles`: 여러 관리 환자의 저장 프로필 및 환자별 종속 collection
 - `recent_care_context`: 최근 정확히 30×24시간의 관찰 기록
 - `long_term_summary`: optional caregiver/user-scoped derived 장기 요약, 없으면 명시적 `null`
+- `recently_recommended`: 같은 Backend Snapshot의 최근 추천 이력, 없으면 명시적 `[]`
+
+최근 추천 이력은 `SourceRecentFeedPaper` → `RecentFeedRecommendationContext`로 순서와 모든 필드를 보존한다.
+`paper_id`, nullable `pmid`, `title`, aware `last_recommended_at`, strict 양의 `times_recommended`가 required다.
+Source/Context 검증 경계에서 중복 `paper_id`, 50편 초과, `(reference_time - 30일, reference_time]` 밖의 시각을 거부한다.
+전체 적격 수를 알 수 없어 이 목록에 Coverage를 만들지 않는다.
+
+Provider JSON에는 기존 개인화 신호에 `recent_feed_titles` 문자열 배열만 추가한다. DB 정렬을 그대로 따라
+최신 최대 20개 제목을 제공하며 UUID/PMID/추천 시각·횟수는 공개하지 않는다. 제목은 비신뢰 데이터이고,
+이 상위 20편에서 300자 초과 제목은 공개 목록에서만 제외한다. 제목 배열을
+`json.dumps(ensure_ascii=False, allow_nan=False)`로 직렬화한 UTF-8 크기가 8,192 bytes를
+넘으면 추가를 중단한다. 제목을 자르거나 21번째 이후로 보충하지 않으며 원본 이력과
+전체 PMID 제외 목록은 유지한다. 이 제한은 전체 Provider 메시지가 아닌 제목 배열에만 적용된다.
+일부 최근 추천이 열람·선호·만족이나 전체 이력을 뜻하지 않는다.
+`prepare_production_feed_input()`은 Snapshot을 한 번만 읽어 JSON과 전체 최대 50편의 유효 PMID를
+불변 `PreparedFeedInput(str)`에 묶는다. 일반 JSON builder는 기존처럼 보통 `str`을 반환한다.
+Workflow는 객체를 그대로 전달하고 FeedExecution은 일반 문자열과 서버 전용 PMID 인자를 분리한다.
+Runner는 요청별 FeedCandidates에서만 PMID를 사용하며 일반 문자열 직접 실행은 빈 제외 집합이다.
+과거 PMID는 `_rank_topic()` 다음, `_reviewed` 제외 전에 걸러진다. 원본 RAG 응답·인덱스와
+검토/유지 로직, 검색 예산은 유지하고 신규 적격 수·중복 통계는 과거 추천을 뺀 후보로 계산한다.
 
 모든 선언 필드는 required이며 nullable scalar도 생략하지 않고 `null`, 조회된 빈 list는
 `[]`로 표현한다. Extra field를 거부한다. 사용자 ID, raw 환자 UUID, 간병인/환자 이름,
@@ -863,9 +884,9 @@ sanitize하거나 완전한 비식별화를 보장하지 않는다. 실제 CareL
 보존하며 현재 Provider 공개 정책에 따라 입력에서 제외한다. 미공개를 정상 empty로 해석하지 않는다.
 
 **Runner/Policy.** FeedExecutionV1이 FeedPromptBuilder와 search_evidence 전용 Registry,
-3/3 budget을 소유·검증한다. Executor/Runner Registry 불일치도 Provider 호출 전에 거부한다.
+3라운드/9검색 budget을 소유·검증한다. Executor/Runner Registry 불일치도 Provider 호출 전에 거부한다.
 공용 Runner 기본값 5/10 및 Chat은 그대로다. 세 번째 Tool result 이후 final은 허용하고,
-네 번째 call 또는 초과 batch는 실행하지 않는다. 한 turn의 여러 call과 실패한 실행도 budget을 쓴다.
+네 번째 검색 라운드 또는 초과 batch는 실행하지 않는다. 한 turn의 여러 call과 실패한 실행도 budget을 쓴다.
 LLM이 일반화된 query를 만들고 실제 Evidence를 본 뒤 충분하면 중단하거나 후속 검색한다.
 정적 Topic Catalog/fixed query/alias matching/priority/greedy selection 및 별도 Plan DTO는 없다.
 
@@ -1495,14 +1516,14 @@ evaluating/예산 소진 exhausted의 phase와 성공/실패 횟수, 사용/잔�
 assistant Tool Call 메시지에 보존한다. 검색 전 0건은 빈 검색 성공을 의미하지 않는다.
 검색 전 최종 text 또는 다른 Tool 응답은 feed_search_required로 거부한다. 검색 오류는 즉시
 failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하지 않는다.
-검색 1/2/3라운드는 모델 호출 2/3/4회다. 한 턴의 검색 3개는 1라운드로, 정상 모델 호출 2회가 목표다.
+검색 1/2/3라운드는 모델 호출 2/3/4회다. 한 턴의 검색 3개는 1라운드다. 근거가 충분하면 첫 라운드 후 모델 호출 2회로 종료할 수 있다.
 빈 검색 성공 후 추가 검색은 모델 선택이며 검색 횟수를 채우지 않는다.
 
 로컬 실제 모델 검증은 기존 테스트 DB/Provider 설정이 준비된 환경에서 위 로컬 예시로 수행한다.
 Cold Start의 최초 Tool Call, 1~3회 검색 후 상태, 예산 소진 뒤 최종 판단, AI Handoff를 확인한다.
 MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·검색 품질·토큰 비용은 검증하지 않는다.
 
-### Feed 병렬 검색과 후보 5편 통합
+### Feed 병렬 검색과 검토 후보 15편 통합
 
 공통 Runner는 allow_parallel_tools=False가 기본이며, FeedExecutionV1은 True / max_parallel_calls=3이다.
 한 턴 전체가 parallel_safe이고 동시 실행 상한 안에 있을 때만 병렬 실행한다. 나머지는 순차 실행한다.
@@ -1510,11 +1531,11 @@ ToolSpec은 기본 parallel_safe=False이며 build_evidence_registry의 검색�
 독립적인 검색에만 이 정책을 부여해야 한다. 기존 Chat 동작/Tool 계약은 바꾸지 않는다.
 
 Feed는 모든 검색 입력을 실행 전에 검증한다. 정본 배열 입력의 검색어당 top_k는 서버가 8로 고정하며,
-요청 전체 조회 예산은 24편이다. 기존 단일 query 호환 입력에서만 명시한 1~8을 보존하고 8 초과를 거부한다.
+라운드당 조회 예산은 24편, 요청 전체 조회 예산은 72편이다. 기존 단일 query 호환 입력에서만 명시한 1~8을 보존하고 8 초과를 거부한다.
 1/2/3개 검색은 각각 최대 8/16/24편을 확보한다. 예전 묶음별 조회량 배분은 사용하지 않는다.
 Query/ID는 보존하고 Executor 인자 사본에만 기본값을 넣는다. 공용 Tool/Chat의 기본값 5와 1~20 계약은 유지한다.
-검색량 예산은 후속 turn에도 누적하며 Tool Call/round 상한은 각각 3회다. 반환량이 요청량을 넘으면 실패한다.
-중복·빈 결과를 채우기 위한 자동 추가 조회는 없다. 내부 원본/출처를 보유하되 모델 후보와 decisions는 최대 5개다.
+검색량 예산은 후속 turn에도 누적하며 라운드당 3검색, 전체 9검색/3라운드 상한을 적용한다. 반환량이 요청량을 넘으면 실패한다.
+중복·빈 결과를 채우기 위한 자동 추가 조회는 없다. 내부 원본/출처를 보유하되 모델 검토 후보와 decisions는 최대 15개이며 유지·최종 추천은 각각 최대 5개다.
 서로 다른 query의 relevance_score를 비교하거나 고정 점수 임계값을 적용하지 않는다.
 
 후보 압축은 PMID 없는 항목과 명시적 protocol/expert_opinion/animal 유형을 제외하고 주제별로 수행한다.
@@ -1525,7 +1546,7 @@ Decimal 비교로 경계 오차를 방지하고, 이웃 점수의 연쇄 근접�
 그룹 안에서는 파생 A→B→C→D→미확인, 같은 등급에서는 원본 순위를 사용한다. 그룹 사이 원래 순서는 보존한다.
 서로 다른 query 점수는 비교하지 않는다. 고정된 2개 순위 묶음은 사용하지 않는다.
 주제별 목록을 요청 순서로 라운드 로빈 순회하며 실제 선택 시점에만 PMID를 중복 제거한다.
-중복/제외 뒤의 유효 항목도 순회해 최대 5편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
+중복/제외 뒤의 유효 항목도 순회해 검토 후보 최대 15편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
 other/None/미등록 유형은 의견 글로 단정하지 않고 후보로 남긴다. 분류 오류를 숨기거나 제목으로 재분류하지 않는다.
 서버의 관련성 평가는 검색 주제 커버리지와 query별 RAG 순위에 한정된다. 실제 대상/개인화 관련성은
 기존 최종 LLM이 제목·발췌로 판단한다. 별도의 LLM 재순위화와 5편 강제 충원은 없다.
@@ -1533,7 +1554,8 @@ other/None/미등록 유형은 의견 글로 단정하지 않고 후보로 남�
 selection_stats는 반환 수, PMID 누락 수, 유형별 제외 수, 미분류 수, 유효 PMID 중복 수,
 유효 고유 수와 LLM 후보 수를 구분하는 서버 내부 집계다. 자동 로그/외부 DTO 필드는 추가하지 않는다.
 현재 RAG는 기본 필터링에서 k×3을 먼저 검색하므로 k=8은 query당 최대 24개 초기 DB hit,
-3회는 최대 72개 hit와 논문 상세 조회, 최대 3회 embed_query를 유발할 수 있다. Agent 반환은 최대 24편이다.
+라운드당 3회는 최대 72개 hit, 요청당 9회는 최대 216개 초기 hit와 최대 9회 embed_query를 유발할 수 있다.
+Agent 반환은 라운드당 최대 24편/요청 전체 최대 72편이다. 이 수치는 실제 DB 호출 수나 실제 반환 보장이 아니다.
 이전 첫 묶음 총 k=5의 초기 hit 상한 15개보다 증가하며 실제 embedding/DB 지연·메모리·동시성은 미측정이다.
 실환경에서 묶음 검색 실패율, RAG 단계 필터 후 반환 수, PMID 중복률, 유형별 제외율,
 유효/최종 노출 수, p50/p95 지연과 DB/CPU/GPU 자원을 따로 측정해야 한다. 오프라인 통과는 성능/품질 개선 증거가 아니다.
@@ -1572,7 +1594,7 @@ study_type 기반 파생 등급을 압축에 활용한다. Projection에는 deri
 파생 등급은 기존 규칙의 참고값이며 실제 DB 저장 등급이나 임상적 품질 확정값이 아니다.
 DB 저장 등급을 통한 정렬에는 검색 담당자의 조회/DTO 계약 협의가 필요하다. 추가 DB 조회는 없다.
 
-LLM 후보/추천 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
+LLM 검토 후보 15편과 유지/최종 추천 각각 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
 정상적으로 유익한 공통 논문은 여러 사용자에게 추천할 수 있다. 사용자 간 이력 조회나 전역 중복 금지는 없다.
 관련 근거가 없는 경우 정상 빈 Feed와 기존 검색 fallback을 유지한다. 0편 비율을 낮추려고 부적합한 논문을 채우지 않는다.
 
@@ -1582,7 +1604,7 @@ LLM 후보/추천 5편은 최대치다. 검색 반환 수, 유형 제외·중복
 
 P2 보완: 원본 풀과 출처를 보존하고 주제별 라운드 로빈 순회 중 선택 시점에만 PMID 중복을 제거한다.
 A의 낮은 순위에 있는 논문도 B의 상위 순위에서 먼저 선택할 수 있고, 그 경우 B의 원본 참조/스냅샷을 사용한다.
-선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 후보 최대 5편과 원본 Snapshot 검증은 유지한다.
+선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 검토 후보 최대 15편과 원본 Snapshot 검증은 유지한다.
 
 Feed 조기 종료에서는 완료 결과를 실제 도착 순서로 검증한다. 자원 admission 대기 중에도 실패를 감지한다.
 이미 Executor 진입을 시작한 호출만 total_tool_calls에 집계하고, 미시작 호출은 실행하지 않는다.
@@ -1592,12 +1614,13 @@ Python 실행 중인 Handler는 강제 중단하지 않으며 Chat의 recoverabl
 
 ### Feed queries 배열 입력과 내부 검색 분배
 
-Feed의 search_evidence는 Provider에 queries 문자열 배열(1~3개)만 노출한다.
+Feed의 search_evidence는 Provider에 queries 문자열 배열(1~3개)과 Feed 전용 review를 노출한다.
 Chat/Registry/Executor의 정본 search_evidence(query, top_k)는 그대로다. Feed 요청 시 Tool definition 사본의
 입력 스키마만 교체하고, 배열 항목을 기존 단일 검색 Executor 호출로 변환한다. Handler/RAG/DB는 바꾸지 않는다.
 전체 최소화된 Context에서 주제·검색어·개수를 결정하는 주체는 기존 LLM이며, 서버의 정적 주제 선정,
-추가 Context 정제, 별도의 Planner LLM 또는 Workflow는 없다. 검색어당 8편, 실제 검색 시도 최대 3회/24편,
-Tool round 최대 3회다. 첫 배열이 2개면 후속 검색은 1개만 가능하고, 3개면 다음 모델 호출은 최종 판단만 한다.
+추가 Context 정제, 별도의 Planner LLM 또는 Workflow는 없다. 검색어당 8편, 라운드당 실제 검색 시도 최대 3회/24편,
+요청 전체 최대 9회/72편, Tool round 최대 3회다. 첫 배열이 3개여도 다음 라운드에서 다시 1~3개를 요청할 수 있다.
+첫 결과로 충분하면 LLM 2회로 종료하고 3라운드를 모두 사용하면 마지막 판단까지 LLM 최대 4회다.
 
 배열 검증은 엄격한 문자열/길이 1~2000/항목 수 1~3/비공백/중복을 검사한다. 중복 비교에만 공백 축약과
 casefold를 사용하며, 유효 검색어 원문은 수정하지 않는다. 요청 전체에서 이미 검색한 동일 검색어도 거부한다.
@@ -1627,3 +1650,84 @@ Handler admission 이전 timeout에서는 DB/RAG 실제 진입까지 보장하�
 공유 Retriever가 parallel_safe=False인 경우 기존 순차 실행 안전 설정을 존중한다. Chat 기본 순차 정책은 유지한다.
 FakeLLM 및 실제 SDK+MockTransport는 배열 계약·분배·프로토콜만 검증한다. 실제 LLM이 배회·실종/낙상/야간 흥분을
 독립 배열 항목으로 생성하는지, 실제 RAG 반환/등급 분포·추천 수·LLM 호출 수·지연은 서버 통합 테스트에서 측정해야 한다.
+
+### 요청 내부 검토 이력과 유지 후보 (Feed 전용)
+
+첫 검색은 기존 queries 배열만 전달한다. 후속 검색에는 현재 projection의 버전과 유지할 후보를 전달한다.
+
+```json
+{"queries":["more specific research question"],"review":{"candidate_revision":1,"retain":[{"candidate_index":0,"personal_reason":"이전 후보가 도움이 되는 이유","category":"care"}]}}
+```
+
+candidate_index는 현재 후보 목록의 0 기반 위치이고 candidate_revision은 서버가 발행한 목록 버전이다.
+첫 검색의 review, 후속 검색의 review 누락/다른 버전, 범위 밖·중복·비정수 index, 잘못된 이유/category를 거부한다.
+같은 turn에 여러 실제 Provider Call이 있다면 review를 한 곳에 넣거나 같은 값만 반복할 수 있다.
+서버는 원본 Snapshot을 제외 후보까지 검증한다. 유지 목록 순서를 재정렬 요청으로 사용하지 않고 기존 후보 순서를 유지한다.
+review는 아직 노출하지 않은 PMID/출처를 임의 지정할 수 없다. 최종 FeedDecisionDraft 및 FeedAnswerV2 계약은 바뀌지 않는다.
+
+검색 결과 전체와 원본 index를 요청 내부에 보유한다. 이미 제시한 PMID는 다음 신규 후보 선정에서 제외한다.
+유지 후보는 prefix로 보존하며, 미검토 결과는 신규 검색 묶음의 주제부터 이전 검색 주제 순으로 라운드 로빈 순회한다.
+주제별 순위/근접 점수 내 파생 등급 정렬과 실제 선택 시점 PMID 중복 제거를 유지한다.
+유지 후보 최대 5편 + 미검토 신규/기존 후보는 항상 합계 최대 15편이다. 후보 부족/빈 결과/최종 모두 제외는 정상이며 자동 재검색하지 않는다.
+이미 적합한 후보도 후속 review에서 버리거나 마지막 decisions에서 include=false로 제외할 수 있다.
+
+projection은 매 모델 호출의 최신 목록 하나이며 history에 저장하지 않는다. 신규 후보에만 제목/발췌/유형/파생 등급을 제공한다.
+retained 행은 현재 index, status, 이전 LLM의 personal_reason/category만 전달해 논문 본문 중복을 피한다.
+이전 판단은 비신뢰 데이터이며 원문을 대체한 의학적 검증 결과가 아니다. 최종 모델은 retained 행까지 현재 순서대로 판단한다.
+reviewed_count는 현재 제시하는 논문을 포함한 요청 내부 고유 PMID 수다. DB·과거 사용자 이력에는 저장하지 않는다.
+최종 이유/category는 마지막 판단값을 사용하고 원본 tool_call_id/evidence_index/PMID는 서버 Snapshot에서 결합한다.
+검색과 유지 상태는 staged copy에서 검증하고 묶음 전체 성공 후만 반영한다. 실패/timeout/deadline/늦은 결과 격리와 Chat 동작은 그대로다.
+
+검색 횟수와 라운드는 별도다. search_calls_remaining은 9회 중 잔여 횟수이며 search_rounds_remaining이 0이면
+횟수가 남아도 새 검색은 불가하다. search_progress.phase=exhausted와 tool_choice=none으로 최종 판단을 요청한다.
+의미적으로 유사한 대상/표현/목적 조정 검색은 허용한다. 완전히 같은 문자열(공백 축약/casefold 비교)은 기존처럼 거부한다.
+추가 Planner·Reranker·언어 재작성·DB 조회는 없다. Handler의 parallel_safe=False/설정된 순차 실행도 그대로 존중한다.
+
+정상 경로의 요청당 원본 보유량 상한은 24→72편, 모델 generate 상한은 여전히 4회다. 120초 request deadline과
+검색별 30초 기본 timeout은 늘리지 않았다. 실제 공유 BGE/DB 부하, timeout 비율, 누적 토큰/지연과 추천 품질은
+실 LLM/RAG/DB 환경에서 따로 측정해야 한다. Fake/MockTransport 통과는 이러한 품질·성능 검증이 아니다.
+
+### Feed 검토·유지·최종 추천의 독립 상한
+
+`feed_candidates.py`의 `MAX_FEED_REVIEW_CANDIDATES=15`, `MAX_FEED_RETAINED_CANDIDATES=5`,
+`MAX_FEED_RECOMMENDATIONS=5`를 독립적으로 적용한다. 후보 압축 상한과 최종 추천 상한은 다르다.
+후보 0~15편에 대해 정확히 같은 수의 decisions를 요구한다. include=true가 6개 이상이면
+`too_many_selected`로 거부하며 5개로 자르지 않는다. 외부 FeedAnswerV2.items는 계속 최대 5개다.
+유지 인덱스는 0~14이며 유지 목록은 최대 5개다. 현재 목록의 버전/실제 범위/중복 검증도 유지한다.
+유지 2편이면 신규 최대 13편, 유지 5편이면 신규 최대 10편을 제시할 수 있다. 유지 후보의 최종 제외도 가능하다.
+
+선정/등급/라운드 로빈/PMID 검토 이력/원본 출처 검증은 그대로다. 미검토 기존 결과도 재활용하며,
+검토 후보 15편 또는 최종 추천 5편을 채우기 위한 자동 검색은 없다. 3라운드·9검색·top_k=8·72건 예산,
+Chat Tool 계약·외부 API·기본 request deadline 120초와 Tool timeout 30초는 변경하지 않았다.
+신규 후보는 기존 제목 300자/연구 유형 80자/발췌 1,200자 제한을 유지한다. retained는 판단 이유/category만 전달한다.
+신규 후보 15편의 발췌는 최대 18,000자로, 이전 5편(6,000자) 대비 최대 3배다. 이는 토큰 수의 정확한 비율이 아니다.
+LLM 입력/판단 시간이 증가할 수 있고 추가 검색이 줄어들 가능성도 있으나 실측 전에는 품질·비용·전체 지연 개선을 주장하지 않는다.
+실 Provider에서 15개 판단의 완전성, 기존 120초 deadline 내 종료, 유지 선택과 최종 5개 제한, 기존 두 사용자 합성/허가된 로컬 사례를
+별도로 확인해야 한다. 실제 OpenAI/RAG/PostgreSQL 테스트는 Codex 오프라인 검증에서 실행하지 않는다.
+
+### Feed 연구 적합성·추천 조합·자율 종료 정책
+
+첫 검색 계획은 FeedPromptBuilder, 검색 이후 평가는 build_feed_decision_policy가 담당한다.
+검색 횟수 최소화를 목표로 삼지 않고 기존 호출 안에서 다음 세 판단을 수행하도록 안내한다.
+
+1. 개별 논문의 실제 연구 대상·목적·결과와 제공된 Context의 연결 및 환경/대상군 차이를 검토한다.
+   환자의 수면 증상을 보호자의 불면증 연구로 대체하지 않으며, 보호자 본인의 필요성이 있으면 독립적으로 검토한다.
+2. 적합한 후보 조합의 정보 중복·상호 보완성과 중요한 연구 목적의 충족 여부를 비교한다.
+   같은 주제도 추가 정보가 있으면 함께 추천할 수 있다. 주제/카테고리 할당량·최소 추천 개수는 없다.
+3. 현재 조합의 충분성과 추가 검색의 기대 가치를 구분한다. 중요한 근거가 부족하고 연구 대상/목적/범위 조정이
+   유용할 때만 LLM이 추가 검색을 선택한다. 추천 편수나 잔여 예산만으로 검색을 강제하지 않는다.
+
+첫 라운드에 적합한 3~5편이 있으면 종료할 수 있으며 1~2편도 추가 검색 실익이 낮으면 종료할 수 있다.
+0편을 선택하기 전에는 대상/목적 불일치·검색 범위의 한계와 실제 근거 부족을 구분하고 검색어 개선 가능성을 검토한다.
+충분한 탐색에도 관련 근거가 부족하거나 추가 탐색 기대 가치가 낮으면 0편 종료가 정상이다. 첫 라운드도 추가 검색 실익이 낮으면 종료할 수 있다.
+0편 응답을 서버가 거부/재검색하지 않는다. 예산 소진 후에도 현재 후보의 최종 판단을 반환한다.
+
+15편 검토·5편 유지·5편 최종 추천, 3라운드·9검색·top_k=8·총 72건, 후보 Snapshot·PMID 추적과 출처 검증,
+개인정보 최소화·비신뢰 Evidence 처리·Chat·외부 FeedAnswerV2/FeedReview/FeedDecisionDraft 계약은 그대로다.
+Runner·후보 선택 알고리즘·추가 Evaluator/Planner 호출·외부 평가 메타데이터·운영 로그는 추가하지 않았다.
+기존 search_progress/retained_count/candidate_count 및 execution의 라운드/실행 횟수와 최종 선택 수를 검증에 활용한다.
+
+Fake/Mock 테스트는 정책이 전달되고 종료/추가 검색 경로가 허용되는지 검증한다. 실제 모델의 판단 품질을 입증하지 않는다.
+사용자 Windows 로컬 VS Code/FastAPI 환경에서 MCI·수면·인지기능, 배회·넘어짐·돌봄 지원의 두 사례를 반복 비교한다.
+0편 조기 종료 빈도, 환자/보호자 연구 대상 일치, 조합의 정보 중복·주요 목적 충족, retained 재평가와 추천 사유의 사실성,
+검색/LLM 호출 수·후보 수·입출력 토큰·응답시간(기존 120초 제한)을 함께 확인한다. 검색/추천 편수 증가만으로 성공을 판정하지 않는다.

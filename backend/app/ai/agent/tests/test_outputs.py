@@ -461,9 +461,13 @@ class StructuredWorkflowTests(TestCase):
                                (FeedAnswerV2, feed_draft(2))):
             with self.subTest(model=model.__name__):
                 builder = DefaultPromptBuilder()
+                model_preceding = preceding
+                if model is FeedAnswerV2:
+                    from .test_feed_candidates import review_turn
+                    model_preceding = [preceding[0], review_turn(preceding[1], 1, (0,))]
                 with patch.object(builder, "build_final_response_context",
                                   side_effect=AssertionError("Structured mode must not use aggregate evidence")) as aggregate:
-                    result, client = self.run_output(payload, model, preceding, registry, prompt_builder=builder)
+                    result, client = self.run_output(payload, model, model_preceding, registry, prompt_builder=builder)
                 aggregate.assert_not_called()
                 self.assertEqual(result.execution.status, "completed")
                 self.assertEqual([source.title for source in result.sources],

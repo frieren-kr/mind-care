@@ -10,7 +10,7 @@ from ..clients.openai_client import OpenAIClient
 from ..schemas import Message, ModelTurn
 from ..workflows.feed_execution import FeedExecutionV1
 from . import test_feed_candidates as candidates
-from .test_feed_candidates import decisions, package
+from .test_feed_candidates import decisions, package, review_turn
 from .test_workflows import CONTEXT
 from .test_openai_client import completion
 
@@ -38,10 +38,10 @@ class FeedSearchPolicyTests(unittest.TestCase):
     def test_empty_missing_pmid_and_duplicate_results_have_actual_progress(self):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
-                turns = [self.search(str(i), str(i)) for i in range(calls)]
+                turns = [review_turn(self.search(str(i), str(i)), i, (0,) if pmids == ["A"] else ()) if i else self.search(str(i), str(i)) for i in range(calls)]
                 turns += [ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0)))]
                 result, client, _ = self.run_feed(turns, {str(i): package(pmids) for i in range(calls)},
-                    max_tool_rounds=3, max_total_tool_calls=3)
+                    max_tool_rounds=3, max_total_tool_calls=9)
                 self.assertEqual(result.execution.status, "completed")
                 self.assertEqual(len(client.requests), calls + 1)
                 self.assertEqual([o.tool_choice for o in client.options[1:]],
@@ -49,7 +49,8 @@ class FeedSearchPolicyTests(unittest.TestCase):
                 state = json.loads(client.requests[-1][0][-1].content)
                 self.assertEqual(state["search_progress"], {
                     "phase": "exhausted" if calls == 3 else "evaluating",
-                    "search_calls_used": calls, "search_calls_remaining": 3-calls,
+                    "search_calls_used": calls, "search_calls_remaining": 9-calls,
+                    "search_rounds_used": calls, "search_rounds_remaining": 3-calls, "searches_per_round_limit": 3,
                     "successful_searches": calls, "failed_searches": 0, "model_tool_calls_used": calls})
                 self.assertEqual(state["last_search"]["returned_evidence_count"], len(pmids))
                 self.assertEqual(state["last_search"]["new_eligible_candidate_count"],
@@ -65,7 +66,9 @@ class FeedSearchPolicyTests(unittest.TestCase):
             if len(requests) <= 3:
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": f"opaque_{len(requests)}", "type": "function", "function": {
-                        "name": "search_evidence", "arguments": json.dumps({"query": f"research {len(requests)}"})}}]}
+                        "name": "search_evidence", "arguments": json.dumps({"query": f"research {len(requests)}",
+                            **({"review": {"candidate_revision": len(requests)-1, "retain": [{
+                                "candidate_index": 0, "personal_reason": "Retained", "category": "care"}]}} if len(requests)>1 else {})})}}]}
                 return httpx.Response(200, json=completion(message, "tool_calls"))
             return httpx.Response(200, json=completion({"role":"assistant", "content":json.dumps(decisions(1, (0,)))}))
         sdk = OpenAI(api_key="offline-placeholder", http_client=httpx.Client(transport=httpx.MockTransport(transport)))
@@ -123,7 +126,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
                 with self.subTest(pmids=pmids, calls=calls):
-                    turns = [self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
+                    turns = [review_turn(self.search(f"opaque_{i}", f"research {i}"), i, (0,) if pmids == ["A"] else ()) if i else self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
                     turns.append(ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0, (0,)))))
                     client = FakeLLMClient(turns)
                     registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
@@ -149,7 +152,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
                         self.assertEqual(projections[0].role, "user")
                         state = json.loads(projections[0].content)
                         self.assertEqual(state["search_progress"]["search_calls_used"], used)
-                        self.assertEqual(state["search_progress"]["search_calls_remaining"], 3-used)
+                        self.assertEqual(state["search_progress"]["search_calls_remaining"], 9-used)
                         self.assertEqual(state["candidate_count"], int(pmids == ["A"]))
                         self.assertEqual([c.id for m in messages for c in m.tool_calls],
                                          [m.tool_call_id for m in messages if m.role == "tool"])

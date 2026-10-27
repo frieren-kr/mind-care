@@ -45,7 +45,7 @@ def minimal():
         "managed_patient_profiles": collection(), "recent_care_context": {
             "period_start": NOW - timedelta(days=30), "period_end": NOW,
             "care_logs": collection(),
-        }, "long_term_summary": None,
+        }, "long_term_summary": None, "recently_recommended": [],
     }
 
 
@@ -87,7 +87,7 @@ class FeedContextContractTests(unittest.TestCase):
     def test_frozen_public_v1_field_sets(self):
         expected = {
             c.FeedPersonalizationContextV1: {"schema_version", "reference_time", "caregiver_profile",
-                "managed_patient_profiles", "recent_care_context", "long_term_summary"},
+                "managed_patient_profiles", "recent_care_context", "long_term_summary", "recently_recommended"},
             c.ManagedPatientContext: {"patient_ref", "dementia_stage", "diagnosis_date", "symptoms",
                 "interests", "updated_at", "clinical_assessments", "safety_events", "medications", "medical_visits"},
             c.MedicalVisitContext: {"visit_date", "is_visited", "department", "visit_content"},

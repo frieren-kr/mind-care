@@ -11,6 +11,53 @@ from .feed_context import FeedPersonalizationContextV1
 from .feed_context_loader import DefaultFeedContextLoader
 
 
+MAX_FEED_HISTORY_TITLES = 20
+MAX_FEED_HISTORY_TITLE_CHARS = 300
+MAX_FEED_HISTORY_TITLES_BYTES = 8192
+
+
+def _project_recent_feed_titles(recently_recommended) -> list[str]:
+    titles = []
+    for paper in recently_recommended[:MAX_FEED_HISTORY_TITLES]:
+        title = paper.title
+        if len(title) > MAX_FEED_HISTORY_TITLE_CHARS:
+            continue
+        encoded_size = len(json.dumps([*titles, title], ensure_ascii=False,
+                                      allow_nan=False).encode("utf-8"))
+        if encoded_size > MAX_FEED_HISTORY_TITLES_BYTES:
+            break
+        titles.append(title)
+    return titles
+
+
+class PreparedFeedInput(str):
+    """Provider JSON text with immutable request-local, server-only PMID metadata."""
+
+    __slots__ = ("_previously_recommended_pmids",)
+
+    def __new__(cls, value: str, previously_recommended_pmids: frozenset[str] = frozenset()):
+        instance = super().__new__(cls, value)
+        object.__setattr__(instance, "_previously_recommended_pmids", frozenset(previously_recommended_pmids))
+        return instance
+
+    @property
+    def previously_recommended_pmids(self) -> frozenset[str]:
+        return self._previously_recommended_pmids
+
+    def __setattr__(self, name, value):
+        raise AttributeError("Prepared Feed input is immutable")
+
+    def __delattr__(self, name):
+        raise AttributeError("Prepared Feed input is immutable")
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        memo[id(self)] = self
+        return self
+
+
 class FeedProfileMappingError(RuntimeError):
     """Fixed failure only; no Backend data or validation input in public text."""
 
@@ -18,7 +65,7 @@ class FeedProfileMappingError(RuntimeError):
         super().__init__("Feed profile mapping failed")
 
 
-def _serialize_feed_provider_input(caregiver, profiles) -> str:
+def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles) -> str:
     """Production disclosure allowlist. Callers provide validated row views.
 
     A row view is (profile, safety rows, assessment rows), not a new DTO.
@@ -40,6 +87,7 @@ def _serialize_feed_provider_input(caregiver, profiles) -> str:
             "relationship": caregiver.relationship, "lifestyle_tags": list(caregiver.lifestyle_tags),
         },
         "patients": patients,
+        "recent_feed_titles": list(recent_feed_titles),
     }, ensure_ascii=False, allow_nan=False)
 
 
@@ -61,7 +109,7 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
         return _serialize_feed_provider_input(value.caregiver_profile, (
             (patient, patient.safety_events.items, patient.clinical_assessments.items)
             for patient in value.managed_patient_profiles.items
-        ))
+        ), _project_recent_feed_titles(value.recently_recommended))
     except Exception:
         raise FeedProfileMappingError() from None
 
@@ -73,4 +121,7 @@ def prepare_production_feed_input(context: AgentContext, loader: DefaultFeedCont
     Loader errors keep their existing codes; no empty fallback or retry.
     """
     value = loader(context, recent_days=30)
-    return build_production_feed_provider_input(value, service_timezone=loader.service_timezone)
+    text = build_production_feed_provider_input(value, service_timezone=loader.service_timezone)
+    return PreparedFeedInput(text, frozenset(
+        row.pmid for row in value.recently_recommended if row.pmid is not None and row.pmid.strip()
+    ))
