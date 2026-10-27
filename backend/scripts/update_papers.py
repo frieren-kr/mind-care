@@ -4,6 +4,7 @@ cron으로 주기 실행할 배치의 진입점이다. 단계마다 "아직 처�
 여러 번 돌려도 결과가 같고, 중간에 끊기거나 한 단계가 실패해도 다음 실행 때 남은 것부터 이어서 한다.
 
   ① 수집      collect_and_store()                — 최근 N일 PubMed. 이미 있는 논문은 save_papers()가 건너뛴다
+             (--from-date/--to-date를 주면 collect_range_and_store()로 그 기간을 한 달씩 — 지난 기간 채우기)
   ② 임베딩    get_papers_without_embedding()      — bge-m3 임베딩이 없는 논문 → embed_documents() (현서 님)
   ③ 근거 등급  get_papers_without_evidence()       — study_type이 빈 논문 → classify() (현서 님)
   ④ 요약      get_new_papers(--limit)             — 요약이 없는 논문 → summarize_papers.run()
@@ -18,6 +19,7 @@ embed_papers.py / classify_papers.py는 main()(argparse + print)만 있어서 �
     python -m scripts.update_papers --skip-collect --limit 20
     python -m scripts.update_papers --only summarize --dry-run
     python -m scripts.update_papers --only summarize --retry-skipped
+    python -m scripts.update_papers --from-date 2024-01-01 --to-date 2025-12-31 --limit 3000   # 지난 기간 채우기
 
 요약에 MAX_FAILS번 실패한 논문은 상태 파일(--state-file)에 적어 두고 다음 실행부터 건너뛴다.
 건너뛴 논문은 종료 코드 1의 원인이 아니다. --retry-skipped로 다시 시도한다.
@@ -28,7 +30,7 @@ import logging
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 try:
@@ -77,6 +79,12 @@ def save_state(path: Path, state: dict) -> None:
 def stage_collect(args) -> tuple[int, int, str]:
     from app.collectors import pubmed
 
+    if args.from_date:
+        period = f"{args.from_date}~{args.to_date}"
+        result = pubmed.collect_range_and_store(args.from_date, args.to_date, dry_run=args.dry_run)
+        if args.dry_run:
+            return result.total, 0, f"{period} {result.total}편 받음 (저장 안 함)"
+        return result.inserted, 0, f"{period} {result.total}편 중 신규 {result.inserted}, 중복 {result.skipped}"
     if args.dry_run:
         papers = pubmed.fetch_papers(days_back=args.days_back, max_results=args.max_results)
         return len(papers), 0, f"최근 {args.days_back}일 {len(papers)}편 받음 (저장 안 함)"
@@ -217,13 +225,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--limit", type=int, default=100, help="요약 최대 편수 (기본 100)")
     ap.add_argument("--dry-run", action="store_true", help="DB에 쓰지 않는다 (요약은 LLM을 부르지만 저장하지 않음)")
     ap.add_argument("--days-back", type=int, default=7, help="수집: 최근 N일 발행분 (기본 7, cron 주기보다 길게)")
-    ap.add_argument("--max-results", type=int, default=100, help="수집: 최대 편수 (기본 100)")
+    ap.add_argument("--max-results", type=int, default=100, help="수집: 최대 편수 (기본 100, 날짜 범위 수집에는 안 씀)")
+    ap.add_argument("--from-date", type=date.fromisoformat,
+                    help="수집: 이 날짜(YYYY-MM-DD)부터 발행분. --to-date와 같이 주면 --days-back 대신 쓰고 한 달씩 전부 받는다")
+    ap.add_argument("--to-date", type=date.fromisoformat, help="수집: 이 날짜까지 발행분 (포함)")
     ap.add_argument("--log-file", type=Path, help="로그를 화면과 함께 남길 파일")
     ap.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK, help=f"겹쳐 실행 방지용 잠금 파일 (기본 {DEFAULT_LOCK})")
     ap.add_argument("--state-file", type=Path,
                     help=f"요약 실패 횟수 기록 (기본: --log-file과 같은 폴더, 없으면 임시 폴더의 {STATE_NAME})")
     ap.add_argument("--retry-skipped", action="store_true", help=f"요약 {MAX_FAILS}번 실패해 건너뛰던 논문도 다시 시도한다")
     args = ap.parse_args(argv)
+    if (args.from_date is None) != (args.to_date is None):
+        ap.error("--from-date와 --to-date는 같이 줘야 합니다")
+    if args.from_date and args.from_date > args.to_date:
+        ap.error("--from-date가 --to-date보다 늦습니다")
     if args.state_file is None:
         args.state_file = (args.log_file.parent if args.log_file else DEFAULT_LOCK.parent) / STATE_NAME
     setup_logging(args.log_file)

@@ -1,7 +1,7 @@
 """PubMed 논문 수집 (박주현 담당).
 
 NCBI E-utilities를 두 단계로 호출한다:
-  1. esearch — 검색어 + 최근 N일 조건으로 PMID 목록을 받는다.
+  1. esearch — 검색어 + 최근 N일(또는 날짜 범위) 조건으로 PMID 목록을 받는다.
   2. efetch  — PMID 묶음의 상세 정보(XML)를 받아 papers 스키마에 맞게 파싱한다.
 
 PMID를 이미 알고 있을 때는 `fetch_papers_by_pmids()`로 검색 단계를 건너뛴다
@@ -10,13 +10,16 @@ PMID를 이미 알고 있을 때는 `fetch_papers_by_pmids()`로 검색 단계�
 주 1회 배치(Celery/cron)로 `collect_and_store()`를 실행한다.
 저장은 반드시 `app.db.functions.save_papers()`를 통해서만 한다 (팀 규칙: raw SQL 금지).
 
+지난 기간 채우기는 `collect_range_and_store(from_date, to_date)` — 한 달씩 나눠 받고 달마다 저장한다.
+
 단독 실행:
     python -m app.collectors.pubmed --days-back 7 --max-results 20 --dry-run
+    python -m app.collectors.pubmed --from-date 2025-01-01 --to-date 2025-01-31 --dry-run
 """
 import argparse
 import logging
 import time
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 from xml.etree import ElementTree as ET
 
@@ -41,12 +44,14 @@ SOURCE = "pubmed"
 SEARCH_QUERY = (
     '("Dementia"[MeSH] OR "Cognitive Dysfunction"[MeSH]) '
     'AND ("caregivers"[MeSH] OR "caregiver burden" OR "sleep disorders" '
-    'OR "wandering behavior" OR "agitation")'
+    'OR "wandering behavior" OR "agitation") '
+    'NOT ("Animals"[MeSH] NOT "Humans"[MeSH])'  # 동물만 대상인 연구는 뺀다 (사람+동물 둘 다면 남는다)
 )
 
 # NCBI 예절: tool/email을 함께 보내면 문제가 생겼을 때 NCBI가 연락해 준다.
 TOOL_NAME = "mind-care"
 EFETCH_BATCH_SIZE = 100          # efetch 한 번에 요청할 PMID 개수
+ESEARCH_MAX = 9999               # esearch가 한 번에 돌려주는 PMID 상한 (이보다 많으면 기간을 더 잘게 나눠야 함)
 REQUEST_TIMEOUT = 30.0
 
 # 요청 제한: API 키가 없으면 초당 3회, 있으면 초당 10회.
@@ -87,6 +92,7 @@ def fetch_pmids(
     query: str = SEARCH_QUERY,
     retmax: int = 100,
     days_back: Optional[int] = None,
+    date_range: Optional[tuple[date, date]] = None,
 ) -> list[str]:
     """esearch로 검색어에 맞는 PMID 목록을 가져온다.
 
@@ -94,6 +100,7 @@ def fetch_pmids(
         query: PubMed 검색식. 기본값은 SEARCH_QUERY.
         retmax: 최대 PMID 개수.
         days_back: 지정하면 최근 N일 내 '발행(pdat)'된 논문으로 제한한다.
+        date_range: (시작일, 끝일) — 그 사이(양 끝 포함)에 발행된 논문. days_back보다 우선한다.
 
     Returns:
         PMID 문자열 목록 (최신순).
@@ -104,7 +111,10 @@ def fetch_pmids(
         "retmode": "json",
         "sort": "date",
     }
-    if days_back is not None:
+    if date_range is not None:
+        params["datetype"] = "pdat"
+        params["mindate"], params["maxdate"] = (d.strftime("%Y/%m/%d") for d in date_range)
+    elif days_back is not None:
         params["datetype"] = "pdat"      # 발행일 기준
         params["reldate"] = str(days_back)
 
@@ -113,12 +123,11 @@ def fetch_pmids(
     resp.raise_for_status()
     result = resp.json().get("esearchresult", {})
     pmids = result.get("idlist", [])
-    logger.info(
-        "esearch: 검색 결과 %s건 중 PMID %d개 수신 (최근 %s일)",
-        result.get("count", "?"),
-        len(pmids),
-        days_back if days_back is not None else "전체",
-    )
+    period = (f"{date_range[0]}~{date_range[1]}" if date_range is not None
+              else f"최근 {days_back}일" if days_back is not None else "전체")
+    logger.info("esearch: 검색 결과 %s건 중 PMID %d개 수신 (%s)", result.get("count", "?"), len(pmids), period)
+    if int(result.get("count", 0)) > len(pmids) == retmax:
+        logger.warning("esearch: 결과가 retmax(%d)보다 많아 일부만 받았습니다 (%s)", retmax, period)
     return pmids
 
 
@@ -273,7 +282,31 @@ def fetch_papers(days_back: int = 7, max_results: int = 100) -> list[PaperIn]:
     if not pmids:
         logger.info("수집 결과 없음 (최근 %d일)", days_back)
         return []
+    return _fetch_and_parse(pmids)
 
+
+def month_ranges(from_date: date, to_date: date) -> list[tuple[date, date]]:
+    """[from_date, to_date]를 달력의 달 단위로 자른다. 첫·마지막 달은 주어진 날짜에서 끊는다."""
+    if from_date > to_date:
+        raise ValueError(f"from_date({from_date})가 to_date({to_date})보다 늦습니다")
+    ranges = []
+    start = from_date
+    while start <= to_date:
+        next_month = (start.replace(day=1) + timedelta(days=32)).replace(day=1)
+        end = min(next_month - timedelta(days=1), to_date)
+        ranges.append((start, end))
+        start = next_month
+    return ranges
+
+
+def fetch_papers_between(from_date: date, to_date: date) -> list[PaperIn]:
+    """[from_date, to_date]에 발행된 논문을 전부 받는다 (한 달 범위 정도로 부른다. 저장은 하지 않는다)."""
+    pmids = fetch_pmids(SEARCH_QUERY, retmax=ESEARCH_MAX, date_range=(from_date, to_date))
+    return _fetch_and_parse(pmids) if pmids else []
+
+
+def _fetch_and_parse(pmids: list[str]) -> list[PaperIn]:
+    """PMID 목록을 efetch로 묶어 받아 파싱한다. 초록 없는 논문은 빠진다."""
     papers: list[PaperIn] = []
     for start in range(0, len(pmids), EFETCH_BATCH_SIZE):
         batch = pmids[start:start + EFETCH_BATCH_SIZE]
@@ -383,15 +416,43 @@ def collect_and_store(days_back: int = 7, max_results: int = 100) -> SavePapersR
     return result
 
 
+def collect_range_and_store(from_date: date, to_date: date, dry_run: bool = False) -> SavePapersResult:
+    """지난 기간 채우기. 한 달씩 받아 달마다 저장한다 (중간에 끊겨도 앞 달은 남고, 다시 돌리면 중복은 건너뛴다).
+
+    dry_run이면 받기만 하고 저장하지 않는다 (total만 채우고 inserted/skipped는 0).
+    """
+    total = inserted = skipped = 0
+    inserted_ids = []
+    for start, end in month_ranges(from_date, to_date):
+        papers = fetch_papers_between(start, end)
+        if dry_run:
+            total += len(papers)
+            logger.info("%s~%s: %d편 받음 (저장 안 함)", start, end, len(papers))
+            continue
+        result = save_papers(papers)
+        total, inserted, skipped = total + result.total, inserted + result.inserted, skipped + result.skipped
+        inserted_ids += result.inserted_ids
+        logger.info("%s~%s: %d편 중 신규 %d, 중복 %d", start, end, result.total, result.inserted, result.skipped)
+    return SavePapersResult(total=total, inserted=inserted, skipped=skipped, inserted_ids=inserted_ids)
+
+
 def main() -> None:
     """단독 실행용. --dry-run이면 API 호출까지만 하고 DB에 저장하지 않는다."""
     parser = argparse.ArgumentParser(description="PubMed 논문 수집")
     parser.add_argument("--days-back", type=int, default=7, help="최근 N일 내 발행분 (기본 7)")
     parser.add_argument("--max-results", type=int, default=100, help="최대 수집 개수 (기본 100)")
+    parser.add_argument("--from-date", type=date.fromisoformat, help="날짜 범위 수집 시작일 (YYYY-MM-DD)")
+    parser.add_argument("--to-date", type=date.fromisoformat, help="날짜 범위 수집 끝일 (둘 다 주면 --days-back 대신)")
     parser.add_argument("--dry-run", action="store_true", help="DB 저장 없이 수집만")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    if (args.from_date is None) != (args.to_date is None):
+        parser.error("--from-date와 --to-date는 같이 줘야 합니다")
+    if args.from_date:
+        print(collect_range_and_store(args.from_date, args.to_date, dry_run=args.dry_run))
+        return
 
     if args.dry_run:
         papers = fetch_papers(days_back=args.days_back, max_results=args.max_results)

@@ -362,6 +362,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   python -m scripts.update_papers --only summarize --retry-skipped    # 요약 3번 실패해 건너뛰던 논문도 다시 시도
   ```
   그 밖의 옵션: `--days-back`(수집 기간, 기본 7일 — cron 주기보다 길게), `--max-results`(수집 최대, 기본 100), `--lock-file`.
+  지난 기간 채우기: `--from-date YYYY-MM-DD --to-date YYYY-MM-DD`(둘 다 주면 `--days-back` 대신, 한 달씩 전부 받아 달마다 저장. `--max-results`는 안 씀). 서버 명령·예상 시간은 [`deploy.md`](deploy.md) 9절.
 - 요약 실패 논문은 저장되지 않아 다음 실행 때 다시 시도되지만, 실패 횟수를 상태 파일(`--state-file`, 기본은 `--log-file`과 같은 폴더의 `update_papers_state.json`)에 논문 id별로 적어 **3번 실패하면 다음 실행부터 건너뛴다**(로그에 "건너뜀 n건 (PMID 목록)", 종료 코드 1의 원인 아님). 상태 파일이 없거나 깨지면 새로 시작하고, `--dry-run`은 기록하지 않는다.
 - **자동 실행: AWS 서버(EC2 1대)에서 cron으로 실행 예정.** 예: `0 3 * * 1 cd /path/backend && .venv/bin/python -m scripts.update_papers --log-file logs/update_papers.log`
 - 테스트: `python -m unittest tests.test_update_papers` (가짜 단계·가짜 모델, DB 불필요).
