@@ -118,11 +118,11 @@ class RecentFeedPapersDbTests(_UserTestCase):
         return get_recent_feed_papers(self.user, reference_time=self.NOW, **kw)
 
     def test_period_in_out_and_future_excluded(self):
-        self.save_at([PAPERS[0]], self.NOW - timedelta(days=30))   # 경계: 제외
-        self.save_at([PAPERS[1]], self.NOW - timedelta(days=29))
+        self.save_at([PAPERS[0]], self.NOW - timedelta(days=7))    # 경계: 제외
+        self.save_at([PAPERS[1]], self.NOW - timedelta(days=6))
         self.save_at([PAPERS[2]], self.NOW + timedelta(minutes=1))  # 미래: 제외
         self.assertEqual([r.paper_id for r in self.recent()], [PAPERS[1]])
-        self.assertEqual([r.paper_id for r in self.recent(days=31)], [PAPERS[1], PAPERS[0]])
+        self.assertEqual([r.paper_id for r in self.recent(days=8)], [PAPERS[1], PAPERS[0]])
 
     def test_same_paper_in_many_batches_is_one_row(self):
         self.save_at([PAPERS[0], PAPERS[1]], self.NOW - timedelta(days=5))

@@ -54,7 +54,7 @@ VISIT_PAST_WINDOW_DAYS = 365
 VISIT_FUTURE_WINDOW_DAYS = 90
 
 # 최근 추천 이력 (reference_time 기준) — 스냅샷의 recently_recommended, get_recent_feed_papers() 기본값
-RECENT_FEED_WINDOW_DAYS = 30
+RECENT_FEED_WINDOW_DAYS = 7  # 피드는 3일마다 갱신 → 직전 1~2번 피드만 뺀다 (DB가 작아 길게 빼면 좋은 논문이 바닥남)
 RECENT_FEED_LIMIT = 50
 
 
