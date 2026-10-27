@@ -2,13 +2,15 @@
 
 > 담당: **박주현**. 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), 배치 동작은 [`db.md`](db.md)의 "통합 배치".
 
-EC2 한 대(Ubuntu 24.04, t3.medium 메모리 4GB + 스왑 4GB, Docker 설치됨)에 **DB + 백엔드 + 주기 배치**를 올린다.
+EC2 한 대(Ubuntu 24.04, t3.medium 메모리 4GB + 스왑 4GB, Docker 설치됨)에 **DB + 백엔드 + 주기 배치 + 웹(nginx)**을 올린다.
 
 | 파일 | 하는 일 |
 |---|---|
 | `backend/Dockerfile` | 백엔드 이미지 (python 3.12-slim, torch **CPU 전용** 2.14.1 — 로컬 `.venv`와 같은 버전) |
 | `backend/.dockerignore` | `.env`·덤프·로그·캐시가 이미지에 들어가지 않게 |
-| `deploy/docker-compose.prod.yml` | 서버용 compose. db(127.0.0.1:5432) + backend(127.0.0.1:8000) |
+| `deploy/docker-compose.prod.yml` | 서버용 compose. db(127.0.0.1:5432) + backend(127.0.0.1:8000) + web(80) |
+| `deploy/web.Dockerfile` (+ `.dockerignore`) | 프론트 웹 빌드(`expo export`) → nginx 이미지 |
+| `deploy/nginx.conf` | `/` 정적 파일, `/api/` → backend, 사이트 전체 기본 인증 |
 | `deploy/run_update_papers.sh` | 실행 중인 backend 컨테이너 안에서 `update_papers` 배치를 돌린다 (cron용) |
 
 compose 명령은 **항상 레포 루트에서, `--env-file backend/.env`를 붙여서** 쓴다. 아래에서는 줄여서 `$DC`로 적는다.
@@ -49,6 +51,7 @@ nano backend/.env
 - `OPENAI_API_KEY`, `GEMINI_API_KEY` — 챗봇 등
 - `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `PRELOAD_EMBEDDING_MODEL` — 로컬과 같게
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `APP_ENV`
+- `EXPO_PUBLIC_DEV_USER_ID` — 웹 빌드용 시연 사용자 id. 처음엔 비워 두고 8-2에서 채운다 (비어 있으면 web 빌드만 실패)
 
 ## 3. 실행
 
@@ -60,7 +63,7 @@ curl http://127.0.0.1:8000/docs -o /dev/null -w "%{http_code}\n"   # 200
 ```
 
 - **첫 기동(빈 `pgdata` 볼륨)일 때만** 마이그레이션 `001`~`008`이 파일명 순서대로 자동 적용된다.
-- 포트는 서버 안(`127.0.0.1`)에서만 열려 있다. 외부 공개는 리버스 프록시(nginx 등)를 붙일 때 정한다.
+- db·backend 포트는 서버 안(`127.0.0.1`)에서만 열려 있다. 외부에는 web(nginx, 80)만 열린다 → 8번.
 
 ## 4. 데이터 옮기기 (로컬 DB → 서버)
 
@@ -156,3 +159,70 @@ free -h                                                       # 배치 중 메�
 - 3일 치 새 논문은 수십 편 수준이라 임베딩은 금방 끝나고, 새벽 4시라 사용자 영향도 작다 → **지금 구성으로 시작하고 첫 실행 때 `free -h`로 확인**한다.
 - 문제가 되면: 배치 동안 백엔드를 잠시 내리거나(`$DC stop backend` → `$DC run --rm backend python -m scripts.update_papers …` → `$DC start backend`, 몇 분 중단),
   인스턴스를 t3.large(8GB)로 올린다.
+
+## 8. 웹 공개 (nginx, 주소 하나)
+
+`http://서버IP/` → 프론트 웹(정적 파일), `http://서버IP/api/...` → backend(접두사 `/api`를 떼고 전달).
+**사이트 전체에 HTTP 기본 인증**(팀 공용 아이디·비밀번호 하나)이 걸린다. db·backend 포트는 그대로 `127.0.0.1`만.
+
+### 8-1. AWS 설정 (처음 한 번)
+
+- **탄력적 IP(Elastic IP)**를 할당해 인스턴스에 연결한다. 안 하면 인스턴스를 껐다 켤 때마다 IP가 바뀐다.
+- 보안 그룹 인바운드에 **HTTP 80 (0.0.0.0/0)**을 추가한다. 5432·8000은 열지 않는다 (SSH 22는 기존대로).
+
+### 8-2. 기본 인증 파일과 시연 사용자 id (서버에서, 레포에 올리지 않음)
+
+```bash
+cd ~/mind-care
+# 기본 인증 아이디·비밀번호 (bcrypt). 실제 값은 단톡으로만 공유한다
+docker run --rm httpd:2.4-alpine htpasswd -nbB 아이디 비밀번호 > deploy/htpasswd
+chmod 644 deploy/htpasswd    # nginx(컨테이너 안 다른 사용자)가 읽을 수 있게. 내용은 해시라 원문 비밀번호는 없다
+
+# 웹 빌드 인자: 시연에 쓸 사용자 id (users.id). 로그인 기능 전까지 웹 전체가 이 사용자로 동작한다
+$DC exec backend python -m scripts.list_users     # id 확인 (backend가 떠 있어야 함)
+nano backend/.env                                  # EXPO_PUBLIC_DEV_USER_ID=여기에-id 한 줄 추가
+```
+
+- `deploy/htpasswd`는 `.gitignore`에 있어 레포에 올라가지 않는다.
+- `deploy/htpasswd`가 **없는 채로 띄우면** docker가 그 이름으로 빈 폴더를 만들어 nginx가 뜨지 않는다.
+  그랬다면 `rmdir deploy/htpasswd` 후 위 명령으로 다시 만든다.
+- `EXPO_PUBLIC_DEV_USER_ID`가 비어 있으면 web 빌드가 일부러 실패한다.
+- `EXPO_PUBLIC_API_BASE_URL`은 기본값 `/api`(같은 주소)라 넣지 않는다.
+
+### 8-3. 빌드·실행
+
+```bash
+$DC up -d --build            # db·backend는 바뀐 게 없으면 그대로, web만 새로 만든다
+$DC ps                       # web이 running
+curl -s -o /dev/null -w "%{http_code}
+" http://127.0.0.1/                       # 401 (인증 필요)
+curl -s -o /dev/null -w "%{http_code}
+" -u 아이디:비밀번호 http://127.0.0.1/api/docs  # 404 (Swagger 비공개, 아래)
+```
+
+브라우저에서 `http://탄력적IP/`로 열고 아이디·비밀번호를 넣는다.
+
+### 8-4. 업데이트 반영
+
+- **프론트 코드가 바뀌었을 때**: `git pull` → `$DC up -d --build web`.
+  `EXPO_PUBLIC_*` 값은 **빌드할 때 번들에 박히므로**, `backend/.env`의 `EXPO_PUBLIC_DEV_USER_ID`를 바꿨을 때도 다시 빌드해야 한다.
+- **`deploy/nginx.conf`만 바뀌었을 때**: 볼륨으로 붙어 있어 빌드 없이 `$DC restart web`.
+- **비밀번호 변경**: `htpasswd` 파일을 다시 만들고 `$DC restart web`.
+- 브라우저가 옛 화면을 보이면 강력 새로고침(Ctrl+Shift+R). JS·CSS 파일은 이름에 해시가 붙어 캐시 문제는 거의 없다.
+
+### 8-5. Swagger(`/docs`)는 공개하지 않는다
+
+`nginx.conf`가 `/api/docs`·`/api/redoc`·`/api/openapi.json`을 404로 막는다 (API 전체 목록을 밖에 보이지 않게).
+필요할 때는 내 PC에서 **SSH 터널**로 본다:
+
+```bash
+ssh -i 키.pem -L 8000:127.0.0.1:8000 ubuntu@탄력적IP
+# 연결해 둔 채로 브라우저에서 http://localhost:8000/docs
+```
+
+### 주의
+
+- **HTTP라 기본 인증 비밀번호가 암호화되지 않고 오간다.** 공용 와이파이 등에서는 엿볼 수 있으니
+  다른 곳에 쓰는 비밀번호를 재사용하지 말고, 시연용으로만 쓴다. 오래 공개할 거면 도메인 + HTTPS(Let's Encrypt)를 붙인다.
+- 기본 인증을 통과한 사람은 모두 **같은 시연 사용자**로 보인다 (기록·대화가 섞인다).
+- AI 피드처럼 오래 걸리는 요청을 위해 `/api/`는 응답을 120초까지 기다린다. 그보다 길면 504.

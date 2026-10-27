@@ -1,6 +1,6 @@
 # 마인드 케어 서버용 (EC2 한 대에 DB + 백엔드). 사용법·순서는 docs/deploy.md.
 #
-# 레포 루트에서 항상 --env-file backend/.env 를 같이 준다 (POSTGRES_PASSWORD를 아래 ${...}에 채우기 위해):
+# 레포 루트에서 항상 --env-file backend/.env 를 같이 준다 (POSTGRES_PASSWORD, 웹 빌드 인자를 아래 ${...}에 채우기 위해):
 #   docker compose --env-file backend/.env -f deploy/docker-compose.prod.yml up -d --build
 #
 # 로컬 개발용 backend/docker-compose.yml과는 프로젝트 이름(mindcare)·볼륨이 따로라 서로 섞이지 않는다.
@@ -37,7 +37,7 @@ services:
       DATABASE_URL: postgresql://mindcare:${POSTGRES_PASSWORD}@db:5432/mindcare
       TZ: KST-9  # 로그 시각을 한국 시간으로 (slim 이미지엔 tzdata가 없어 POSIX 표기. 한국은 서머타임 없음)
     ports:
-      - "127.0.0.1:8000:8000"  # 일단 서버 안에서만. 외부 공개는 리버스 프록시를 붙일 때 정한다
+      - "127.0.0.1:8000:8000"  # 서버 안에서만. 외부에는 web(nginx)의 /api/ 로만 공개
     depends_on:
       db:
         condition: service_healthy
@@ -45,6 +45,24 @@ services:
       - models:/models      # bge-m3 캐시 (다시 받지 않게)
       - logs:/app/logs      # update_papers 로그
       - state:/app/state    # update_papers 요약 실패 기록
+
+  web:
+    build:
+      context: ../frontend
+      dockerfile: ../deploy/web.Dockerfile
+      args:
+        EXPO_PUBLIC_API_BASE_URL: ${EXPO_PUBLIC_API_BASE_URL:-/api}
+        # 비어 있으면 web.Dockerfile에서 빌드가 멈춘다 (backend/.env에 넣는다). 없어도 compose 명령 자체는 멈추지 않는다
+        EXPO_PUBLIC_DEV_USER_ID: ${EXPO_PUBLIC_DEV_USER_ID:-}
+    image: mindcare-web
+    restart: unless-stopped
+    ports:
+      - "80:80"  # 외부 공개 (기본 인증)
+    depends_on:
+      - backend
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./htpasswd:/etc/nginx/htpasswd:ro  # 서버에서 만든다 (레포에 올리지 않음)
 
 volumes:
   pgdata:
