@@ -33,7 +33,7 @@ class ProductionPreparePolicyTests(unittest.TestCase):
         before = value.model_dump()
         text = self.project(value)
         self.assertEqual(json.loads(text), {
-            "feed_scope": "caregiver_all",
+            "feed_scope": "caregiver_all", "recent_feed_titles": [],
             "caregiver": {"relationship": "stored relationship", "lifestyle_tags": ["stored tag"]},
             "patients": [{"patient_ref": "patient_1", "dementia_stage": "stored stage",
                           "symptoms": ["signal 1"], "interests": ["stored interest"],
@@ -53,7 +53,7 @@ class ProductionPreparePolicyTests(unittest.TestCase):
             self.assertEqual(data["feed_scope"], "caregiver_all")
             self.assertEqual(len(data["patients"]), size)
             if size == 0:
-                self.assertEqual(data, {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+                self.assertEqual(data, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
 
     def test_all_patients_and_per_patient_signals_survive_selected_or_foreign_patient_id(self):
         raw = snapshot([patient(P2), patient(P1)])

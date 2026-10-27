@@ -235,12 +235,32 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 
 `workflows/feed_context.py`는 caregiver/user-scoped **입력** 계약이다. 공통 실행 `schemas.py`,
 Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Loader는 이 전체 계약으로
-최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 네 구성이다.
+최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 다섯 구성이다.
 
 - `caregiver_profile`: 저장된 간병인 프로필, row가 없으면 명시적 `null`
 - `managed_patient_profiles`: 여러 관리 환자의 저장 프로필 및 환자별 종속 collection
 - `recent_care_context`: 최근 정확히 30×24시간의 관찰 기록
 - `long_term_summary`: optional caregiver/user-scoped derived 장기 요약, 없으면 명시적 `null`
+- `recently_recommended`: 같은 Backend Snapshot의 최근 추천 이력, 없으면 명시적 `[]`
+
+최근 추천 이력은 `SourceRecentFeedPaper` → `RecentFeedRecommendationContext`로 순서와 모든 필드를 보존한다.
+`paper_id`, nullable `pmid`, `title`, aware `last_recommended_at`, strict 양의 `times_recommended`가 required다.
+Source/Context 검증 경계에서 중복 `paper_id`, 50편 초과, `(reference_time - 30일, reference_time]` 밖의 시각을 거부한다.
+전체 적격 수를 알 수 없어 이 목록에 Coverage를 만들지 않는다.
+
+Provider JSON에는 기존 개인화 신호에 `recent_feed_titles` 문자열 배열만 추가한다. DB 정렬을 그대로 따라
+최신 최대 20개 제목을 제공하며 UUID/PMID/추천 시각·횟수는 공개하지 않는다. 제목은 비신뢰 데이터이고,
+이 상위 20편에서 300자 초과 제목은 공개 목록에서만 제외한다. 제목 배열을
+`json.dumps(ensure_ascii=False, allow_nan=False)`로 직렬화한 UTF-8 크기가 8,192 bytes를
+넘으면 추가를 중단한다. 제목을 자르거나 21번째 이후로 보충하지 않으며 원본 이력과
+전체 PMID 제외 목록은 유지한다. 이 제한은 전체 Provider 메시지가 아닌 제목 배열에만 적용된다.
+일부 최근 추천이 열람·선호·만족이나 전체 이력을 뜻하지 않는다.
+`prepare_production_feed_input()`은 Snapshot을 한 번만 읽어 JSON과 전체 최대 50편의 유효 PMID를
+불변 `PreparedFeedInput(str)`에 묶는다. 일반 JSON builder는 기존처럼 보통 `str`을 반환한다.
+Workflow는 객체를 그대로 전달하고 FeedExecution은 일반 문자열과 서버 전용 PMID 인자를 분리한다.
+Runner는 요청별 FeedCandidates에서만 PMID를 사용하며 일반 문자열 직접 실행은 빈 제외 집합이다.
+과거 PMID는 `_rank_topic()` 다음, `_reviewed` 제외 전에 걸러진다. 원본 RAG 응답·인덱스와
+검토/유지 로직, 검색 예산은 유지하고 신규 적격 수·중복 통계는 과거 추천을 뺀 후보로 계산한다.
 
 모든 선언 필드는 required이며 nullable scalar도 생략하지 않고 `null`, 조회된 빈 list는
 `[]`로 표현한다. Extra field를 거부한다. 사용자 ID, raw 환자 UUID, 간병인/환자 이름,

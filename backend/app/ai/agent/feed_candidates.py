@@ -125,7 +125,8 @@ class FeedCandidate:
 class FeedCandidates:
     """Request-owned original pools and a deterministic, latest <=15 review projection, with <=5 retained/recommended."""
 
-    def __init__(self):
+    def __init__(self, *, previously_recommended_pmids: frozenset[str] = frozenset()):
+        self._previously_recommended_pmids = frozenset(previously_recommended_pmids)
         self._items: list[FeedCandidate] = []
         self._pools: list[list[FeedCandidate]] = []
         self._pmids: set[str] = set()
@@ -156,7 +157,8 @@ class FeedCandidates:
     def selection_stats(self) -> dict:
         """Aggregate diagnostics only; never log query, identity or evidence text."""
         rows = [candidate for topic in self._pools for candidate in topic]
-        eligible = [candidate for candidate in rows if _eligible(candidate)]
+        eligible = [candidate for candidate in rows if _eligible(candidate)
+                    and candidate.evidence.pmid not in self._previously_recommended_pmids]
         return {
             "returned_count": len(rows),
             "missing_pmid_count": sum(not (row.evidence.pmid and row.evidence.pmid.strip()) for row in rows),
@@ -182,6 +184,8 @@ class FeedCandidates:
         # pass. No cross-query score comparison or server topic inference.
         pools = self._pools[self._round_start:] + self._pools[:self._round_start]
         ranked = [_rank_topic(topic) for topic in pools]
+        ranked = [[candidate for candidate in topic
+                   if candidate.evidence.pmid not in self._previously_recommended_pmids] for topic in ranked]
         self._pmids = {c.evidence.pmid for topic in ranked for c in topic}
         topics = [[c for c in topic if c.evidence.pmid not in self._reviewed]
                   for topic in ranked]

@@ -124,7 +124,9 @@ class IterativeResearchTests(unittest.TestCase):
         with patch.object(execution.runner, "run_structured", side_effect=capture) as run:
             prepared = prepared_input()
             result = execution(CONTEXT, prepared)
-        self.assertIs(run.call_args.args[0], prepared)
+        self.assertEqual(run.call_args.args[0], prepared)
+        self.assertIs(type(run.call_args.args[0]), str)
+        self.assertEqual(run.call_args.kwargs["previously_recommended_pmids"], frozenset())
         self.assertIs(result, returned[0])
         self.assertIs(run.call_args.args[1], CONTEXT)
         self.assertIs(run.call_args.kwargs["output_model"], FeedAnswerV2)

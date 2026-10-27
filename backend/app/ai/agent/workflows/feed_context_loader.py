@@ -4,7 +4,7 @@ from typing import Callable, Literal, TypeVar
 from uuid import UUID
 
 from ..schemas import AgentContext
-from .feed_context import FeedPersonalizationContextV1
+from .feed_context import FeedPersonalizationContextV1, _validate_recent_feed_history
 from . import feed_context_source as s
 
 
@@ -31,7 +31,9 @@ class FeedContextLoadError(RuntimeError):
         super().__init__(f"Feed Context load failed: {code}")
 
 
-def _validate_source_invariants(snapshot: s.FeedContextSourceSnapshot, user_id: UUID) -> None:
+def _validate_source_invariants(snapshot: s.FeedContextSourceSnapshot, user_id: UUID,
+                                reference_time: datetime) -> None:
+    _validate_recent_feed_history(snapshot.recently_recommended, reference_time)
     if snapshot.caregiver_profile is not None and snapshot.caregiver_profile.user_id != user_id:
         raise ValueError("Caregiver scope mismatch")
     if snapshot.long_term_summary is not None and snapshot.long_term_summary.user_id != user_id:
@@ -121,6 +123,10 @@ def _project_snapshot(snapshot: s.FeedContextSourceSnapshot, reference: datetime
 
     return {
         "schema_version": "1", "reference_time": reference,
+        "recently_recommended": [{
+            "paper_id": row.paper_id, "pmid": row.pmid, "title": row.title,
+            "last_recommended_at": row.last_recommended_at, "times_recommended": row.times_recommended,
+        } for row in snapshot.recently_recommended],
         "caregiver_profile": None if caregiver is None else {
             "relationship": caregiver.relationship, "burden_score": caregiver.burden_score,
             "mood_score": caregiver.mood_score, "lifestyle_tags": caregiver.lifestyle_tags,
@@ -183,7 +189,7 @@ class DefaultFeedContextLoader:
         try:
             # Revalidate even a mutated/model_construct Source instance, including children.
             snapshot = s.FeedContextSourceSnapshot.model_validate(raw_snapshot)
-            _validate_source_invariants(snapshot, context.user_id)
+            _validate_source_invariants(snapshot, context.user_id, reference)
         except Exception:
             raise FeedContextLoadError("invalid_source_snapshot") from None
         try:

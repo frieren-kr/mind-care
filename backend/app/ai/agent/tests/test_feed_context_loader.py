@@ -57,7 +57,7 @@ def source_log(identifier=P1, instant=NOW - timedelta(hours=1)):
 
 def empty_snapshot():
     return {"caregiver_profile": None, "managed_patients": records(),
-            "recent_care_logs": records(), "long_term_summary": None}
+            "recent_care_logs": records(), "long_term_summary": None, "recently_recommended": []}
 
 
 def full_snapshot():
@@ -123,7 +123,7 @@ class ProductionContextPrepareTests(unittest.TestCase):
         loader, source = self.loader(empty_snapshot())
         context = CONTEXT.model_copy(update={"patient_id": None})
         self.assertEqual(json.loads(prepare_production_feed_input(context, loader)),
-                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         self.assertEqual(source.calls[0]["user_id"], USER)
         source.error = RuntimeError(PRIVATE)
         with self.assertRaises(FeedContextLoadError) as caught:
@@ -154,7 +154,7 @@ class ProductionContextPrepareTests(unittest.TestCase):
         before = value.model_dump()
         text = build_production_feed_provider_input(value, service_timezone=SERVICE_TZ)
         payload = json.loads(text)
-        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients"})
+        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients", "recent_feed_titles"})
         self.assertEqual(set(payload["caregiver"]), {"relationship", "lifestyle_tags"})
         for patient in payload["patients"]:
             self.assertEqual(set(patient), {"patient_ref", "dementia_stage", "symptoms", "interests",

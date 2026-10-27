@@ -5,6 +5,7 @@ from ..outputs import FeedAnswerV2, StructuredAgentResult
 from ..registry import ToolName, ToolRegistry
 from ..schemas import AgentContext
 from .feed_prompts import FeedPromptBuilder
+from .feed_context_prepare import PreparedFeedInput
 
 
 class FeedExecutionError(RuntimeError):
@@ -51,6 +52,9 @@ class FeedExecutionV1:
             self._validate_runner()
             if not isinstance(provider_input, str) or not provider_input.strip():
                 raise TypeError("Prepared Feed input required")
-            return self.runner.run_structured(provider_input, context, output_model=FeedAnswerV2)
+            pmids = (provider_input.previously_recommended_pmids
+                     if isinstance(provider_input, PreparedFeedInput) else frozenset())
+            return self.runner.run_structured(str(provider_input), context, output_model=FeedAnswerV2,
+                                               previously_recommended_pmids=pmids)
         except Exception:
             raise FeedExecutionError() from None

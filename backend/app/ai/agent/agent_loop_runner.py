@@ -57,11 +57,13 @@ class AgentLoopRunner:
         return cast(AgentResult, self._run(user_input, context))
 
     def run_structured(self, user_input: str, context: AgentContext, *,
-                       output_model: FinalOutputModel) -> StructuredAgentResult:
+                       output_model: FinalOutputModel,
+                       previously_recommended_pmids: frozenset[str] = frozenset()) -> StructuredAgentResult:
         """명시적 opt-in. 기존 Client/Tool Loop로 실행하고 마지막 text만 검증한다."""
         if output_model not in (ChatAnswerV1, FeedAnswerV2):
             raise ValueError("Only ChatAnswerV1 and FeedAnswerV2 are supported")
-        return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model))
+        return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model,
+                    previously_recommended_pmids=previously_recommended_pmids))
 
     def _tool_results(self, calls, context, state, *, stop_on_failure):
         parallel = False
@@ -95,11 +97,13 @@ class AgentLoopRunner:
                     return
 
     def _run(self, user_input: str, context: AgentContext, *,
-             output_model: FinalOutputModel | None = None) -> AgentResult | StructuredAgentResult:
+             output_model: FinalOutputModel | None = None,
+             previously_recommended_pmids: frozenset[str] = frozenset()) -> AgentResult | StructuredAgentResult:
         state = AgentState(request_id=context.request_id)
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
-        feed_candidates = FeedCandidates() if output_model is FeedAnswerV2 else None
+        feed_candidates = (FeedCandidates(previously_recommended_pmids=previously_recommended_pmids)
+                           if output_model is FeedAnswerV2 else None)
         feed_retrieval_used = 0
         feed_model_calls = 0
         feed_query_keys: set[str] = set()

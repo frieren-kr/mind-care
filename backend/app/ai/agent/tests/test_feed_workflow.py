@@ -44,7 +44,9 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(deps.read_calls[0]["user_id"], context.user_id)
         run.assert_called_once()
         prepared = deps.received["feed_execution"][1]
-        self.assertIs(run.call_args.args[0], prepared)
+        self.assertEqual(run.call_args.args[0], prepared)
+        self.assertIs(type(run.call_args.args[0]), str)
+        self.assertEqual(run.call_args.kwargs["previously_recommended_pmids"], frozenset())
         user = next(m for m in deps.client.requests[0][0] if m.kind == "user_input")
         self.assertEqual(user.content, prepared)
         patients = json.loads(prepared)["patients"]
@@ -331,7 +333,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
         messages = deps.client.requests[0][0]
         payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
-        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": []})
+        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
         self.assertIn("일반적인 정보적 관련성", policy)
