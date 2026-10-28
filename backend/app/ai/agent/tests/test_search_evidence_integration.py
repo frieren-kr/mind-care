@@ -51,7 +51,7 @@ class SearchEvidenceIntegrationTests(TestCase):
     def test_default_factory_reaches_real_rag_function_through_runner_without_live_search(self):
         client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final_turn()])
         paper = SimpleNamespace(paper_id=CONTEXT.patient_id, external_id="SYNTHETIC-PMID",
-            title="Dementia caregiver guideline", abstract=None, published_date=None,
+            title="Dementia care guideline", abstract=None, published_date=None,
             publication_types=["Guideline"], mesh_terms=["Dementia"], journal=None, doi=None)
         hit = SimpleNamespace(paper_id=paper.paper_id, score=-0.4)
         with patch.object(rag, "embed_query", return_value=[0.0]) as embed, \

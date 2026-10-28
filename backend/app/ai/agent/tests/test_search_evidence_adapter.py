@@ -155,7 +155,7 @@ class SearchEvidenceAdapterTests(TestCase):
 
     def test_real_rag_metadata_policy_is_preserved_with_mocked_db_rows(self):
         paper = SimpleNamespace(paper_id=CONTEXT.patient_id, external_id="SYNTHETIC-EXTERNAL-ID",
-            title="Dementia caregiver guideline", abstract=None, published_date=date(2025, 1, 1),
+            title="Dementia care guideline", abstract=None, published_date=date(2025, 1, 1),
             publication_types=["Guideline"], mesh_terms=["Dementia"], journal=None, doi=None)
         hit = SimpleNamespace(paper_id=paper.paper_id, score=-0.4)
         with patch.object(rag, "embed_query", return_value=[0.0]), \
