@@ -389,6 +389,50 @@ class RecommendationResponse(BaseModel):
 
 
 # ------------------------------------------------------------
+# 챗봇 API (POST /chat/{user_id}) — 2026-10-28 추가
+# 화면 형식(frontend/src/types/index.ts의 ChatResponse·ChatSource)과 같은 이름을 쓴다.
+# ------------------------------------------------------------
+
+class ChatRequest(BaseModel):
+    """POST /chat/{user_id} 요청 본문."""
+
+    message: str = Field(min_length=1, max_length=4000, description="간병인의 질문 (1~4000자)")
+    patient_id: Optional[UUID] = Field(default=None, description="선택. 이 사용자의 환자여야 한다")
+
+    @field_validator("message")
+    @classmethod
+    def _reject_blank_message(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("질문이 비어 있거나 공백뿐입니다.")
+        return value
+
+
+class ChatSource(BaseModel):
+    """답변의 근거 자료 한 건. 서버가 검색 원본에서 복사한 값 (AI 쪽 outputs.ResolvedEvidence에서 source_ref만 뺀 것).
+
+    없는 값은 null 그대로 둔다 (가짜 링크를 만들지 않는다).
+    """
+
+    evidence_type: Literal["new_research", "guideline"] = Field(description="new_research = 논문, guideline = 공식 지침")
+    title: str
+    pmid: Optional[str] = None
+    doi: Optional[str] = None
+    journal: Optional[str] = None
+    publication_year: Optional[int] = None
+    study_type: Optional[str] = None
+    organization: Optional[str] = Field(default=None, description="지침을 낸 기관 (guideline일 때)")
+    source_url: Optional[str] = None
+    full_text_available: bool
+
+
+class ChatResponse(BaseModel):
+    """POST /chat/{user_id} 응답."""
+
+    answer: str
+    sources: list[ChatSource] = Field(description="답변이 인용한 순서 그대로. 근거 없이 답하면 빈 목록")
+
+
+# ------------------------------------------------------------
 # 근거 등급 전용 (paper_analysis의 study_type / evidence_level) — 2026-10-09 추가
 # 등급(김현서)과 요약(허웅)이 같은 줄을 쓰기 때문에, 서로의 칸을 지우지 않게 경로를 나눴다.
 # ------------------------------------------------------------

@@ -1,6 +1,6 @@
 # API
 
-> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`는 박주현, `users.py`는 김한슬).
+> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`·`chat.py`는 박주현, `users.py`는 김한슬).
 > 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), DB 함수 계약은 [`db.md`](db.md).
 
 **프론트 연결 상태 (2026-10-24)**: 피드(/recommendations), 논문 상세(/papers/{paper_id}), 내 정보(/feed/{user_id}), 피드 갱신 주기(PATCH /users/{user_id}/feed-settings) API 연결 완료. 검색 모드 기준으로 응답 형식 확인, AI 모드 화면(personal_reason·category)은 AI 연결 후 확인 예정.
@@ -23,6 +23,7 @@
 | `GET /users/{user_id}/feed-settings` | `api/users.py` | 피드 갱신 주기 조회(1~7일, 기본 3일). 없는 사용자는 404 | `FeedSettingsOut` |
 | `PATCH /users/{user_id}/feed-settings` | `api/users.py` | JSON `{"feed_refresh_days": 5}` 저장. 정수 1~7만 허용, 잘못된 입력은 422, 없는 사용자는 404 | `FeedSettingsOut` |
 | `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
+| `POST /chat/{user_id}` | `api/chat.py` | 챗봇 질문 1개 → 답변 + 근거. 본문 `{"message": "...", "patient_id": null}` (`message` 1~4000자, `patient_id` 선택). 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404, 입력 오류는 422, AI를 못 쓰거나 실패하면 503. **최대 90초** 걸릴 수 있다 | `ChatResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 [`users.md`](users.md) 참고.
 - `/feed/{user_id}`와 `/feed_user/{user_id}` 응답에는 최상위 `feed_refresh_days`를 포함한다.
@@ -95,6 +96,27 @@
   - bge-m3는 **서버 시작 때 미리 불러온다**(`main.py` lifespan, 걸린 시간은 시작 로그에). `PRELOAD_EMBEDDING_MODEL=0`이면 건너뛰고 첫 요청 때 불러온다(테스트는 `tests/__init__.py`가 끈다). 예열이 실패해도 서버는 뜨고 경고만 남긴다.
   - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요. 저장 기간은 `FeedCacheTests`가 DB 없이 확인).
 
+- `/chat`(담당: 박주현, ★2026-10-28 첫 버전) — 허웅 님 `ChatWorkflow` 3단계를 `/recommendations`와 같은 구조로 조립한다.
+  - 사용자·환자 확인(404)은 `user_functions.get_user_profile_context(user_id)`. 그다음
+    `AgentContext(request_id=uuid4, user_id, patient_id)` → `prepare_chat_input` → `chat_execution`(LLM + `search_evidence`) → `backend_handoff()`.
+  - **AI 연결: `get_chat_execution()`** — `get_feed_execution()`과 같은 설정(`OPENAI_API_KEY`, `OPENAI_AGENT_MODEL`, 없으면 `OPENAI_SUMMARY_MODEL`).
+    없거나 조립이 실패하면 `None` → **503** `"지금은 답변을 만들 수 없어요. …"`. 검색 대체 응답은 없다.
+    전체 실행 상한 80초, LLM 1회 30초 (화면 대기 시간 90초 안).
+  - 도구는 지금 `search_evidence` 하나. 환자 도구(프로필·돌봄 기록)는 허웅 님 작업 후 붙인다.
+    그때까지 `patient_id`는 소속 확인(404)에만 쓰이고 답변 내용에는 반영되지 않는다.
+  - **대화는 저장하지 않는다** (이전 대화를 기억하지 않음). 저장 형식은 허웅 님과 정한 뒤 추가.
+  - 요청/응답 예시:
+    ```json
+    // POST /chat/{user_id}
+    {"message": "어머니가 밤에 잠을 잘 못 주무세요. 어떻게 도와드리면 좋을까요?", "patient_id": null}
+    // 200
+    {"answer": "밤잠이 줄어드는 건 치매에서 흔한 변화예요. …",
+     "sources": [{"evidence_type": "new_research", "title": "…", "pmid": "12345678", "doi": null,
+                  "journal": "…", "publication_year": 2025, "study_type": "rct", "organization": null,
+                  "source_url": null, "full_text_available": false}]}
+    ```
+  - 테스트: `backend/`에서 `python -m unittest tests.test_chat` (DB·실제 LLM 없이 가짜 실행기).
+
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보내고, 화면 표시용 `'A'`~`'D'`는
   `evidence_grade`에 함께 담는다 (아래 "응답 형식"). 가이드라인(`'guideline'`) 표시 규칙은 아직 없다.
@@ -124,6 +146,10 @@
   검색어가 하나면 관련도 높은 순, `ai`면 AI가 정한 순),
   `generated_at?`(★2026-10-15 추가, tz 포함 시각) — 저장된 AI 피드 묶음의 생성 시각. 저장본을 다시 줄 때도 **처음 만든 시각**이다.
   `search`이거나 저장에 실패했으면 `None`. 화면에서 "○일 전 추천" 표시에 쓸 수 있다.
+- **ChatResponse** (`POST /chat`): `answer`(str), `sources`(`ChatSource` 목록 — **답변이 인용한 순서 그대로**, 0개도 정상).
+  - **ChatSource** = AI 쪽 `outputs.ResolvedEvidence`에서 `source_ref`만 뺀 것 (화면 `frontend/src/types/index.ts`의 `ChatSource`와 같다):
+    `evidence_type`(`new_research`/`guideline`), `title`, `pmid?, doi?, journal?, publication_year?, study_type?, organization?, source_url?`, `full_text_available`.
+    검색 원본에서 서버가 복사한 값이고 없는 값은 `null` 그대로다.
 - **evidence_grade** (위 세 응답 모델 공통) = 화면 표시용 근거 등급 `"A"`~`"D"`. 등급이 없으면 `None`.
   DB의 `evidence_level`(문자 `"1"`~`"6"`)을 **묶은 값**이고, `evidence_level`은 그대로 함께 돌려준다.
   변환 규칙의 정본은 AI 쪽 `app/ai/retrieval/evidence.py`의 `to_grade()` (`1→A, 2→B, 3·4→C, 5·6→D`).
