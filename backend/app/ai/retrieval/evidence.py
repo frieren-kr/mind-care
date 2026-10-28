@@ -169,7 +169,8 @@ PATIENT_RE = re.compile(
 )
 # 검색어가 보호자 본인을 찾는 것이면 미루지 않는다 (예: 보호자 부담·우울, 보호자 지원 프로그램)
 CAREGIVER_QUERY_RE = re.compile(
-    r"\b(care ?givers?|caregiving|carers?|care partners?|family|spouses?|respite)\b|보호자|간병인|가족|돌봄 부담|간병 부담",
+    r"\b(care ?givers?|caregiving|carers?|care partners?|family|spouses?|respite)\b|"
+    r"보호자|간병|가족|부양|돌봄 부담|돌봄 스트레스|번아웃",   # 챗봇 질문 "간병이 너무 힘들어요" 등
     re.I,
 )
 
