@@ -40,7 +40,7 @@ GRADE = {1: "A", 2: "B", 3: "C", 4: "C", 5: "D", 6: "D"}
 
 # PubMed PublicationType → study_type. 위에서부터 먼저 걸리는 것(= 더 강한 근거)을 쓴다.
 PUBTYPE_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("protocol", ("Clinical Trial Protocol",)),
+    ("protocol", ("Clinical Trial Protocol", "Systematic Review Protocol")),
     ("meta_analysis", ("Meta-Analysis", "Network Meta-Analysis")),
     ("systematic_review", ("Systematic Review",)),
     ("guideline", ("Practice Guideline", "Guideline", "Consensus Development Conference")),
@@ -50,14 +50,27 @@ PUBTYPE_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("observational", ("Observational Study", "Comparative Study", "Evaluation Study",
                        "Validation Study", "Twin Study", "Multicenter Study")),
     ("case_report", ("Case Reports",)),
-    ("review", ("Scoping Review", "Review", "Systematic Review Protocol")),
+    ("review", ("Scoping Review", "Review")),
     ("expert_opinion", ("Editorial", "Comment", "Letter", "Expert Opinion")),
 ]
 
 # 꼬리표로 못 정했을 때 ① 제목 키워드 → ② 초록의 "확실한 표현"만 (위에서부터 우선)
 #   초록에는 "기존 RCT에서는…", "이전 리뷰들은…" 같은 언급이 흔해서, 제목과 같은 느슨한 규칙을 쓰면 오탐이 난다.
+# 연구 계획서(결과 없음) 제목 표현. 꼬리표가 RCT여도 제목이 계획서면 protocol로 본다 (classify 참고).
+#   예) "…: study protocol", "Research Protocol to Develop …", "(REST)-Protocol for a randomised trial",
+#       "… trial: design and rationale", "Protocol paper"
+PROTOCOL_TITLE_RE = re.compile(
+    r"\b(study|trial|research|review) protocol\b|\bprotocol paper\b|"
+    # "protocol for/of" 뒤에 연구 단어가 올 때만 (돌봄 지침 "care protocol for nurses"는 제외)
+    r"\bprotocol (for|of) (an? |the )?(\w+[- ])?(randomi[sz]ed|pilot|feasibility|cluster|controlled|clinical|"
+    r"systematic|scoping|umbrella|mixed[- ]methods?|qualitative|prospective|longitudinal|multi\w*|"
+    r"study|trial|review|evaluation|intervention study)\b|"
+    r"^\s*protocol\b|\bdesign,? (and )?rationale\b|\brationale,? (and )?design\b|"
+    r"\bdesign and (methods|protocol)\b", re.I
+)
+
 TITLE_RULES: list[tuple[str, re.Pattern]] = [
-    ("protocol", re.compile(r"\b(study|trial) protocol\b|\bprotocol (for|of)\b", re.I)),
+    ("protocol", PROTOCOL_TITLE_RE),
     ("meta_analysis", re.compile(r"\bmeta[- ]?analys", re.I)),
     ("systematic_review", re.compile(r"\bsystematic (literature )?review\b|\bumbrella review\b", re.I)),
     ("guideline", re.compile(r"\bguideline|\bconsensus (statement|recommendations?)\b|\bdelphi\b", re.I)),
@@ -73,7 +86,10 @@ TITLE_RULES: list[tuple[str, re.Pattern]] = [
     ("expert_opinion", re.compile(r"\b(editorial|commentary|perspective|viewpoint)\b", re.I)),
 ]
 ABSTRACT_RULES: list[tuple[str, re.Pattern]] = [
-    ("protocol", re.compile(r"\bthis (study )?protocol\b|\bwill be (randomi[sz]ed|recruited)\b", re.I)),
+    ("protocol", re.compile(
+        r"\bthis (study |trial |research )?protocol\b|\bwill be (randomi[sz]ed|recruited|enrolled|allocated)\b|"
+        r"\bwe will (recruit|enrol|enroll|randomi[sz]e|conduct)\b|\b(this|the present) (paper|article) (describes|presents|outlines) the (protocol|design)\b",
+        re.I)),
     ("meta_analysis", re.compile(r"\b(we|this) (conducted |performed )?(a )?(systematic review and )?meta[- ]?analys|\bpooled (analysis|estimates?)\b", re.I)),
     ("systematic_review", re.compile(r"\b(we|this) (conducted |performed )?(a )?systematic review\b|\bPRISMA\b", re.I)),
     ("rct", re.compile(r"\b(were |was )?randomly (assigned|allocated)\b|\bwere randomi[sz]ed (to|into)\b", re.I)),
@@ -208,6 +224,11 @@ def classify(
 
     if _is_animal(mesh_terms or [], text):
         return Evidence("animal", None, True, "pubtype" if mesh_terms else "keyword")
+
+    # 제목이 연구 계획서면 꼬리표(RCT 등)보다 먼저 protocol로 본다. 계획서는 아직 결과가 없어서
+    # 등급을 매기면 안 되는데, PubMed가 계획서에도 "Randomized Controlled Trial" 꼬리표를 붙이는 경우가 있다.
+    if PROTOCOL_TITLE_RE.search(title or ""):
+        return Evidence("protocol", None, False, "pubtype+title" if pubtypes else "keyword")
 
     for study_type, names in PUBTYPE_RULES:
         if pubtypes.intersection(names):

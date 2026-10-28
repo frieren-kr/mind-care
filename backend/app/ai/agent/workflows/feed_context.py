@@ -29,7 +29,7 @@ def _validate_recent_feed_history(records, reference_time) -> None:
     end = reference_time.astimezone(timezone.utc)
     start = end - timedelta(days=RECENT_FEED_WINDOW_DAYS)
     if any(not start < row.last_recommended_at.astimezone(timezone.utc) <= end for row in records):
-        raise ValueError("Recent Feed recommendation lies outside (reference - 30 days, reference]")
+        raise ValueError("Recent Feed recommendation lies outside (reference - 7 days, reference]")
 
 
 class _ContextModel(AgentModel):
