@@ -53,6 +53,8 @@ TOOL_NAME = "mind-care"
 EFETCH_BATCH_SIZE = 100          # efetch 한 번에 요청할 PMID 개수
 ESEARCH_MAX = 9999               # esearch가 한 번에 돌려주는 PMID 상한 (이보다 많으면 기간을 더 잘게 나눠야 함)
 REQUEST_TIMEOUT = 30.0
+RETRIES = 3        # 연결 끊김·시간 초과·5xx일 때 다시 시도하는 횟수 (처음 1번 + 최대 3번)
+RETRY_WAIT = 2.0   # 첫 재시도 전 대기(초). 2 → 4 → 8초로 늘린다
 
 # 요청 제한: API 키가 없으면 초당 3회, 있으면 초당 10회.
 _INTERVAL_WITHOUT_KEY = 1 / 3
@@ -118,9 +120,7 @@ def fetch_pmids(
         params["datetype"] = "pdat"      # 발행일 기준
         params["reldate"] = str(days_back)
 
-    _throttle()
-    resp = httpx.get(f"{EUTILS_BASE}/esearch.fcgi", params=params, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = _request(httpx.get, "esearch.fcgi", params=params)
     result = resp.json().get("esearchresult", {})
     pmids = result.get("idlist", [])
     period = (f"{date_range[0]}~{date_range[1]}" if date_range is not None
@@ -131,16 +131,43 @@ def fetch_pmids(
     return pmids
 
 
+def _request(send, path: str, **kwargs) -> httpx.Response:
+    """E-utilities 요청 1건. 연결 끊김·시간 초과·5xx·429는 간격을 늘려 가며 RETRIES번 다시 시도하고,
+    다른 4xx는 바로 실패한다. 429에 Retry-After(초)가 있으면 그만큼 기다린다."""
+    for attempt in range(RETRIES + 1):
+        _throttle()
+        wait = RETRY_WAIT * 2 ** attempt
+        try:
+            resp = send(f"{EUTILS_BASE}/{path}", timeout=REQUEST_TIMEOUT, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if (code < 500 and code != 429) or attempt == RETRIES:
+                raise
+            reason = f"HTTP {code}"
+            if code == 429:
+                try:  # 날짜 형식(HTTP-date)이면 숫자가 아니라 기본 간격을 쓴다
+                    wait = max(0.0, float(exc.response.headers["Retry-After"]))
+                except (KeyError, ValueError):
+                    pass
+        except httpx.TransportError as exc:  # RemoteProtocolError(peer closed connection), 시간 초과, 연결 실패
+            if attempt == RETRIES:
+                raise
+            reason = type(exc).__name__
+        logger.warning("%s 실패 (%s) — %.0f초 뒤 다시 시도 (%d/%d)", path, reason, wait, attempt + 1, RETRIES)
+        time.sleep(wait)
+    raise AssertionError("unreachable")
+
+
 def _fetch_articles_xml(pmids: list[str]) -> ET.Element:
     """efetch로 PMID 묶음의 상세 정보(XML)를 받아 루트 엘리먼트를 반환한다."""
     data = _common_params() | {
         "id": ",".join(pmids),
         "retmode": "xml",
     }
-    _throttle()
     # PMID가 많을 수 있어 NCBI 권장대로 POST로 보낸다.
-    resp = httpx.post(f"{EUTILS_BASE}/efetch.fcgi", data=data, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
+    resp = _request(httpx.post, "efetch.fcgi", data=data)
     return ET.fromstring(resp.content)
 
 

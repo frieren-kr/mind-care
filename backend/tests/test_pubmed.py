@@ -6,6 +6,8 @@ import unittest
 from datetime import date
 from unittest import mock
 
+import httpx
+
 from app.collectors import pubmed
 from app.schemas import SavePapersResult
 
@@ -66,6 +68,50 @@ class FetchPmidsTest(unittest.TestCase):
         self.get.return_value = esearch_response(["1", "2"], count=5)
         with self.assertLogs(pubmed.logger, "WARNING"):
             pubmed.fetch_pmids(retmax=2, days_back=7)
+
+
+class RetryTest(unittest.TestCase):
+    """연결 끊김·시간 초과·5xx는 다시 시도, 4xx는 바로 실패 (대기는 가짜)."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.object(pubmed, "_throttle"))
+        self.sleep = self.enterContext(mock.patch.object(pubmed.time, "sleep"))
+
+    @staticmethod
+    def status(code, headers=None):
+        request = httpx.Request("GET", "https://example.org")
+        return httpx.Response(code, request=request, headers=headers,
+                              json={"esearchresult": {"idlist": ["1"], "count": "1"}})
+
+    def test_429_waits_retry_after_or_backoff(self):
+        get = mock.Mock(side_effect=[self.status(429, {"Retry-After": "7"}), self.status(429), self.status(200)])
+        with mock.patch.object(pubmed.httpx, "get", get), self.assertLogs(pubmed.logger, "WARNING"):
+            self.assertEqual(pubmed.fetch_pmids(days_back=7), ["1"])
+        self.assertEqual(get.call_count, 3)
+        # 첫 429는 Retry-After 7초, 두 번째(헤더 없음)는 기본 간격 4초
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [7.0, 4.0])
+
+    def test_two_failures_then_success(self):
+        get = mock.Mock(side_effect=[httpx.RemoteProtocolError("peer closed connection"),
+                                     self.status(502), self.status(200)])
+        with mock.patch.object(pubmed.httpx, "get", get), self.assertLogs(pubmed.logger, "WARNING"):
+            self.assertEqual(pubmed.fetch_pmids(days_back=7), ["1"])
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [2.0, 4.0])  # 간격을 늘린다
+
+    def test_all_attempts_fail_raises(self):
+        post = mock.Mock(side_effect=httpx.ReadTimeout("timed out"))
+        with mock.patch.object(pubmed.httpx, "post", post), self.assertLogs(pubmed.logger, "WARNING"), \
+                self.assertRaises(httpx.ReadTimeout):
+            pubmed._fetch_articles_xml(["1"])
+        self.assertEqual(post.call_count, pubmed.RETRIES + 1)
+
+    def test_4xx_fails_immediately(self):
+        get = mock.Mock(return_value=self.status(400))
+        with mock.patch.object(pubmed.httpx, "get", get), self.assertRaises(httpx.HTTPStatusError):
+            pubmed.fetch_pmids(days_back=7)
+        self.assertEqual(get.call_count, 1)
+        self.sleep.assert_not_called()
 
 
 class CollectRangeTest(unittest.TestCase):

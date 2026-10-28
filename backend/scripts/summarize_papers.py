@@ -5,7 +5,8 @@
   ② OpenAI (JSON 형식 강제) — title_ko / summary_background / summary_finding / summary_limitation
   ③ (--polish를 줄 때만) OpenAI 한 번 더 — 모를 만한 단어를 쉬운 말로 다듬는다. 기본은 끔 (토큰이 약 3배)
   ④ 자동 검사 check()        — 통계 표기·영어 단어·깨진 단어·금지 단어·약 이름 영어 괄호 빠짐이 있으면
-                               한 번만 다시 생성, 또 걸리면 실패
+                               한 번만 다시 생성, 또 걸리면 실패. 단 약 이름 영어 괄호 빠짐은 검사 전에
+                               fix_drug_english()가 첫 등장 뒤에 "(영어)"를 붙여 고친다 (다시 생성하지 않음)
   ⑤ save_summary()          — study_type / evidence_level은 보내지 않으므로 기존 값이 유지된다
 
 저장된 논문은 ①에서 빠지므로, 중간에 끊겨도 다시 실행하면 남은 것만 이어서 한다.
@@ -18,6 +19,7 @@
     python -m scripts.summarize_papers --limit 20 --polish                             # 두 번째 다듬기까지
 """
 import argparse
+import logging
 import re
 import statistics
 import textwrap
@@ -30,6 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import settings
 from app.db import functions
 from app.schemas import AnalysisIn
+
+logger = logging.getLogger("summarize_papers")
 
 TIMEOUT_SECONDS = 120
 # 추론형 모델은 생각하는 데 쓰는 토큰도 이 한도에 포함된다. 응답이 잘려 실패하면 올린다.
@@ -268,7 +272,15 @@ def check(summary: Summary, drugs: list["Drug"] | tuple = (), source: str = "") 
         elif found := _ENGLISH_WORD.findall(plain):
             problems.append(f"{name}: 영어 단어 {sorted(set(found))}")
 
+    for drug in _drugs_missing_english(summary, drugs, source):
+        problems.append(f"약 이름 영어 괄호 빠짐: 본문에 처음 나오는 '{drug.ko}' 뒤에 ({drug.en})가 없음")
+    return problems
+
+
+def _drugs_missing_english(summary: Summary, drugs, source: str) -> list["Drug"]:
+    """본문(① → ② → ③ 순)에 처음 나오는 곳 바로 뒤에 영어 괄호가 없는 약."""
     body = "\n".join(getattr(summary, name) for name, _ in SECTIONS)
+    missing = []
     for drug in drugs:
         # ponytail: 약 이름은 LLM이 drugs에 적어 준 것만 검사한다 (목록에서 빠뜨린 약은 못 잡는다).
         # 영어 이름이 실제로 제목·초록에 있는 것만 믿는다 — 없는 이름을 지어낸 경우는 검사하지 않는다.
@@ -279,8 +291,29 @@ def check(summary: Summary, drugs: list["Drug"] | tuple = (), source: str = "") 
         after_name = body[body.index(drug.ko) + len(drug.ko):]
         match = _DRUG_ENGLISH.match(after_name)
         if not match or drug.en.lower() not in match.group(1).lower():
-            problems.append(f"약 이름 영어 괄호 빠짐: 본문에 처음 나오는 '{drug.ko}' 뒤에 ({drug.en})가 없음")
-    return problems
+            missing.append(drug)
+    return missing
+
+
+def fix_drug_english(summary: Summary, drugs, source: str = "") -> tuple[Summary, list[str]]:
+    """영어 괄호가 빠진 약 이름의 첫 등장 바로 뒤에 "(영어)"를 붙인다. (고친 요약, 고친 곳 목록)을 돌려준다.
+
+    검사가 이미 약 이름과 영어 이름을 알고 있으니 LLM을 다시 부르는 대신 고친다.
+    첫 등장 뒤에 다른 괄호가 이미 붙어 있으면 손대지 않는다 (검사에 그대로 걸려 다시 생성된다).
+    """
+    values = summary.model_dump()
+    fixed = []
+    for drug in _drugs_missing_english(summary, drugs, source):
+        for name, _ in SECTIONS:
+            start = values[name].find(drug.ko)
+            if start < 0:
+                continue
+            end = start + len(drug.ko)
+            if not _DRUG_ENGLISH.match(values[name][end:]):
+                values[name] = f"{values[name][:end]}({drug.en}){values[name][end:]}"
+                fixed.append(f"{drug.ko}({drug.en})")
+            break
+    return (Summary(**values), fixed) if fixed else (summary, [])
 
 
 @dataclass
@@ -364,6 +397,15 @@ def summarize(
     return summary, changes, drugs
 
 
+def _summarize_fixed(client, model, title, abstract, report, source, problems=None, polish=False):
+    """summarize() 뒤에 약 이름 괄호를 자동 보정한다 (고친 곳은 로그에 남긴다)."""
+    summary, changes, drugs = summarize(client, model, title, abstract, report, problems, polish)
+    summary, fixed = fix_drug_english(summary, drugs, source)
+    if fixed:
+        logger.info("약 이름 괄호 자동 보정: %s", ", ".join(fixed))
+    return summary, changes, drugs
+
+
 def run(
     papers: list[tuple[UUID, str, str | None]], client, model: str,
     dry_run: bool = False, polish: bool = False,
@@ -380,10 +422,11 @@ def run(
             continue
         try:
             source = f"{title}\n{abstract}"
-            summary, changes, drugs = summarize(client, model, title, abstract, report, polish=polish)
+            summary, changes, drugs = _summarize_fixed(client, model, title, abstract, report, source,
+                                                       polish=polish)
             if first_problems := check(summary, drugs, source):
-                summary, changes, drugs = summarize(
-                    client, model, title, abstract, report, first_problems, polish
+                summary, changes, drugs = _summarize_fixed(
+                    client, model, title, abstract, report, source, first_problems, polish
                 )
                 problems = check(summary, drugs, source)
                 report.regenerated.append((number, first_problems, not problems))
