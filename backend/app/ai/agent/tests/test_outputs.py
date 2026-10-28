@@ -476,8 +476,8 @@ class StructuredWorkflowTests(TestCase):
                 for index, (messages, _) in enumerate(client.requests):
                     projections = [message for message in messages if message.kind == "evidence"]
                     self.assertEqual(len(projections), 0 if model is ChatAnswerV1 or index == 0 else 1)
-                    tools = [message for message in messages if message.role == "tool"]
-                    self.assertEqual([message.tool_call_id for message in tools],
+                    tools = [message for message in messages if message.type == "function_call_output"]
+                    self.assertEqual([message.call_id for message in tools],
                                      ["search_1", "search_2"][:index])
                     for message, query in zip(tools, ("first", "second")):
                         envelope = json.loads(message.content)
@@ -489,10 +489,10 @@ class StructuredWorkflowTests(TestCase):
                     if model is FeedAnswerV2 and index > 0:
                         self.assertEqual(json.loads(projections[0].content)["candidate_count"], index)
                 final_messages = client.requests[-1][0]
-                self.assertEqual([message.role for message in final_messages],
-                                 ["system", "system", "system", "user", "assistant", "tool", "assistant", "tool"]
+                self.assertEqual([message.role or message.type for message in final_messages],
+                                 ["system", "system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
                                  + (["user"] if model is FeedAnswerV2 else []))
-                self.assertEqual([call.id for message in final_messages for call in message.tool_calls],
+                self.assertEqual([message.provider_output["call_id"] for message in final_messages if message.type == "provider_output" and message.provider_output["type"] == "function_call"],
                                  ["search_1", "search_2"])
 
     def test_legacy_message_order_and_aggregate_evidence_are_unchanged(self):
@@ -507,10 +507,10 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual([message.role for message in client.requests[0][0]], ["system", "system", "user"])
         self.assertEqual(client.requests[0][0][-1].content, "  원문\n")
         final_messages = client.requests[-1][0]
-        self.assertEqual([message.role for message in final_messages],
-                         ["system", "system", "user", "assistant", "tool", "assistant", "tool", "user"])
-        tools = [message for message in final_messages if message.role == "tool"]
-        self.assertEqual([message.tool_call_id for message in tools], ["search_1", "search_2"])
+        self.assertEqual([message.role or message.type for message in final_messages],
+                         ["system", "system", "user", "provider_output", "function_call_output", "provider_output", "function_call_output", "user"])
+        tools = [message for message in final_messages if message.type == "function_call_output"]
+        self.assertEqual([message.call_id for message in tools], ["search_1", "search_2"])
         self.assertEqual(final_messages[-1].kind, "evidence")
         self.assertEqual(json.loads(final_messages[-1].content)["evidence_packages"],
                          [json.loads(message.content)["data"] for message in tools])
@@ -586,7 +586,7 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual(policies[0], "SERVER POLICY")
         self.assertTrue(any('"const": "chat"' in policy for policy in policies))
         self.assertTrue(all(attack not in policy for policy in policies))
-        self.assertTrue(any(message.role == "tool" and message.tool_call_id == "search_1" for message in messages))
+        self.assertTrue(any(message.type == "function_call_output" and message.call_id == "search_1" for message in messages))
 
     def test_provider_failure_and_limit_return_empty_wrapper(self):
         for turns, options, status in (([RuntimeError("PRIVATE failure")], {}, "provider_error"),

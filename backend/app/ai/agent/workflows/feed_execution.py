@@ -40,8 +40,8 @@ class FeedExecutionV1:
             raise ValueError("Feed runner requires FeedPromptBuilder")
         if runner.executor.registry is not runner.registry:
             raise ValueError("Feed executor and runner must share the registry")
-        names = [definition["function"]["name"] for definition in runner.registry.definitions()]
-        if names != [ToolName.SEARCH_EVIDENCE.value]:
+        names = runner.registry.names()
+        if names != (ToolName.SEARCH_EVIDENCE.value,):
             raise ValueError("Feed runner requires search_evidence only")
         if runner.max_tool_rounds != 3 or runner.max_total_tool_calls != 9:
             raise ValueError("Feed runner requires 3 rounds and 9 total search calls")

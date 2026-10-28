@@ -30,7 +30,7 @@ def tool_turn(*calls):
 
 
 def envelopes(client, request_index=-1):
-    return [json.loads(m.content) for m in client.requests[request_index][0] if m.role == "tool"]
+    return [json.loads(m.content) for m in client.requests[request_index][0] if m.type == "function_call_output"]
 
 
 class UserScopedContextTests(unittest.TestCase):
@@ -136,8 +136,8 @@ class WorkflowTests(unittest.TestCase):
         result, client = self.workflow([tool_turn(call(), call(ToolName.RECENT_CARE_LOGS, identifier="call_2"))])
         self.assertEqual(result.tool_rounds, 1)
         self.assertEqual(result.total_tool_calls, 2)
-        messages = [m for m in client.requests[-1][0] if m.role == "tool"]
-        self.assertEqual([m.tool_call_id for m in messages], ["call_1", "call_2"])
+        messages = [m for m in client.requests[-1][0] if m.type == "function_call_output"]
+        self.assertEqual([m.call_id for m in messages], ["call_1", "call_2"])
 
     def test_direct_final_answer_and_no_tools(self):
         client = FakeLLMClient([ModelTurn(text="안녕하세요.")])
@@ -249,7 +249,8 @@ class ErrorTests(unittest.TestCase):
 
     def test_invalid_client_return_is_sanitized(self):
         class BrokenClient:
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 return {"PRIVATE": "broken response"}
         result = AgentLoopRunner(BrokenClient(), fake_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "invalid_response")
@@ -276,10 +277,10 @@ class BoundaryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CONTEXT.patient_id = UUID(int=9)
         for contract in TOOL_CONTRACTS.values():
-            properties = contract.definition()["function"]["parameters"]["properties"]
+            properties = contract.definition()["parameters"]["properties"]
             self.assertNotIn("patient_id", properties)
             self.assertNotIn("user_id", properties)
-            self.assertFalse(contract.definition()["function"]["parameters"]["additionalProperties"])
+            self.assertFalse(contract.definition()["parameters"]["additionalProperties"])
 
     def test_handler_receives_server_context_and_injected_ids_are_rejected(self):
         seen = []
@@ -302,7 +303,7 @@ class BoundaryTests(unittest.TestCase):
         AgentLoopRunner(client, fake_registry()).run(original, CONTEXT)
         messages = client.requests[-1][0]
         self.assertEqual([m.content for m in messages if m.kind == "user_input"], [original])
-        self.assertEqual([m.role for m in messages], ["system", "system", "user", "assistant", "tool"])
+        self.assertEqual([m.role or m.type for m in messages], ["system", "system", "user", "provider_output", "function_call_output"])
         self.assertEqual(json.loads(messages[1].content)["trusted_agent_context"]["patient_id"], str(CONTEXT.patient_id))
         self.assertNotIn("patient_id", json.loads(messages[-1].content)["data"])
 
@@ -310,11 +311,8 @@ class BoundaryTests(unittest.TestCase):
         class Replacement(DefaultPromptBuilder):
             def __init__(self):
                 super().__init__("REPLACEMENT POLICY")
-                self.followups = 0
                 self.final_contexts = 0
-            def build_tool_followup_messages(self, turn, outcomes):
-                self.followups += 1
-                return super().build_tool_followup_messages(turn, outcomes)
+
             def build_final_response_context(self, evidence):
                 self.final_contexts += 1
                 return super().build_final_response_context(evidence)
@@ -322,7 +320,6 @@ class BoundaryTests(unittest.TestCase):
         client = FakeLLMClient([tool_turn(call()), ModelTurn(text="완료")])
         AgentLoopRunner(client, fake_registry(), prompt_builder=builder).run("원문", CONTEXT)
         self.assertEqual(client.requests[0][0][0].content, "REPLACEMENT POLICY")
-        self.assertEqual(builder.followups, 1)
         self.assertEqual(builder.final_contexts, 2)
 
     def test_tool_and_evidence_injection_remain_data(self):
@@ -354,7 +351,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(seen, [CONTEXT])
         messages = client.requests[-1][0]
-        self.assertEqual(messages[-1].role, "tool")
+        self.assertEqual(messages[-1].type, "function_call_output")
         self.assertTrue(all(narrative not in (m.content or "") and mood not in (m.content or "")
                             for m in messages if m.role == "system"))
         log = envelopes(client)[0]["data"]["logs"][0]
@@ -391,7 +388,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual({name.value for name in ToolName},
                          {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
         self.assertEqual(set(TOOL_CONTRACTS), set(inputs))
-        self.assertEqual({item["function"]["name"] for item in fake_registry().definitions()},
+        self.assertEqual({item["name"] for item in fake_registry().definitions()},
                          {name.value for name in inputs})
         executor = ToolExecutor(fake_registry())
         for name, args in inputs.items():

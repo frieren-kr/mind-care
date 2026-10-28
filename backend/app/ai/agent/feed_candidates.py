@@ -1,6 +1,6 @@
 """Request-local Feed decisions; original evidence identity stays on the server."""
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -11,7 +11,7 @@ from ..retrieval.evidence import LEVEL, to_grade
 from .outputs import (Category, ContentText, EvidenceReference, FeedAnswerV2, FeedContentItemV2,
                       ResolvedEvidence, _json_object, _reject_constant, resolve_evidence_references)
 from .schemas import AgentModel, Message, ToolOutcome
-from .tools.contracts import EvidenceItem, EvidencePackage, ToolResultEnvelope
+from .tools.contracts import EvidenceItem, EvidencePackage
 
 MAX_FEED_REVIEW_CANDIDATES = 10
 MAX_FEED_RETAINED_CANDIDATES = 5
@@ -305,17 +305,6 @@ class FeedCandidates:
             return output, resolve_evidence_references(output, evidence_by_call)
         except (ValueError, TypeError, KeyError, IndexError, AttributeError):
             raise FeedDecisionError("candidate_source_mismatch") from None
-
-
-def minimize_feed_tool_messages(messages: Sequence[Message], outcomes: Sequence[ToolOutcome]) -> list[Message]:
-    """Keep real Tool Call IDs/protocol, avoid repeating long raw search payloads."""
-    successful_searches = {outcome.call_id for outcome in outcomes
-                           if outcome.success and outcome.tool_name == "search_evidence"}
-    return [message.model_copy(update={"content": ToolResultEnvelope(
-                success=True, data={"candidate_list": "See the latest untrusted_feed_candidates message"},
-            ).model_dump_json()})
-            if message.role == "tool" and message.tool_call_id in successful_searches else message
-            for message in messages]
 
 
 def build_feed_decision_policy() -> Message:

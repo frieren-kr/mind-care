@@ -55,9 +55,9 @@ def feed_tool_definitions(definitions: list[dict]) -> list[dict]:
     """Request-local input adapter. Registry/Executor/Chat stay canonical."""
     result = deepcopy(definitions)
     for definition in result:
-        if definition['function']['name'] == 'search_evidence':
-            definition['function']['parameters'] = FeedSearchInput.model_json_schema()
-            definition['function']['description'] += (
+        if definition['name'] == 'search_evidence':
+            definition['parameters'] = FeedSearchInput.model_json_schema()
+            definition['description'] += (
                 ' Feed에서는 독립 연구 목적별 queries 배열을 사용한다. 별도의 Planner 호출은 없다.')
     return result
 

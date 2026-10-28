@@ -123,7 +123,7 @@ class FeedDecisionPolicyTests(unittest.TestCase):
         self.assertEqual(latest['candidates'][0]['status'], 'retained')
         self.assertNotIn('evidence_excerpt', latest['candidates'][0])
         self.assertEqual(len({s.pmid for s in result.sources}), 2)
-        self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role == 'tool'], ['first', 'next'])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ['first', 'next'])
         self.assertEqual(reached[-1], ('patient sleep intervention in MCI', 8))
 
     def test_nine_empty_searches_allow_final_zero_and_reject_fourth_round(self):

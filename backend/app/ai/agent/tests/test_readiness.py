@@ -1,4 +1,5 @@
 """Production readiness 회귀 검증. 외부 DB/API/임상 규칙은 사용하지 않는다."""
+from ..testing.fake_llm import fake_output
 from dataclasses import replace
 from threading import BoundedSemaphore, Event, Thread
 from time import monotonic, sleep
@@ -108,9 +109,10 @@ class TimeoutTests(TestCase):
     def test_request_deadline_includes_provider_wait(self):
         release = Event()
         class SlowClient:
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 release.wait(2)
-                return ModelTurn(text="late answer")
+                return fake_output(ModelTurn(text="late answer"))
         try:
             started = monotonic()
             result = AgentLoopRunner(SlowClient(), fake_registry(), request_timeout_seconds=0.04).run("synthetic", CONTEXT)
@@ -139,9 +141,10 @@ class TimeoutTests(TestCase):
 
     def test_request_budget_is_cumulative_across_rounds(self):
         class DelayedClient(FakeLLMClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 sleep(0.12)
-                return super().generate(messages, tools)
+                return super().generate(request)
         client = DelayedClient([tool_turn(call()), ModelTurn(text="late answer")])
         result = AgentLoopRunner(client, fake_registry(), request_timeout_seconds=0.2).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "failed")
@@ -181,10 +184,11 @@ class TimeoutTests(TestCase):
     def test_deadline_isolated_between_concurrent_runs(self):
         release, started = Event(), Event()
         class SlowClient:
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 started.set()
                 release.wait(2)
-                return ModelTurn(text="late")
+                return fake_output(ModelTurn(text="late"))
         results = []
         thread = Thread(target=lambda: results.append(AgentLoopRunner(
             SlowClient(), fake_registry(), request_timeout_seconds=0.05).run("synthetic", CONTEXT)))
@@ -213,7 +217,7 @@ class FailureBoundaryTests(TestCase):
         return result
 
     def test_each_prompt_builder_failure_returns_failed(self):
-        for method in ("build_initial_messages", "build_final_response_context", "build_tool_followup_messages"):
+        for method in ("build_initial_messages", "build_final_response_context"):
             with self.subTest(method=method):
                 builder = DefaultPromptBuilder()
                 with patch.object(builder, method, side_effect=RuntimeError("PRIVATE prompt")):
@@ -297,7 +301,7 @@ class FailureBoundaryTests(TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual([error.code for error in result.errors], ["invalid_output"])
         self.assertNotIn("PRIVATE", result.model_dump_json())
-        tool_result = next(message for message in client.requests[-1][0] if message.role == "tool")
+        tool_result = next(message for message in client.requests[-1][0] if message.type == "function_call_output")
         self.assertNotIn("PRIVATE", tool_result.content)
         self.assertEqual(len(client.requests), 2)
 

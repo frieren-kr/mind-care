@@ -21,9 +21,15 @@ from .test_feed_execution import CONTEXT as FEED_CONTEXT, prepared_input
 from .test_workflows import CONTEXT
 
 
-def completion(message, finish_reason="stop"):
-    return {"id": "test-completion", "object": "chat.completion", "created": 0, "model": "test-model",
-            "choices": [{"index": 0, "finish_reason": finish_reason, "message": message}]}
+def response_fixture(message, state="completed"):
+    output = []
+    if message.get('text') is not None:
+        output.append({'id': 'msg_fixture', 'type': 'message', 'role': 'assistant', 'status': 'completed',
+                       'content': [{'type': 'output_text', 'text': message['text'], 'annotations': []}]})
+    output.extend(message.get('calls', []))
+    return {'id': 'resp_fixture', 'object': 'response', 'created_at': 0, 'model': 'test-model',
+            'status': 'incomplete' if state == 'incomplete' else 'completed', 'output': output,
+            'error': None, 'incomplete_details': {'reason': 'max_output_tokens'} if state == 'incomplete' else None}
 
 
 class OpenAIClientTests(unittest.TestCase):
@@ -59,7 +65,7 @@ class OpenAIClientTests(unittest.TestCase):
         requests = []
         def transport(request):
             requests.append(request)
-            return httpx.Response(200, json=completion({"role": "assistant", "content": "done"}))
+            return httpx.Response(200, json=response_fixture({'text': 'done'}))
         result = AgentLoopRunner(self.sdk(transport), production_registry(), request_timeout_seconds=1).run("synthetic", CONTEXT)
         self.assertEqual(result.status, "completed")
         for timeout in requests[0].extensions["timeout"].values():
@@ -77,9 +83,10 @@ class OpenAIClientTests(unittest.TestCase):
                      max_retries=1)
         self.addCleanup(sdk.close)
         class ObservedClient(OpenAIClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 try:
-                    return super().generate(messages, tools)
+                    return super().generate(request)
                 finally:
                     finished.set()
         client = ObservedClient(sdk, model="configured-test-model")
@@ -106,37 +113,35 @@ class OpenAIClientTests(unittest.TestCase):
             payload = json.loads(request.content)
             requests.append(payload)
             if len(requests) == 1:
-                return httpx.Response(200, json=completion({"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "call_1", "type": "function", "function": {
-                        "name": ToolName.PATIENT_PROFILE.value, "arguments": "{}"}}]}, "tool_calls"))
-            return httpx.Response(200, json=completion({"role": "assistant", "content": "완료"}))
+                return httpx.Response(200, json=response_fixture({'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + 'call_1', 'call_id': 'call_1', 'name': ToolName.PATIENT_PROFILE.value, 'arguments': '{}', 'status': 'completed'}]}))
+            return httpx.Response(200, json=response_fixture({'text': '완료'}))
         result = AgentLoopRunner(self.sdk(transport), fake_registry()).run("  원문\n", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual(len(requests), 2)
         self.assertEqual(requests[0]["model"], "configured-test-model")
-        self.assertEqual(requests[0]["messages"][2]["content"], "  원문\n")
-        self.assertEqual({tool["function"]["name"] for tool in requests[0]["tools"]},
+        self.assertEqual(requests[0]["input"][2]["content"], "  원문\n")
+        self.assertEqual({tool["name"] for tool in requests[0]["tools"]},
                          {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
         self.assertEqual(len(requests[0]["tools"]), 3)
         for payload in requests:
-            self.assertEqual(payload["reasoning_effort"], "none")
+            self.assertNotIn("reasoning", payload)
             self.assertEqual(payload["tool_choice"], "auto")
             self.assertEqual(payload["tools"], requests[0]["tools"])
             self.assertEqual(payload["model"], "configured-test-model")
             self.assertNotIn("extra_body", payload)  # SDK flattens it into the HTTP JSON body.
-        followup = requests[1]["messages"]
-        self.assertEqual(followup[-2]["tool_calls"][0]["function"]["arguments"], "{}")
-        self.assertEqual(followup[-2]["tool_calls"][0]["id"], "call_1")
-        self.assertEqual(followup[-1]["role"], "tool")
-        self.assertEqual(followup[-1]["tool_call_id"], "call_1")
-        self.assertTrue(json.loads(followup[-1]["content"])["success"])
+        followup = requests[1]["input"]
+        self.assertEqual(followup[-2]["arguments"], "{}")
+        self.assertEqual(followup[-2]["call_id"], "call_1")
+        self.assertEqual(followup[-1]["type"], "function_call_output")
+        self.assertEqual(followup[-1]["call_id"], "call_1")
+        self.assertTrue(json.loads(followup[-1]["output"])["success"])
         self.assertTrue(all("kind" not in m for m in followup))
 
     def test_empty_registry_omits_tools(self):
         requests = []
         def transport(request):
             requests.append(json.loads(request.content))
-            return httpx.Response(200, json=completion({"role": "assistant", "content": "안녕"}))
+            return httpx.Response(200, json=response_fixture({'text': '안녕'}))
         result = AgentLoopRunner(self.sdk(transport), production_registry()).run("안녕", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertNotIn("tools", requests[0])
@@ -153,7 +158,7 @@ class OpenAIClientTests(unittest.TestCase):
         result = AgentLoopRunner(self.sdk(transport), fake_registry()).run("Synthetic request", CONTEXT)
         self.assertEqual(result.status, "provider_error")
         self.assertEqual(len(requests), 1)
-        self.assertEqual(requests[0]["reasoning_effort"], "none")
+        self.assertNotIn("reasoning", requests[0])
         self.assertEqual(requests[0]["model"], "configured-test-model")
         self.assertNotIn("PRIVATE", result.model_dump_json())
 
@@ -166,7 +171,7 @@ class OpenAIClientTests(unittest.TestCase):
 
     def test_truncated_provider_response_is_not_final_answer(self):
         def transport(request):
-            return httpx.Response(200, json=completion({"role": "assistant", "content": "잘린 답변"}, "length"))
+            return httpx.Response(200, json=response_fixture({'text': '잘린 답변'}, 'incomplete'))
         result = AgentLoopRunner(self.sdk(transport), production_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "provider_error")
         self.assertIsNone(result.final_answer)
@@ -176,14 +181,12 @@ class OpenAIClientTests(unittest.TestCase):
         def transport(request):
             requests.append(json.loads(request.content))
             if len(requests) == 1:
-                return httpx.Response(200, json=completion({"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "call_1", "type": "function", "function": {
-                        "name": ToolName.PATIENT_PROFILE.value, "arguments": "{invalid"}}]}, "tool_calls"))
-            return httpx.Response(200, json=completion({"role": "assistant", "content": "복구"}))
+                return httpx.Response(200, json=response_fixture({'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + 'call_1', 'call_id': 'call_1', 'name': ToolName.PATIENT_PROFILE.value, 'arguments': '{invalid', 'status': 'completed'}]}))
+            return httpx.Response(200, json=response_fixture({'text': '복구'}))
         result = AgentLoopRunner(self.sdk(transport), fake_registry()).run("질문", CONTEXT)
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.errors[0].code, "invalid_arguments")
-        self.assertEqual(requests[1]["messages"][-2]["tool_calls"][0]["function"]["arguments"], "{invalid")
+        self.assertEqual(requests[1]["input"][-2]["arguments"], "{invalid")
 
 
 class OpenAIFeedIntegrationTests(unittest.TestCase):
@@ -206,12 +209,10 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         def transport(request):
             requests.append(json.loads(request.content))
             if len(requests) == 1:
-                message = {"role": "assistant", "content": None, "tool_calls": [{
-                    "id": "call_sdk_opaque_feed", "type": "function", "function": {
-                        "name": "search_evidence", "arguments": arguments}}]}
-                return httpx.Response(200, json=completion(message, "tool_calls"))
+                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + 'call_sdk_opaque_feed', 'call_id': 'call_sdk_opaque_feed', 'name': 'search_evidence', 'arguments': arguments, 'status': 'completed'}]}
+                return httpx.Response(200, json=response_fixture(message))
             self.assertEqual(len(requests), 2)
-            return httpx.Response(200, json=completion({"role": "assistant", "content": final_text}))
+            return httpx.Response(200, json=response_fixture({'text': final_text}))
         sdk = OpenAI(api_key="offline-placeholder", timeout=90, max_retries=2,
                      http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
@@ -243,19 +244,19 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
             query="Dementia sleep research", top_k=5, context=FEED_CONTEXT)
         self.assertEqual(len(case.requests), 2)
         for index, payload in enumerate(case.requests):
-            self.assertEqual(payload["reasoning_effort"], "none")
+            self.assertNotIn("reasoning", payload)
             self.assertEqual(payload["model"], "configured-test-model")
             self.assertEqual(payload["tool_choice"], "required" if index == 0 else "auto")
             self.assertTrue(payload["parallel_tool_calls"])
             from ..feed_search_policy import feed_tool_definitions
             self.assertEqual(payload["tools"], feed_tool_definitions(case.execution.runner.registry.definitions()))
-        self.assertIn(case.prepare.return_value, [m["content"] for m in case.requests[0]["messages"] if m["role"] == "user"])
-        followup = case.requests[1]["messages"]
-        assistant = next(m for m in followup if m.get("tool_calls"))
-        tool = next(m for m in followup if m["role"] == "tool")
-        self.assertEqual(assistant["tool_calls"][0]["id"], "call_sdk_opaque_feed")
-        self.assertEqual(tool["tool_call_id"], "call_sdk_opaque_feed")
-        envelope = json.loads(tool["content"])
+        self.assertIn(case.prepare.return_value, [m["content"] for m in case.requests[0]["input"] if m["role"] == "user"])
+        followup = case.requests[1]["input"]
+        assistant = next(m for m in followup if m.get("type") == "function_call")
+        tool = next(m for m in followup if m.get("type") == "function_call_output")
+        self.assertEqual(assistant["call_id"], "call_sdk_opaque_feed")
+        self.assertEqual(tool["call_id"], "call_sdk_opaque_feed")
+        envelope = json.loads(tool["output"])
         self.assertTrue(envelope["success"])
         projection = json.loads(followup[-1]["content"])
         self.assertEqual(projection["candidate_count"], 1)

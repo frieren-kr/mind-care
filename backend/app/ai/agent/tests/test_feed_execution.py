@@ -105,7 +105,7 @@ class FeedExecutionContractTests(unittest.TestCase):
 
     def test_runner_configuration_error_does_not_expose_underlying_data(self):
         execution, client, _ = research_runner([])
-        with patch.object(execution.runner.registry, "definitions", side_effect=ValueError("PRIVATE configuration detail")):
+        with patch.object(execution.runner.registry, "names", side_effect=ValueError("PRIVATE configuration detail")):
             with self.assertRaises(FeedExecutionError) as caught:
                 execution(CONTEXT, "prepared input")
         self.assertNotIn("PRIVATE", "".join(traceback.format_exception(caught.exception)))
@@ -146,11 +146,12 @@ class IterativeResearchTests(unittest.TestCase):
     def test_first_evidence_reaches_llm_before_it_chooses_a_second_query(self):
         test = self
         class EvidenceDrivenFake(FakeLLMClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 if len(self.requests) == 1:
-                    tool = next(m for m in messages if m.role == "tool")
+                    tool = next(m for m in messages if m.type == "function_call_output")
                     data = json.loads(tool.content)
-                    test.assertEqual(tool.tool_call_id, "search_1")
+                    test.assertEqual(tool.call_id, "search_1")
                     test.assertTrue(data["success"])
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep research")
@@ -158,7 +159,7 @@ class IterativeResearchTests(unittest.TestCase):
                     self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver sleep support research", revision=1, retain=(0,))]))
                 elif len(self.requests) == 2:
                     self.turns.append(final_turn(count=2, selected=(1,)))
-                return super().generate(messages, tools)
+                return super().generate(request)
         client = EvidenceDrivenFake([ModelTurn(tool_calls=[search_call()])])
         execution, _, searches = research_runner([], client=client)
         result = execution(CONTEXT, prepared_input())
@@ -166,7 +167,7 @@ class IterativeResearchTests(unittest.TestCase):
         self.assertEqual([args.query for _, args in searches],
                          ["Dementia sleep research", "Caregiver sleep support research"])
         self.assertEqual(len(client.requests), 3)
-        self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role == "tool"], ["search_1", "search_2"])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ["search_1", "search_2"])
         self.assertEqual(result.sources[0].source_ref.tool_call_id, "search_2")
 
     def test_third_search_result_can_be_followed_by_normal_final_output(self):
@@ -178,7 +179,7 @@ class IterativeResearchTests(unittest.TestCase):
         self.assertEqual(result.execution.total_tool_calls, 3)
         self.assertEqual(len(searches), 3)
         self.assertEqual(len(client.requests), 4)
-        self.assertIn("search_3", [m.tool_call_id for m in client.requests[-1][0] if m.role == "tool"])
+        self.assertIn("search_3", [m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"])
 
     def test_fourth_tool_call_is_not_executed(self):
         execution, client, searches = research_runner([
@@ -223,7 +224,7 @@ class IterativeResearchTests(unittest.TestCase):
                     turns.append(final_turn(count=0))
                 execution, client, searches = research_runner(turns, empty_queries={"Dementia sleep research"})
                 result = execution(CONTEXT, prepared_input())
-                tool = next(m for m in client.requests[1][0] if m.role == "tool")
+                tool = next(m for m in client.requests[1][0] if m.type == "function_call_output")
                 self.assertTrue(json.loads(tool.content)["success"])
                 candidates = json.loads(next(m.content for m in client.requests[1][0] if m.kind == "evidence"))
                 self.assertEqual(candidates["candidate_count"], 0)
