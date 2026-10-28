@@ -17,7 +17,7 @@ from ..workflows.feed_execution import FeedExecutionV1
 from ..workflows.feed_prompts import FeedPromptBuilder
 from . import test_parallel_feed as parallel
 from .test_feed_candidates import decisions, package, review_turn
-from .test_openai_client import completion
+from .test_openai_client import response_fixture
 from .test_workflows import CONTEXT
 
 
@@ -50,8 +50,8 @@ class FeedBatchSearchTests(unittest.TestCase):
                 self.assertEqual(len(client.requests), 2)
                 self.assertEqual(len(result.output.items), 5)
                 messages = client.requests[1][0]
-                tools = [m for m in messages if m.role == 'tool']
-                self.assertEqual([m.tool_call_id for m in tools], ['provider-real'])
+                tools = [m for m in messages if m.type == "function_call_output"]
+                self.assertEqual([m.call_id for m in tools], ['provider-real'])
                 self.assertEqual(json.loads(tools[0].content)['data']['searches'],
                     [{'query_index': i, 'returned_evidence_count': 8} for i in range(count)])
                 progress = json.loads(messages[-1].content)['search_progress']
@@ -130,7 +130,7 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 3)
         self.assertEqual(client.options[-1].tool_choice, 'auto')
         last = client.requests[-1][0]
-        self.assertEqual([m.tool_call_id for m in last if m.role == 'tool'], ['first','second'])
+        self.assertEqual([m.call_id for m in last if m.type == "function_call_output"], ['first','second'])
         self.assertEqual(json.loads(last[-1].content)['search_progress']['model_tool_calls_used'], 2)
 
     def test_batch_timeout_and_deadline_do_not_join_or_accept_late_results(self):
@@ -177,7 +177,7 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual(result.execution.total_tool_calls, 3)
         self.assertEqual(len(client.requests), 2)
         messages = client.requests[-1][0]
-        self.assertEqual([m.tool_call_id for m in messages if m.role == 'tool'], ['first','second'])
+        self.assertEqual([m.call_id for m in messages if m.type == "function_call_output"], ['first','second'])
         self.assertEqual(json.loads(messages[-1].content)['search_progress']['model_tool_calls_used'], 2)
         self.assertEqual([s.pmid for s in result.sources], ['a','b','c'])
 
@@ -234,7 +234,7 @@ class FeedBatchSearchTests(unittest.TestCase):
         result, client = self.run_turns([ModelTurn(tool_calls=[batch(['a'], identifier)]),
             ModelTurn(text=json.dumps(decisions(1, [0])))], lambda c,a: package(['a']))
         self.assertNotEqual(result.sources[0].source_ref.tool_call_id, identifier)
-        self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role=='tool'], [identifier])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], [identifier])
 
     def test_chat_schema_and_single_query_execution_are_unchanged(self):
         reached = []
@@ -242,8 +242,8 @@ class FeedBatchSearchTests(unittest.TestCase):
         before = tools.definitions()
         adapted = feed_tool_definitions(before)
         self.assertEqual(tools.definitions(), before)
-        self.assertEqual(adapted[0]['function']['parameters'], FeedSearchInput.model_json_schema())
-        self.assertEqual(set(before[0]['function']['parameters']['properties']), {'query','top_k'})
+        self.assertEqual(adapted[0]['parameters'], FeedSearchInput.model_json_schema())
+        self.assertEqual(set(before[0]['parameters']['properties']), {'query','top_k'})
         client = FakeLLMClient([ModelTurn(tool_calls=[ToolCall(id='chat',name='search_evidence',arguments={'query':'a'})]), ModelTurn(text='Chat')])
         result = AgentLoopRunner(client, tools).run('Synthetic', CONTEXT)
         self.assertEqual(result.status, 'completed')
@@ -255,10 +255,8 @@ class FeedBatchSearchTests(unittest.TestCase):
         def transport(request):
             wire.append(json.loads(request.content))
             if len(wire) == 1:
-                return httpx.Response(200,json=completion({'role':'assistant','content':None,'tool_calls':[
-                    {'id':'sdk-real','type':'function','function':{'name':'search_evidence',
-                     'arguments':json.dumps({'queries':['a','b','c']})}}]}, 'tool_calls'))
-            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(3,range(3)))}))
+                return httpx.Response(200,json=response_fixture({'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + 'sdk-real', 'call_id': 'sdk-real', 'name': 'search_evidence', 'arguments': json.dumps({'queries': ['a', 'b', 'c']}), 'status': 'completed'}]}))
+            return httpx.Response(200,json=response_fixture({'text': json.dumps(decisions(3, range(3)))}))
         sdk = OpenAI(api_key='offline-placeholder',http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         result = FeedExecutionV1(OpenAIClient(sdk,model='offline-model'),parallel.registry(
@@ -266,9 +264,9 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(len(wire), 2)
         self.assertCountEqual(reached, [('a',8),('b',8),('c',8)])
-        schema = wire[0]['tools'][0]['function']['parameters']
+        schema = wire[0]['tools'][0]['parameters']
         self.assertEqual(set(schema['properties']), {'queries', 'review'})
         self.assertEqual((schema['properties']['queries']['minItems'],schema['properties']['queries']['maxItems']), (1,3))
-        self.assertEqual([m['tool_call_id'] for m in wire[1]['messages'] if m['role']=='tool'], ['sdk-real'])
-        self.assertNotIn('feed-rag:', json.dumps(wire[1]['messages']))
+        self.assertEqual([m['call_id'] for m in wire[1]['input'] if m.get("type") == "function_call_output"], ['sdk-real'])
+        self.assertNotIn('feed-rag:', json.dumps(wire[1]['input']))
         self.assertEqual([wire[0]['tool_choice'],wire[1]['tool_choice']], ['required','auto'])

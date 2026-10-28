@@ -17,7 +17,7 @@ from ..workflows.feed_execution import FeedExecutionV1
 from . import test_parallel_feed as parallel
 from .test_feed_batch_search import batch
 from .test_feed_candidates import decisions, package
-from .test_openai_client import completion
+from .test_openai_client import response_fixture
 from .test_workflows import CONTEXT
 
 
@@ -73,7 +73,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
         for key, expected in (('search_calls_used', [3, 6, 9]), ('search_calls_remaining', [6, 3, 0]),
                               ('search_rounds_remaining', [2, 1, 0])):
             self.assertEqual([p['search_progress'][key] for p in projections], expected)
-        self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role == 'tool'], ['provider-0', 'provider-1', 'provider-2'])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ['provider-0', 'provider-1', 'provider-2'])
         self.assertNotIn('feed-rag:', json.dumps([m.model_dump() for m in client.requests[-1][0]]))
         for source in result.sources:
             _, round_id, call_id, query_id = source.source_ref.tool_call_id.split(':')
@@ -214,7 +214,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
             self.assertEqual(result.execution.status, 'failed' if conflicting else 'completed')
             self.assertEqual(len(reached), 1 if conflicting else 3)
             if not conflicting:
-                self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role == 'tool'], ['first', 'second', 'third'])
+                self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ['first', 'second', 'third'])
 
     def test_same_pmid_new_grade_does_not_replace_retained_snapshot(self):
         initial, later = package(['same']), package(['same', 'new'])
@@ -281,15 +281,14 @@ class FeedReviewRoundsTests(unittest.TestCase):
             wire.append(json.loads(request.content))
             if len(wire) <= 2:
                 call = search(['a' if len(wire) == 1 else 'b'], f'sdk-{len(wire)}', 1 if len(wire) == 2 else None, (0,)).tool_calls[0]
-                return httpx.Response(200, json=completion({'role': 'assistant', 'content': None, 'tool_calls': [
-                    {'id': call.id, 'type': 'function', 'function': {'name': call.name, 'arguments': json.dumps(call.arguments)}}]}, 'tool_calls'))
-            return httpx.Response(200, json=completion({'role': 'assistant', 'content': json.dumps(decisions(2, (0, 1)))}))
+                return httpx.Response(200, json=response_fixture({'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + call.id, 'call_id': call.id, 'name': call.name, 'arguments': json.dumps(call.arguments), 'status': 'completed'}]}))
+            return httpx.Response(200, json=response_fixture({'text': json.dumps(decisions(2, (0, 1)))}))
         sdk = OpenAI(api_key='offline-placeholder', http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         result = FeedExecutionV1(OpenAIClient(sdk, model='offline-model'), parallel.registry(lambda c, a: package([a.query])))(CONTEXT, '{}')
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(len(wire), 3)
-        self.assertEqual([m['tool_call_id'] for m in wire[-1]['messages'] if m['role'] == 'tool'], ['sdk-1', 'sdk-2'])
+        self.assertEqual([m['call_id'] for m in wire[-1]['input'] if m.get("type") == "function_call_output"], ['sdk-1', 'sdk-2'])
         self.assertEqual([p['tool_choice'] for p in wire], ['required', 'auto', 'auto'])
-        self.assertTrue(all(p['reasoning_effort'] == 'none' for p in wire))
+        self.assertTrue(all('reasoning' not in p for p in wire))
         self.assertNotIn('feed-rag:', json.dumps(wire))

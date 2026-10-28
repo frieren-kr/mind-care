@@ -236,8 +236,8 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertTrue(all(i.source_ref.tool_call_id == "call_sdk_opaque" for i in result.output.items))
         self.assertEqual([s.pmid for s in result.sources], ["0", "4"])
         followup = client.requests[-1][0]
-        tools = [m for m in followup if m.role == "tool"]
-        self.assertEqual(tools[0].tool_call_id, "call_sdk_opaque")
+        tools = [m for m in followup if m.type == "function_call_output"]
+        self.assertEqual(tools[0].call_id, "call_sdk_opaque")
         self.assertNotIn('"evidence"', tools[0].content)
 
     def test_three_searches_have_one_latest_rebalanced_candidate_list(self):

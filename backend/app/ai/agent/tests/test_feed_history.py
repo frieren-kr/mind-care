@@ -1,4 +1,5 @@
 """Recent Feed history stays request-local: titles to Provider, PMIDs to selection."""
+from ..testing.fake_llm import fake_output
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy, deepcopy
 from datetime import timedelta, timezone
@@ -387,13 +388,14 @@ class FeedHistoryExecutionTests(unittest.TestCase):
     def test_shared_execution_keeps_concurrent_and_sequential_request_history_isolated(self):
         barrier = Barrier(2)
         class Client:
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 candidates = [m for m in messages if m.kind == 'evidence']
                 if not candidates:
                     barrier.wait(3)
-                    return search(['one'], 'first')
+                    return fake_output(search(['one'], 'first'))
                 rows = json.loads(candidates[-1].content)['candidates']
-                return ModelTurn(text=json.dumps(decisions(len(rows), range(len(rows)))))
+                return fake_output(ModelTurn(text=json.dumps(decisions(len(rows), range(len(rows))))))
         execute = FeedExecutionV1(Client(), registry(lambda c, a: package(['A', 'B'])))
         contexts = [CONTEXT.model_copy(update={'user_id': UUID(int=i), 'request_id': f'request-{i}'}) for i in (1, 2)]
         def run(index):

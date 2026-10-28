@@ -68,7 +68,7 @@ class EvidenceContractTests(TestCase):
 
     def test_tool_definition_exposes_search_semantics_from_canonical_models(self):
         contract = TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE]
-        definition = contract.definition()["function"]
+        definition = contract.definition()
         self.assertEqual(definition["parameters"], c.EvidenceSearchInput.model_json_schema())
         schema = definition["parameters"]
         self.assertEqual(set(schema["properties"]), {"query", "top_k"})

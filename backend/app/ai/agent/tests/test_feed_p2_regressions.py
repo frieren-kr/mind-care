@@ -4,6 +4,7 @@ import unittest
 from threading import Barrier, Event, Thread
 from unittest.mock import patch
 
+from ..conversation import Conversation
 from ..feed_candidates import FeedCandidates, FeedDecisionError
 from ..schemas import ModelTurn
 from ..testing.fake_llm import FakeLLMClient
@@ -61,7 +62,7 @@ class FeedP2RegressionTests(unittest.TestCase):
         box={}
         def run():box['result']=execution(CONTEXT,'{}')
         with patch.object(FeedCandidates,'add',autospec=True) as publish, patch.object(
-                execution.runner.prompt_builder,'build_tool_followup_messages',autospec=True) as followup:
+                Conversation,'append_turn',autospec=True) as followup:
             worker=Thread(target=run,daemon=True);worker.start()
             try:
                 worker.join(1)

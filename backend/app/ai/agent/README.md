@@ -13,6 +13,60 @@ Production Source와 오프라인 통합 테스트가 있으며, `/recommendatio
 실 DB Stage 1 및 Fake Execution 통합은 Backend 팀 검증 보고로 구분한다.
 실제 LLM Execution/RAG 활성화·의료 규칙·챗봇 API 완성은 별도다.
 
+
+## Responses API 실행 아키텍처 (SDK 1.109.1)
+
+Agent의 실제 Provider 경로는 `OpenAIClient.generate(GenerationRequest)` →
+`sdk.with_options(timeout=잔여 deadline과 Provider timeout 중 작은 값, max_retries=0).responses.create()`다.
+Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar는 없다.
+`_execution.request_deadline`은 실행 시간 관리용으로 유지한다.
+
+- `clients/base.py`: frozen `GenerationRequest(inputs, tools, options)`와 명시적
+  `GenerationOptions(tool_choice, required_tool, parallel_tool_calls, reasoning_effort)`.
+- `registry.py`: canonical Tool/Pydantic/Handler 검증과 `names()` 조회.
+  전송 명세는 `type/name/description/parameters/strict=False`의 평탄한 Function Tool이다.
+  optional `review` 등의 의미를 strict schema 정규화로 바꾸지 않는다.
+- `schemas.py`: `ModelTurn.text/tool_calls/output_items`. SDK 모델은 경계에서 검증 후
+  JSON 데이터로 변환하며 `output_items`는 공개 결과/Trace에 넣지 않는다.
+  `Message`는 정책·데이터, function-call 결과, 비공개 continuation의 구분을 명시한다.
+- `conversation.py`: Runner 실행마다 새 객체를 만든다. 출력 항목을 원래 순서대로
+  한 번만 보존하고 각 원래 call_id에 function_call_output 하나를 연결한다.
+  PromptBuilder는 정책과 데이터만 조립하며 Provider 이력을 합성하지 않는다.
+- `agent_loop_runner.py`: 기존 단일 Loop가 Feed/Chat의 예산·권한·Executor·Evidence·
+  최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
+  이전 candidate_revision 목록을 다음 요청에 중복 누적하지 않는다.
+
+Provider 요청은 `store=False`, `include=["reasoning.encrypted_content"]`를 사용하며
+`previous_response_id`를 사용하지 않는다. reasoning 항목은 요청별 opaque continuation으로
+후속 호출에 전달하고, 공개 결과나 일반 로그에 노출하지 않는다. 특정 모델의 effort는
+하드코딩하지 않고 기본 생략한다. 명시적 설정은 SDK 1.109.1의 minimal/low/medium/high에
+한정하며 실제 모델 지원·추론 지연·토큰 비용은 별도 live 검증 대상이다.
+기존 Provider timeout 20초, 요청 전체 제한, SDK 자동 retry 금지는 유지하므로 기본 추론
+동작 변화로 timeout/비용이 달라질 수 있다. 출력 Schema 검증은 기존 서버 검증을 유지하며
+이번 전환에서 text.format을 새로 강제하지 않는다.
+
+완료 status만으로 최종 답변으로 판단하지 않는다. function_call이 있으면 Tool Loop를
+계속하고, call_id를 내부 ToolCall.id/ToolOutcome.call_id/출처 참조에 대응시킨다.
+출력 항목 자체 id는 Tool 결과 연결에 사용하지 않는다. message/function_call/reasoning만
+지원하며 refusal·미지원 출력·불완전/실패 응답은 안전한 Provider 실패로 끝낸다.
+Tool 인자 JSON은 수정하지 않고 기존 Executor/Feed 검증에 전달한다.
+
+### 외부 테스트 인계
+
+`backend/tests/test_recommendations.py`는 Agent 작업 범위 밖이므로 수정하지 않는다.
+아래 두 테스트는 `assert_configured_dependency_returns_ai()`의 구형 `completion` helper
+import(305행), Chat Completions Mock(310~323행), 중첩 function.name assertion(338행)을
+Responses fixture, function_call/call_id, 평탄한 tools.name 검사로 변경해야 한다.
+
+- `OfflineFeedHandoffTests.test_configured_dependency_runs_sdk_search_handoff_and_returns_ai`
+- `OfflineFeedHandoffTests.test_configured_dependency_allows_loopback_socketpair`
+
+이 실패는 구형 테스트 형식 차이이며 성공으로 집계하지 않는다. Agent의
+`test_responses.ResponsesBackendBridgeTests`는 기존 Backend fixture를 재사용하고 실제
+Backend 프로덕션 조립·HTTP·저장 Handoff를 Responses MockTransport로 검증한다.
+Backend 프로덕션 코드/호출 계약의 변경은 필요하지 않다. 인증된 실제 Provider·DB·RAG
+통합은 별도이며 API Key 없는 오프라인 통과가 모델 지원이나 의료 품질을 보장하지 않는다.
+
 ## ChatWorkflow: 세 단계 Skeleton
 
 `workflows/chat.py`는 Feed를 상속하지 않고 다음 세 단계만 실행한다.
@@ -50,12 +104,15 @@ Tool DTO에 ownership ID가 없으면 유효한 모양의 다른 환자 정보�
 현재 Tool 전체 목록을 Workflow에 선언하거나 Registry V2/미래 Tool을 미리 구현하지 않는다.
 Factory/Handler의 공유 서비스나 Client는 서버 조립부 책임이며 요청별 변경 상태를 보관하면 안 된다.
 
-Chat은 공용 기본 예산 5 rounds / 10 calls를 사용한다. 동일 Turn의 독립 Tool들은 기존 Runner가
-순차 실행해 결과를 모은 뒤 다음 LLM 호출로 전달한다. 세 Tool은 1 round / 3 calls이며 중간 LLM
+Chat은 공용 기본 예산 5 rounds / 10 calls를 사용한다. 동일 Turn의 Tool들이 모두 등록되어 있고
+parallel_safe=True이면 공용 Runner가 최대 3개씩 병렬 실행한다. 안전하지 않은 Tool이 하나라도
+있으면 전체 묶음을 순차 실행한다. 결과는 호출 순서로 모아 다음 LLM 호출로 전달한다.
+세 Tool은 1 round / 3 calls이며 중간 LLM
 재호출은 없다. 앞선 결과가 필요한 검색은 후속 Turn에서 LLM이 판단한다. Intent classifier,
 별도 Planner/Tool loop/ParallelToolExecutor는 없다. Feed의 3라운드/9검색 설정·검색 전용 Registry는 변경하지 않는다.
-ChatPromptBuilder는 DefaultPromptBuilder의 Tool followup을 재사용하고 raw AgentContext 초기 메시지만
-제외한다. 공용 Runner가 기존 Chat structured policy를 삽입한다. Tool/질문/Evidence는 비신뢰 데이터다.
+ChatPromptBuilder는 raw AgentContext 초기 메시지를 제외하고 정책과 사용자 데이터를 조립한다.
+Tool 결과 연결은 요청별 Conversation이 맡으며 공용 Runner가 기존 Chat structured policy를 삽입한다.
+Tool/질문/Evidence는 비신뢰 데이터다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
 응답의 임상적 정확성을 강제하는 검증은 아니다. 실제 Provider 의미적 동작은 아직 검증하지 않았다.
 
@@ -195,7 +252,7 @@ assert result.execution.total_tool_calls >= 1  # Tool 미호출은 Tool Calling 
 assert [s.source_ref for s in result.sources] == [item.source_ref for item in result.output.items]
 ```
 
-실제 모델의 `reasoning_effort="none"` 지원과 판단 품질은 이 단계에서 별도로 확인한다.
+실제 모델의 Responses reasoning 설정 생략 시의 모델 동작과 판단 품질은 이 단계에서 별도로 확인한다.
 이후 테스트 서버의 `/recommendations/{user_id}?refresh=true`에서 `mode="ai"`와 추천 결과를
 확인한다. 정상 empty Feed나 DB에 없는 PMID는 Backend Handoff에서 빈 결과가 되어 검색 폴백할
 수 있으므로 HTTP 200/Agent completed만으로 API AI 모드 성공을 주장하지 않는다.
@@ -958,7 +1015,7 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 
 Windows 등에서는 활성화한 가상환경의 `python`으로 `.venv/bin/python`을 대체한다.
 기본 테스트/데모는 API key, DB, 외부 네트워크가 필요 없다.
-Provider 테스트는 설치된 `openai==1.51.0` + `httpx.MockTransport`로 API 형식만 검증한다.
+Provider 테스트는 설치된 `openai==1.109.1` + `httpx.MockTransport`로 API 형식만 검증한다.
 
 선택적인 실제 Provider 검증은 기존 `app.config.settings.openai_api_key` binding과 명시적인
 모델 이름을 준비한 뒤 실행한다. API key를 코드/명령줄에 넣거나 출력하지 않는다.
@@ -998,7 +1055,7 @@ HTTP timeout은 네트워크 단계별 제한이며 실행 중인 thread의 강�
 | `testing/feed_workflow_fakes.py` | 실제 Production Source/Loader/Prepare에 합성 FeedReadSnapshot/LLM/Tool/Handoff를 연결 |
 | `tests/test_feed_workflow.py` | Source → Loader → Prepare → Execution → Runner → V1 Handoff 통합 및 실패 차단 검증 |
 | `clients/base.py` | Provider-independent LLMClient Protocol |
-| `clients/openai_client.py` | SDK 주입, 모델 설정 주입, Chat Completions 변환/정규화 |
+| `clients/openai_client.py` | SDK 주입, 모델 설정 주입, Responses 전용 요청/응답 검증 |
 | `tools/evidence_tools.py` | 미래 RAG 서비스의 EvidenceRetriever Protocol; 실행 구현 없음 |
 | `testing/fake_tools.py` | 고정 합성 fixture 기반 3개 Fake Handler/테스트 Registry |
 | `testing/fake_llm.py` | 정해진 ModelTurn 순서와 요청 snapshot을 사용하는 FakeLLMClient |
@@ -1252,14 +1309,13 @@ Builder의 교체 지점:
 
 - `build_system_prompt(context)`
 - `build_initial_messages(user_input, context)`
-- `build_tool_followup_messages(turn, outcomes)`
 - `build_final_response_context(evidence_packages)`
 
 기본 Builder는 정책(system), 서버 Context(system의 별도 JSON), 원문 사용자 입력(user),
-모델 Tool Calls(assistant), 호출 ID별 결과(tool), 구조화 근거 묶음(user의 별도 데이터 message)을 유지한다.
+Conversation의 원본 Provider 출력과 call_id별 function_call_output, 구조화 근거 묶음(user의 별도 데이터 message)을 유지한다.
 사용자 입력은 strip/요약/재작성하지 않는다. Tool Result/Evidence를 system 정책으로 승격하지 않는다.
 근거 묶음은 재판단 시 Builder가 제공하며, 원래 Tool 결과도 conversation에 보존한다.
-Provider로 전송할 때 `kind`는 제거되지만 role, 개별 message, Tool Call ID/JSON 경계는 유지된다.
+Provider로 전송할 때 `kind`는 제거되지만 입력 항목 순서와 call_id/JSON 경계는 유지된다.
 Query Rewriting/Intent Extraction/Compression은 이 Builder를 교체하여 추가할 수 있다.
 현재는 구현하지 않았으며 원문 보존/신뢰 경계를 유지하는 책임은 새 Builder에도 적용된다.
 
@@ -1364,8 +1420,8 @@ deterministic하게 수행할 책임이다. 해당 Workflow와 DB persistence는
 ## 최종 답변 Structured Output V1 (선택적)
 
 `engine.run(user_input, context)`는 기존 `AgentResult` 및 문자열 `final_answer`를 그대로
-반환한다. 기존 결과 JSON에 새 필드가 추가되지 않는다. FakeLLM/LLMClient의
-`generate(messages, tools) -> ModelTurn`도 그대로다.
+반환한다. 기존 결과 JSON에 새 필드가 추가되지 않는다. FakeLLM/LLMClient는 명시적인
+`generate(GenerationRequest) -> ModelTurn` 계약을 사용한다.
 
 ```python
 from app.ai.agent.outputs import ChatAnswerV1, FeedAnswerV2
@@ -1436,7 +1492,7 @@ Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 �
 
 AgentLoopRunner는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
 요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 서버 Snapshot은 바꾸지 않는다.
-Chat 모델은 role=tool message의 tool_call_id와 data.evidence 위치를 참조한다.
+Chat 모델은 function_call_output의 call_id와 output JSON의 data.evidence 위치를 참조한다.
 Feed 모델은 후보별 include/이유/category만 반환하며, 원본 참조를 결합하는 책임은 서버에 있다.
 `resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
 현재 요청의 성공 검색 존재/0-based index 범위를 검사한다. 실패한 검색/다른 Tool/다른 요청의
@@ -1507,13 +1563,13 @@ Feed 첫 요청은 search_evidence만 있는 Registry에서 tool_choice=required
 요구한다. 검색어는 모델이 핵심 주제별로 1~3개 생성하며 Cold Start도 동일하다.
 후속 요청은 auto, Tool 예산 또는 round 예산이 소진되면 none이다. Feed 기본 parallel_tool_calls=True이며,
 비준수 Provider가 상한을 넘는 call을 반환하면 작업 시작 전에 전체 요청을 거부한다.
-옵션은 ContextVar를 통해 해당 generate 호출에만 적용하고 finally에서 복원한다.
-기존 generate(messages, tools) 인터페이스와 Chat의 auto/SDK timeout/retry 설정은 유지한다.
+옵션은 각 GenerationRequest.options로 명시적으로 전달하며 요청 간 공유하지 않는다.
+Chat의 auto/SDK timeout/retry 설정은 유지한다.
 
 첫 모델 호출에는 최종 Schema와 후보 목록을 보내지 않는다. 검색 성공 후 최신 후보 메시지에
 evaluating/예산 소진 exhausted의 phase와 성공/실패 횟수, 사용/잔여 예산을 전달한다. candidate_status는 not_searched/empty/available로
 별도로 구분한다. last_search는 반환 Evidence 수와 새 후보 수를 구분하며 원래 query는 기존
-assistant Tool Call 메시지에 보존한다. 검색 전 0건은 빈 검색 성공을 의미하지 않는다.
+원본 Responses function_call 항목에 보존한다. 검색 전 0건은 빈 검색 성공을 의미하지 않는다.
 검색 전 최종 text 또는 다른 Tool 응답은 feed_search_required로 거부한다. 검색 오류는 즉시
 failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하지 않는다.
 검색 1/2/3라운드는 모델 호출 2/3/4회다. 한 턴의 검색 3개는 1라운드다. 근거가 충분하면 첫 라운드 후 모델 호출 2회로 종료할 수 있다.
@@ -1526,7 +1582,9 @@ MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·
 ### Feed 병렬 검색과 검토 후보 15편 통합
 
 공통 Runner는 allow_parallel_tools=False가 기본이며, FeedExecutionV1은 True / max_parallel_calls=3이다.
-한 턴 전체가 parallel_safe이고 동시 실행 상한 안에 있을 때만 병렬 실행한다. 나머지는 순차 실행한다.
+ChatExecutionV1도 True / max_parallel_calls=3을 사용한다. 한 턴 전체가 등록된 parallel_safe Tool이고
+동시 실행 상한이 2 이상이면 병렬 실행한다. 상한을 넘는 호출은 최대 상한 크기의 묶음으로 실행하며
+나머지는 순차 실행한다. Provider parallel_tool_calls 생략/명시 정책과 서버 실행 정책은 독립적이다.
 ToolSpec은 기본 parallel_safe=False이며 build_evidence_registry의 검색만 명시적으로 True다.
 독립적인 검색에만 이 정책을 부여해야 한다. 기존 Chat 동작/Tool 계약은 바꾸지 않는다.
 
@@ -1610,7 +1668,8 @@ Feed 조기 종료에서는 완료 결과를 실제 도착 순서로 검증한�
 이미 Executor 진입을 시작한 호출만 total_tool_calls에 집계하고, 미시작 호출은 실행하지 않는다.
 Trace는 종료 시점까지 관측된 완료만 요청 순서로 보존한다. 진행 중/미실행 호출의 Trace를 만들지 않는다.
 늦은 결과는 Agent 상태·후보·메시지에 반영하지 않고, 슬롯은 해당 워커/Handler 종료 시 finally에서 반환한다.
-Python 실행 중인 Handler는 강제 중단하지 않으며 Chat의 recoverable/기본 순차 정책은 그대로다.
+Python 실행 중인 Handler는 강제 중단하지 않으며 Chat의 recoverable 오류 정책은 그대로다.
+안전한 Chat Tool의 병렬 실행도 timeout 후 자동 재실행하지 않고 실제 시작된 Executor 호출만 센다.
 
 ### Feed queries 배열 입력과 내부 검색 분배
 
@@ -1647,7 +1706,12 @@ Handler admission 이전 timeout에서는 DB/RAG 실제 진입까지 보장하�
 
 내부 검색은 기존 병렬 admission/fail-fast/timeout/deadline/late-result 격리를 재사용한다. 모든 내부 검색 성공과
 원본 검증 후에만 전체 묶음을 원자적으로 반영한다. 부분 Evidence/후속 Provider 응답은 실패 시 발행하지 않는다.
-공유 Retriever가 parallel_safe=False인 경우 기존 순차 실행 안전 설정을 존중한다. Chat 기본 순차 정책은 유지한다.
+공유 Retriever가 parallel_safe=False인 경우 기존 순차 실행 안전 설정을 존중한다.
+Chat의 요청별 Registry snapshot은 supplied ToolSpec의 안전성 메타데이터를 그대로 보존한다.
+운영 Chat 전용 Registry/API 조립은 아직 없으며 profile/care-log 운영 Handler의 안전성을 새로 가정하지 않는다.
+build_evidence_registry의 기존 검색 플래그는 유지한다. 실제 공유 임베딩 모델의 초기 로드/encode와
+DB 연결·Retriever 가변 상태의 동시성은 배포 환경에서 별도 검증해야 하며, 확인되지 않은 조립부는
+parallel_safe=False를 명시해야 한다. 오프라인 병렬 검증은 명시적으로 안전한 합성 Retriever를 사용한다.
 FakeLLM 및 실제 SDK+MockTransport는 배열 계약·분배·프로토콜만 검증한다. 실제 LLM이 배회·실종/낙상/야간 흥분을
 독립 배열 항목으로 생성하는지, 실제 RAG 반환/등급 분포·추천 수·LLM 호출 수·지연은 서버 통합 테스트에서 측정해야 한다.
 

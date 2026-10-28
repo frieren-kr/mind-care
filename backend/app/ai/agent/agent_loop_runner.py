@@ -5,11 +5,12 @@ from time import monotonic
 from typing import cast
 
 from ._execution import RequestTimeout, ParallelStopped, bounded_call, bounded_parallel, check_deadline, positive_seconds, request_deadline
-from .clients.base import LLMClient, GenerationOptions, generate_with_options
+from .clients.base import LLMClient, GenerationOptions, GenerationRequest
 from .executor import ToolExecutor
 from .feed_search_policy import (MAX_FEED_RETRIEVAL, MAX_FEED_SEARCH_ROUNDS, MAX_FEED_SEARCHES, FeedSearchBudgetExceeded,
                                  feed_tool_definitions, prepare_feed_searches)
 from .feed_candidates import FeedCandidates, FeedDecisionError
+from .conversation import Conversation
 from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult, validate_final_output)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
@@ -67,26 +68,26 @@ class AgentLoopRunner:
 
     def _tool_results(self, calls, context, state, *, stop_on_failure):
         parallel = False
-        if self.allow_parallel_tools and 1 < len(calls) <= self.max_parallel_calls:
+        if self.allow_parallel_tools and self.max_parallel_calls > 1 and len(calls) > 1:
             parallel = bounded_call(lambda: all(
                 (spec := self.registry.get(call.name)) is not None and spec.parallel_safe for call in calls))
         if parallel:
-            state.total_tool_calls += len(calls)
-            try:
-                raw_results = bounded_parallel([
-                    partial(self.executor.execute, call.model_copy(deep=True), context.model_copy(deep=True))
-                    for call in calls], stop_on_result=(
-                        lambda index, raw: not _validate_tool_result(calls[index], raw)[0].success)
-                        if stop_on_failure else None)
-            except ParallelStopped as stopped:
-                # Count Executor attempts that actually started, not unlaunched
-                # calls. Pending peers have no fabricated success/timeout Trace.
-                state.total_tool_calls -= len(calls) - stopped.started
-                for index, raw in stopped.results:
-                    yield calls[index], *_validate_tool_result(calls[index], raw)
-                return
-            for call, raw in zip(calls, raw_results, strict=True):
-                yield call, *_validate_tool_result(call, raw)
+            def record_started(count):
+                state.total_tool_calls += count
+            for start in range(0, len(calls), self.max_parallel_calls):
+                batch = calls[start:start + self.max_parallel_calls]
+                try:
+                    raw_results = bounded_parallel([
+                        partial(self.executor.execute, call.model_copy(deep=True), context.model_copy(deep=True))
+                        for call in batch], stop_on_result=(
+                            lambda index, raw: not _validate_tool_result(batch[index], raw)[0].success)
+                            if stop_on_failure else None, on_started=record_started)
+                except ParallelStopped as stopped:
+                    for index, raw in stopped.results:
+                        yield batch[index], *_validate_tool_result(batch[index], raw)
+                    return
+                for call, raw in zip(batch, raw_results, strict=True):
+                    yield call, *_validate_tool_result(call, raw)
         else:
             for call in calls:
                 check_deadline()
@@ -100,6 +101,7 @@ class AgentLoopRunner:
              output_model: FinalOutputModel | None = None,
              previously_recommended_pmids: frozenset[str] = frozenset()) -> AgentResult | StructuredAgentResult:
         state = AgentState(request_id=context.request_id)
+        conversation = Conversation()
         evidence: list[EvidencePackage] = []
         evidence_by_call: dict[str, EvidencePackage] = {}
         feed_candidates = (FeedCandidates(previously_recommended_pmids=previously_recommended_pmids)
@@ -144,16 +146,16 @@ class AgentLoopRunner:
                     message="Agent 실행 결과가 계약과 일치하지 않습니다."))
 
         try:
-            state.messages = bounded_call(lambda: self.prompt_builder.build_initial_messages(user_input, context))
+            conversation.items = bounded_call(lambda: self.prompt_builder.build_initial_messages(user_input, context))
             if output_model is not None and feed_candidates is None:
-                user_position = next((index for index, message in enumerate(state.messages)
-                                      if message.role == "user"), len(state.messages))
-                state.messages.insert(user_position, bounded_call(lambda: build_structured_output_policy(output_model)))
+                user_position = next((index for index, message in enumerate(conversation.items)
+                                      if message.role == "user"), len(conversation.items))
+                conversation.items.insert(user_position, bounded_call(lambda: build_structured_output_policy(output_model)))
             while True:
                 check_deadline()
                 stage = "prompt_builder_error"
                 # 구조화 참조는 call ID가 있는 Tool Result만 사용한다. legacy의 근거 묶음은 유지한다.
-                messages = state.messages + (bounded_call(
+                messages = conversation.snapshot() + (bounded_call(
                     lambda: self.prompt_builder.build_final_response_context(evidence)) if output_model is None else [])
                 if feed_candidates is not None:
                     rounds_remaining = max(0, min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) - state.tool_round)
@@ -178,9 +180,11 @@ class AgentLoopRunner:
                             tool_choice=("none" if remaining == 0 or rounds_remaining == 0 else
                                          "auto" if feed_candidates.successful_searches else "required"),
                             parallel_tool_calls=self.allow_parallel_tools and self.max_parallel_calls > 1)
-                        turn = bounded_call(lambda: generate_with_options(self.client, messages, definitions, options))
+                        turn = bounded_call(lambda: self.client.generate(GenerationRequest(
+                            inputs=tuple(messages), tools=definitions, options=options)))
                     else:
-                        turn = bounded_call(lambda: self.client.generate(messages, definitions))
+                        turn = bounded_call(lambda: self.client.generate(GenerationRequest(
+                            inputs=tuple(messages), tools=definitions)))
                 except RequestTimeout:
                     raise
                 except Exception:
@@ -313,9 +317,8 @@ class AgentLoopRunner:
                             if output_model is not None:
                                 evidence_by_call[call.id] = package.model_copy(deep=True)
                         stage = "executor_error"
-                stage = "prompt_builder_error"
-                followup = bounded_call(lambda: self.prompt_builder.build_tool_followup_messages(turn, outcomes))
-                state.messages.extend(followup)
+                stage = "conversation_error"
+                bounded_call(lambda: conversation.append_turn(turn, outcomes))
         except RequestTimeout:
             state.final_answer = None
             error = AgentError(code="request_timeout", message="Agent 전체 실행 시간이 초과되었습니다.")

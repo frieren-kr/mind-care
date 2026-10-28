@@ -5,14 +5,14 @@ import unittest
 import httpx
 from openai import OpenAI
 
-from ..clients.base import generation_options
+from ..clients.base import GenerationRequest
 from ..clients.openai_client import OpenAIClient
 from ..schemas import Message, ModelTurn
 from ..workflows.feed_execution import FeedExecutionV1
 from . import test_feed_candidates as candidates
 from .test_feed_candidates import decisions, package, review_turn
 from .test_workflows import CONTEXT
-from .test_openai_client import completion
+from .test_openai_client import response_fixture
 
 
 class FeedSearchPolicyTests(unittest.TestCase):
@@ -56,7 +56,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
                 self.assertEqual(state["last_search"]["new_eligible_candidate_count"],
                                  1 if pmids == ["A"] and calls == 1 else 0)
                 self.assertEqual(state["candidate_status"], "available" if pmids == ["A"] else "empty")
-                self.assertIsNone(generation_options.get())
+                self.assertEqual(GenerationRequest(inputs=(), tools=[]).options.tool_choice, "auto")
 
     def test_sdk_forces_first_search_auto_then_none_at_budget(self):
         requests = []
@@ -64,13 +64,9 @@ class FeedSearchPolicyTests(unittest.TestCase):
             payload = json.loads(request.content)
             requests.append(payload)
             if len(requests) <= 3:
-                message = {"role": "assistant", "content": None, "tool_calls": [{
-                    "id": f"opaque_{len(requests)}", "type": "function", "function": {
-                        "name": "search_evidence", "arguments": json.dumps({"query": f"research {len(requests)}",
-                            **({"review": {"candidate_revision": len(requests)-1, "retain": [{
-                                "candidate_index": 0, "personal_reason": "Retained", "category": "care"}]}} if len(requests)>1 else {})})}}]}
-                return httpx.Response(200, json=completion(message, "tool_calls"))
-            return httpx.Response(200, json=completion({"role":"assistant", "content":json.dumps(decisions(1, (0,)))}))
+                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + f'opaque_{len(requests)}', 'call_id': f'opaque_{len(requests)}', 'name': 'search_evidence', 'arguments': json.dumps({'query': f'research {len(requests)}', **({'review': {'candidate_revision': len(requests) - 1, 'retain': [{'candidate_index': 0, 'personal_reason': 'Retained', 'category': 'care'}]}} if len(requests) > 1 else {})}), 'status': 'completed'}]}
+                return httpx.Response(200, json=response_fixture(message))
+            return httpx.Response(200, json=response_fixture({'text': json.dumps(decisions(1, (0,)))}))
         sdk = OpenAI(api_key="offline-placeholder", http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
@@ -82,27 +78,27 @@ class FeedSearchPolicyTests(unittest.TestCase):
         self.assertEqual([p["tool_choice"] for p in requests], [
             "required", "auto", "auto", "none"])
         self.assertEqual(len(requests), 4)
-        first_wire = requests[0]["messages"]
+        first_wire = requests[0]["input"]
         self.assertFalse(any("FeedDecisionDraft" in (m.get("content") or "") for m in first_wire))
         self.assertFalse(any('"candidate_count"' in (m.get("content") or "") for m in first_wire))
         for payload in requests[1:]:
             self.assertEqual(sum('"title": "FeedDecisionDraft"' in (m.get("content") or "")
-                                 for m in payload["messages"]), 1)
+                                 for m in payload["input"]), 1)
             self.assertEqual(sum('"untrusted_feed_candidates"' in (m.get("content") or "")
-                                 for m in payload["messages"]), 1)
+                                 for m in payload["input"]), 1)
         for payload in requests:
             self.assertTrue(payload["parallel_tool_calls"])
-            self.assertEqual(payload["reasoning_effort"], "none")
-            self.assertEqual(payload["tools"][0]["function"]["name"], "search_evidence")
+            self.assertNotIn("reasoning", payload)
+            self.assertEqual(payload["tools"][0]["name"], "search_evidence")
         OpenAIClient(sdk, model="offline-model").generate(
-            [Message(role="user", kind="user_input", content="Synthetic Chat request")], requests[0]["tools"])
+            GenerationRequest(inputs=(Message(role="user", kind="user_input", content="Synthetic Chat request"),), tools=requests[0]["tools"]))
         self.assertEqual(requests[-1]["tool_choice"], "auto")
-        self.assertNotIn("parallel_tool_calls", requests[-1])
-        self.assertIsNone(generation_options.get())
+        self.assertNotIn("parallel_tool_calls",requests[-1])
+        self.assertEqual(GenerationRequest(inputs=(), tools=[]).options.tool_choice, "auto")
 
     def test_failed_search_state_and_option_cleanup_on_exception(self):
         from ..feed_candidates import FeedCandidates
-        from ..clients.base import GenerationOptions, generate_with_options
+        from ..clients.base import GenerationOptions, GenerationRequest
         table = FeedCandidates()
         table.record_search(False)
         state = json.loads(table.message(2).content)
@@ -110,14 +106,15 @@ class FeedSearchPolicyTests(unittest.TestCase):
         self.assertEqual(state["search_progress"]["successful_searches"], 0)
         self.assertFalse(state["last_search"]["success"])
         class BrokenClient:
-            def generate(self, messages, tools):
-                self.options = generation_options.get()
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
+                self.options = request.options
                 raise RuntimeError("synthetic failure")
         client = BrokenClient()
         with self.assertRaises(RuntimeError):
-            generate_with_options(client, [], [], GenerationOptions(required_tool="search_evidence"))
+            client.generate(GenerationRequest(inputs=(), tools=[], options=GenerationOptions(required_tool="search_evidence")))
         self.assertEqual(client.options.required_tool, "search_evidence")
-        self.assertIsNone(generation_options.get())
+        self.assertEqual(GenerationRequest(inputs=(), tools=[]).options.tool_choice, "auto")
 
     def test_feed_messages_separate_search_planning_from_evaluation(self):
         from ..testing.fake_llm import FakeLLMClient
@@ -137,7 +134,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
                     first, definitions = client.requests[0]
                     self.assertEqual([m.content for m in first if m.role == "user"], [prepared])
                     self.assertTrue(any("첫 검색을 반드시 실행" in (m.content or "") for m in first))
-                    self.assertEqual(definitions[0]["function"]["name"], "search_evidence")
+                    self.assertEqual(definitions[0]["name"], "search_evidence")
                     self.assertIsNone(client.options[0].required_tool)
                     self.assertEqual(client.options[0].tool_choice, "required")
                     self.assertFalse(any(m.kind == "evidence" for m in first))
@@ -154,9 +151,9 @@ class FeedSearchPolicyTests(unittest.TestCase):
                         self.assertEqual(state["search_progress"]["search_calls_used"], used)
                         self.assertEqual(state["search_progress"]["search_calls_remaining"], 9-used)
                         self.assertEqual(state["candidate_count"], int(pmids == ["A"]))
-                        self.assertEqual([c.id for m in messages for c in m.tool_calls],
-                                         [m.tool_call_id for m in messages if m.role == "tool"])
-                        self.assertEqual(messages[-2].role, "tool")
+                        self.assertEqual([m.provider_output["call_id"] for m in messages if m.type == "provider_output" and m.provider_output["type"] == "function_call"],
+                                         [m.call_id for m in messages if m.type == "function_call_output"])
+                        self.assertEqual(messages[-2].type, "function_call_output")
                         self.assertEqual(messages[-1], projections[0])
                     if pmids == ["A"]:
                         self.assertEqual(result.sources[0].source_ref.tool_call_id, "opaque_0")

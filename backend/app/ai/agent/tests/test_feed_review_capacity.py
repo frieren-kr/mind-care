@@ -141,7 +141,7 @@ class FeedReviewCapacityTests(unittest.TestCase):
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources[:2]], [('feed-rag:1:0:2', 0), ('feed-rag:1:0:0', 3)])
         latest = json.loads(client.requests[-1][0][-1].content)
         self.assertEqual((latest['candidate_count'], latest['retained_count']), (10, 2))
-        self.assertEqual([m.tool_call_id for m in client.requests[-1][0] if m.role == 'tool'], ['first', 'second'])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ['first', 'second'])
         self.assertEqual(result.output.schema_version, '2')
 
     def test_end_to_end_six_selections_or_retained_are_not_silently_truncated(self):

@@ -73,17 +73,18 @@ class FeedWorkflowTests(unittest.TestCase):
     def test_workflow_observes_first_evidence_then_llm_chooses_followup(self):
         test = self
         class EvidenceDrivenFake(FakeLLMClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 if len(self.requests) == 1:
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidate_count"], 1)
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep orchestration fixture")
                     self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research", revision=1, retain=(0,))]))
                 elif len(self.requests) == 2:
-                    test.assertEqual([m.tool_call_id for m in messages if m.role == "tool"],
+                    test.assertEqual([m.call_id for m in messages if m.type == "function_call_output"],
                                      ["search_1", "search_2"])
                     self.turns.append(final_turn())
-                return super().generate(messages, tools)
+                return super().generate(request)
         client = EvidenceDrivenFake([ModelTurn(tool_calls=[search_call()])])
         deps = FakeFeedDependencies(CONTEXT, client=client)
         self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
@@ -158,7 +159,7 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(deps.saved[0].output.items, [])
         self.assertEqual(deps.saved[0].sources, [])
         self.assertEqual(deps.saved[0].execution.errors, [])
-        tool = next(m for m in deps.client.requests[1][0] if m.role == "tool")
+        tool = next(m for m in deps.client.requests[1][0] if m.type == "function_call_output")
         self.assertTrue(json.loads(tool.content)["success"])
 
     def test_timeout_and_search_exception_stop_without_retry(self):
