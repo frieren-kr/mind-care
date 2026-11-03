@@ -9,6 +9,7 @@ from .medications import MedicationItem, PatientMedicationsInput, PatientMedicat
 from .medical_visits import MedicalVisitItem, PatientMedicalVisitsInput, PatientMedicalVisitsOutput
 from .assessments import AssessmentItem, PatientAssessmentsInput, PatientAssessmentsOutput
 from .safety_events import SafetyEventItem, SafetyEventsPeriod, PatientSafetyEventsInput, PatientSafetyEventsOutput
+from .caregiver_profile import CaregiverProfileInput, CaregiverProfileData, CaregiverProfileOutput
 
 
 class PatientProfileInput(AgentModel):

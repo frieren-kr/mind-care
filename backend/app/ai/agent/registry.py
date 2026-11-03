@@ -14,6 +14,7 @@ from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
 from .tools.recent_care_logs import RECENT_CARE_LOGS_DATA_POLICY
 from .tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from .tools.safety_events import PATIENT_SAFETY_EVENTS_DATA_POLICY
+from .tools.caregiver_profile import CAREGIVER_PROFILE_DATA_POLICY
 
 
 class ToolName(str, Enum):
@@ -24,6 +25,7 @@ class ToolName(str, Enum):
     PATIENT_MEDICAL_VISITS = "get_patient_medical_visits"
     PATIENT_ASSESSMENTS = "get_patient_assessments"
     PATIENT_SAFETY_EVENTS = "get_patient_safety_events"
+    CAREGIVER_PROFILE = "get_caregiver_profile"
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,14 @@ TOOL_CONTRACTS = {
                      "실시간 위치나 현재 실종·발견·해결 상태를 조회하는 Tool은 아니다.",
                      c.PatientSafetyEventsInput, c.PatientSafetyEventsOutput,
                      data_policy=PATIENT_SAFETY_EVENTS_DATA_POLICY, patient_scoped=True),
+        ToolContract(ToolName.CAREGIVER_PROFILE,
+                     "현재 인증된 간병인의 앱에 저장된 프로필을 읽기 전용으로 조회한다. "
+                     "등록된 관계 문자열, 돌봄 부담·기분 자가점검 점수, "
+                     "생활환경 태그 및 마지막 수정 시각을 반환한다. "
+                     "관계 문자열은 특정 환자와 연결된 정보가 아니며, "
+                     "환자의 상태나 간병인의 현재 임상 진단을 제공하지 않는다.",
+                     c.CaregiverProfileInput, c.CaregiverProfileOutput,
+                     data_policy=CAREGIVER_PROFILE_DATA_POLICY, patient_scoped=False),
     )
 }
 

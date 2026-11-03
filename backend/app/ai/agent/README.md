@@ -2125,3 +2125,36 @@ id/patient_id/created_at, limit, total_count, has_more, 페이지네이션은 �
 조회 실패를 events=[]로 숨기지 않는다. 자유 메모의 개인정보 자동 제거는 이 계약이 보장하지 않는다.
 대표 성공·빈 결과·매핑 누락은 MockTransport로 확인하며, 실제 달력 계산·DB·권한 및
 LLM의 사용자 표현→mode 선택 평가는 각각 향후 구현/실제 모델 평가에서 수행한다.
+
+## 간병인 프로필 Tool 계약
+
+`get_caregiver_profile`는 canonical 선언만 추가한다. 현재 운영 Handler·Adapter와 실행 가능한
+Registry 등록은 없으며 이 단계의 정상적인 미연결 상태다. Input은 추가 필드를 받지 않는 `{}`다.
+대상은 인증된 `AgentContext.user_id`이며 LLM이 사용자/환자 ID를 선택하지 않는다.
+`patient_scoped=False`는 환자 선택 없이 사용 가능하다는 뜻이고 인증·사용자 접근 권한 검증을 대신하지 않는다.
+
+Output은 필수 nullable `profile` 하나다. `profile=null`은 저장된 프로필이 없는 정상 조회 결과이며
+조회 실패를 나타내지 않는다. 프로필이 있으면 아래 다섯 필드가 모두 필수다.
+
+| 필드 | 타입 | 의미 |
+|---|---|---|
+| relationship | str 또는 null | 사용자 단위 관계 문자열. 현재 선택된 특정 환자와의 관계로 확정하지 않는다. |
+| burden_score | StrictInt 0~88 또는 null | 등록된 Zarit 자가점검 점수. 판본·시행 조건은 제공되지 않는다. |
+| mood_score | StrictInt 0~27 또는 null | 등록된 PHQ-9 자가점검 점수. 현재 우울증 진단이나 정신건강 상태를 확정하지 않는다. |
+| lifestyle_tags | list[str] | 저장된 생활환경 태그 원문. []를 허용한다. |
+| updated_at | AwareDatetime | 프로필 마지막 수정 시각. 점수의 실제 검사일이나 전체 정보 확인 시각이 아니다. |
+
+nullable 필드에 기본값을 두지 않으므로 명시적 null과 누락을 구분한다. 점수의 Boolean·문자열·실수·
+범위 밖 값은 거부하며 DB 값을 임의 보정하지 않는다. updated_at에는 시간대가 필요하다.
+내부 id/user_id/patient_id, 이메일·전화번호·계정 필드는 공개 DTO에 포함하지 않는다.
+관계·태그 원문은 재작성하지 않는다. 등록 정보와 현재 진술이 다르면 각각 구분하고 임의 정정하지 않는다.
+
+승인된 `CAREGIVER_PROFILE_DATA_POLICY` 전문은 ToolContract가 소유한다. Definition에는 기능 설명과
+빈 Input Schema만 제공하고 정상 실행·Output 검증 성공 후에만 기존 Runner 경로로 system 정책을
+요청당 한 번 등록한다. 정상 profile=null에도 정책을 전달하며 실패·미호출·다른 Tool만 성공한 경우에는
+전달하지 않는다. 문자열·태그는 비신뢰 데이터이고 정책으로 승격하지 않는다.
+
+후속 Handler·Adapter에서 `get_caregiver_profile(user_id)`를 참고해 인증된 사용자와 조회 대상을
+연결하고 권한 검증, 미등록/조회 실패 구분, 필수 필드 투영 및 원문 보존을 구현한다.
+Production Registry 등록, Chat의 Tool Selection·Dialogue Policy 및 초기 Context와의 중복 처리 규칙은
+별도 후속 작업이다. 이번 선언을 추가하기 위해 Runner·Executor·PromptBuilder·Workflow는 변경하지 않는다.
