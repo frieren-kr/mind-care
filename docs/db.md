@@ -26,6 +26,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `009_feed_items_cache.sql`(`feed_items`에 `batch_id`·`rank`·`category` + 인덱스 — AI 피드 저장본, 2026-10-15).
   + `010_user_feed_refresh_days.sql`(`users.feed_refresh_days`, 기본 3일, 1~7일 제약 + 진료·복약 날짜 무결성 트리거).
     사용자 요청으로 010에 트리거를 추가했으므로 기존 적용 DB도 재실행한다. 기존 갱신 주기는 유지하며, 상세 정책은 [`users.md`](users.md) 참고.
+  + `011_authentication.sql`(이메일 정규화 유일 인덱스, `user_credentials`, `auth_sessions`, `auth_refresh_tokens`).
+    기존 사용자의 인증 정보를 자동 생성하지 않는다. 이번 최소 로그인 구현은 자격 증명·세션만 사용한다.
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -37,6 +39,26 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
 - `backend/app/api/` — API 라우터. 기능별 파일(`papers.py` …)에 `router`를 두고 `main.py`에서 등록.
 
 ## 데이터 접근 계약
+
+### 인증 함수 (2026-11-02)
+
+호출 관문은 `app/db/functions.py`, 내부 구현은 `app/db/auth_functions.py`다.
+API·인증 서비스는 연결 객체나 SQL을 사용하지 않는다. 공개 응답 모델은 `app/auth_schemas.py`.
+
+| 함수 | 입력 | 반환 |
+|---|---|---|
+| `get_auth_credentials(email)` | 이메일 문자열, 기존 `normalize_email()` 정규화 | 내부 전용 `AuthCredential(user: AuthUser, password_hash, is_active)` 또는 None. 해시를 API 응답·로그로 내보내지 않음 |
+| `create_auth_session(user_id, session_id, *, password_hash, created_at, expires_at)` | UUID 2개, 검증에 사용한 해시, tz-aware 시각 | bool. 자격 증명 행을 잠가 해시·활성 상태·비밀번호 변경 시각을 재확인. 불일치/없는 계정이면 False, 성공 시 세션 저장·커밋 |
+| `get_auth_session_user(user_id, session_id, *, reference_time)` | UUID 2개, tz-aware 기준 시각 | `AuthUser` 또는 None. 소유·활성·폐기·만료·비밀번호 변경 검사. `created_at <= reference_time < expires_at`만 허용 |
+| `revoke_auth_session(user_id, session_id, *, reference_time)` | UUID 2개, tz-aware 폐기 시각 | None. 본인 세션만 폐기·커밋. 없는 세션/이미 폐기된 세션에도 성공 |
+
+DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 잘못된 비밀번호·빈 조회로 바꾸지 않는다.
+시각에 시간대가 없거나 세션 만료가 생성 시각 이하이면 쓰기 전에 ValueError.
+로그아웃 후 보호 요청은 거부된다. 이미 인증 검사를 통과해 실행 중인 요청을 취소하지는 않는다.
+갱신 토큰은 이번 범위에서 발급하지 않는다. 기존 011 파일은 수정하지 않았다.
+검증은 `python -m unittest tests.test_auth_db`. 적용·API 확인은 [`AUTH_CHECK.md`](../backend/AUTH_CHECK.md).
+
+### 기존 데이터 함수
 
 팀원이 이 함수들을 통해서만 DB에 접근한다. 테이블은 `backend/app/db/migrations/001_init.sql`,
 함수 입출력은 `backend/app/schemas.py`가 정본.

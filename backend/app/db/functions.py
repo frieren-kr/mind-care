@@ -17,6 +17,12 @@ from pgvector.psycopg import Vector
 from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
+from app.db.auth_functions import (
+    create_auth_session,
+    get_auth_credentials,
+    get_auth_session_user,
+    revoke_auth_session,
+)
 from app.schemas import (
     SUMMARY_TEXT_FIELDS,
     EMBEDDING_DIM,

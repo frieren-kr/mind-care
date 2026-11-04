@@ -16,7 +16,7 @@ AI 피드 저장 기간 (10/14 회의): AI 결과는 feed_items에 묶음으로 
 실행기를 다시 부르지 않고 저장본을 돌려준다. refresh=true면 기간과 상관없이 새로 만든다.
 검색 방식 결과는 저장하지 않는다.
 
-로그인이 아직 없어서 user_id를 경로로 받는다 (api/users.py와 같은 방식).
+라우터 공통 의존성이 로그인·본인 확인을 실행기 초기화와 데이터 조회보다 먼저 수행한다.
 """
 import logging
 from contextlib import suppress
@@ -42,6 +42,7 @@ from app.ai.retrieval.search import search_by_queries
 from app.api.evidence_grade import with_grades
 from app.api.search_terms import INTEREST_EN, STAGE_EN, SYMPTOM_EN, expand_interest, to_en
 from app.config import settings
+from app.auth.dependencies import require_user_access
 from app.db import functions, user_functions
 from app.db import feed_read
 from app.db.feed_read import get_feed_context_snapshot
@@ -51,7 +52,8 @@ from app.user_schemas import APP_TIMEZONE, DEFAULT_FEED_REFRESH_DAYS, PatientOut
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+router = APIRouter(prefix="/recommendations", tags=["recommendations"],
+                   dependencies=[Depends(require_user_access)])
 
 _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."

@@ -40,6 +40,7 @@ from app.feed_schemas import FeedBatch, FeedBatchItem, SavedFeedBatch
 from app.schemas import PaperDetailResponse
 from app.user_schemas import APP_TIMEZONE, FeedSettingsOut, PatientContext, UserProfileContext
 from main import app
+from tests.auth_helpers import allow_business_test_requests
 
 # 시드 스크립트(scripts/seed_dev_profiles.py)가 만드는 샘플 간병인 이메일.
 SEED_EMAIL_ONE_PATIENT = "dev-seed-1@example.com"   # 환자 1명
@@ -206,6 +207,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
     """Actual Handoff/HTTP/Production Stage 1 with mocked reads, no DB or RAG I/O."""
 
     def setUp(self):
+        allow_business_test_requests(self, app)
         from app.ai.agent.tests.test_feed_context_production_source import NOW, USER, P1, P2, patient, snapshot
         self.user, self.patient_ids = USER, (P1, P2)
         self.snapshot = snapshot
@@ -472,6 +474,7 @@ class FeedCacheTests(unittest.TestCase):
     T0 = datetime(2026, 10, 15, 9, 0, tzinfo=APP_TIMEZONE)
 
     def setUp(self):
+        allow_business_test_requests(self, app)
         self.user = uuid4()
         self.now = self.T0
         self.batches = []  # (user_id, FeedBatch)
@@ -609,6 +612,7 @@ class FeedCacheTests(unittest.TestCase):
 
 class EndpointTests(unittest.TestCase):
     def setUp(self):
+        allow_business_test_requests(self, app)
         # 모든 엔드포인트 테스트가 '환자 1명인 간병인'을 기본으로 쓴다.
         self.caregiver_one = seed_user_id(self, SEED_EMAIL_ONE_PATIENT, expected_patients=1)
         self.client = TestClient(app)

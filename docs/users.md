@@ -3,6 +3,21 @@
 > 담당: **김한슬**. 이 문서는 루트 `AGENTS.md`에 있던 문장을 그대로 옮긴 것이다 — 고칠 때는 담당자가 고친다.
 > API 주소 표는 [`api.md`](api.md), 피드 개인화 조회(`feed_read.py`, 박주현)는 [`db.md`](db.md).
 
+## 기존 계정 로그인 (2026-11-02)
+
+- `011_authentication.sql`의 `user_credentials`에 인증 정보가 연결된 기존 계정으로 로그인한다.
+  사용자·환자 관계는 유지한다. 인증 정보가 없는 계정이나 비활성 계정은 로그인할 수 없다.
+- `POST /auth/login`, `GET /auth/me`, `POST /auth/logout`을 제공한다.
+  `user.id`가 기존 개인화 경로의 `user_id`다. 회원가입·토큰 자동 갱신은 후속 범위다.
+- `/feed…`, `/recommendations`, 피드 설정 조회·수정은 로그인 및 본인 확인 뒤 실행한다.
+  토큰 누락·만료·폐기는 401, 다른 사용자 ID는 403, 본인 경로의 담당 외 환자는 404다.
+  아래 기존 404·422 설명은 인증·본인 확인을 통과한 요청 기준이다.
+- 세션은 기본 최대 15분이며 매 요청에서 활성 상태·만료·폐기·소유·비밀번호 변경 시각을 확인한다.
+  로그아웃은 현재 세션만 폐기한다. 이때 이미 발급된 토큰도 다음 요청부터 거부한다.
+- 공개 인증 모델은 `app/auth_schemas.py`, DB 관문은 `app/db/functions.py`의 인증 함수다.
+  상세 계약은 [`db.md`](db.md), 실행·프론트 연결 방법은 [`AUTH_CHECK.md`](../backend/AUTH_CHECK.md) 참고.
+- 검증: `python -m unittest tests.test_auth_security tests.test_auth_api tests.test_auth_db`.
+
 - 담당 테이블: `users`, `patient_profiles`, `caregiver_profiles`, `clinical_assessments`, `safety_events`, `medications`, `medical_visits`
 - `/feed…` 주소 3개(담당: 김한슬)는 **간병인·환자 정보 조회(피드·챗봇 개인화 입력용)**다. 이름은 feed지만
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.

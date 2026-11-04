@@ -5,21 +5,21 @@ GET /feed_user/{user_id}                     간병인 정보만 (이름 + 자�
 GET /feed_patient/{user_id}/{patient_id}     환자 한 명의 현재 상태 (이 간병인의 환자만)
 GET /feed/{user_id}                          간병인 + 담당 환자 전원 (AI 피드 함수 입력 형식 그대로)
 
-로그인이 아직 없어서 user_id를 경로로 받는다. 인증을 붙이면 토큰에서 꺼낸 user_id와
-경로의 user_id가 같은지(본인인지) 확인하도록 바꾼다.
+경로의 user_id와 로그인 사용자가 같은지 공통 의존성으로 먼저 확인한다.
 사용자 목록(user_functions.list_users)은 전체 회원 정보가 나오므로 API로 열지 않는다.
 응답에는 email / phone_number가 들어 있지 않다.
 """
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.auth.dependencies import require_user_access
 from app.db import user_functions
 from app.user_schemas import (
     CaregiverContext, FeedSettingsOut, FeedSettingsUpdate, PatientContext, UserProfileContext,
 )
 
-router = APIRouter(tags=["feed"])
+router = APIRouter(tags=["feed"], dependencies=[Depends(require_user_access)])
 
 _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."

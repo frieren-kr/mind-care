@@ -19,6 +19,7 @@ from app.api.users import router
 from app.api.recommendations import get_feed_cache_days
 from app.db import user_functions
 from app.db.connection import get_connection
+from tests.auth_helpers import allow_business_test_requests
 
 
 class MigrationDbCase(unittest.TestCase):
@@ -51,6 +52,7 @@ class MigrationDbCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
         app = FastAPI()
         app.include_router(router)
+        allow_business_test_requests(self, app)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
         self.url = f"/users/{self.user_id}/feed-settings"

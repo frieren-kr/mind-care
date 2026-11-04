@@ -3,6 +3,13 @@
 > 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`는 박주현, `users.py`는 김한슬).
 > 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), DB 함수 계약은 [`db.md`](db.md).
 
+**인증 추가 (2026-11-02)**: 기존 계정 로그인·내 정보·로그아웃 구현 완료.
+아래 `/feed…`, `/recommendations`, `/users/{user_id}/feed-settings`는 Bearer 토큰과 경로 본인 확인이 필요하다.
+미인증·만료·폐기 세션은 401, 다른 사용자 경로는 403, 본인 경로의 타인 환자는 404다.
+프론트는 아직 토큰을 보내지 않으므로 연결 전 개인화 요청은 401이다.
+설정·Swagger·프론트 계약·자동 테스트는 [`backend/AUTH_CHECK.md`](../backend/AUTH_CHECK.md) 참고.
+회원가입·갱신 토큰 API는 이번 최소 범위에 포함하지 않는다. 기본 최대 15분 후 재로그인한다.
+
 **프론트 연결 상태 (2026-10-24)**: 피드(/recommendations), 논문 상세(/papers/{paper_id}), 내 정보(/feed/{user_id}), 피드 갱신 주기(PATCH /users/{user_id}/feed-settings) API 연결 완료. 검색 모드 기준으로 응답 형식 확인, AI 모드 화면(personal_reason·category)은 AI 연결 후 확인 예정.
 개발 환경(`APP_ENV=development`)에서만 `backend/main.py`가 CORS를 허용한다 (출처 `http://localhost:8081`·`http://127.0.0.1:8081`, 웹 화면 테스트용).
 
@@ -14,6 +21,9 @@
 
 | 주소 | 파일 | 설명 | 응답 |
 |---|---|---|---|
+| `POST /auth/login` | `api/auth.py` | JSON 이메일·비밀번호로 기존 계정 로그인 | `LoginOut` (`access_token`, `token_type`, `expires_in`, `expires_at`, `user`) |
+| `GET /auth/me` | `api/auth.py` | Bearer 토큰·DB 세션으로 현재 사용자 확인 | `AuthUser` (`id`, `name`, `email`, `feed_refresh_days`) |
+| `POST /auth/logout` | `api/auth.py` | Bearer 토큰으로 현재 세션 폐기. 본문 없음. 유효기간 내 같은 토큰 반복 호출 가능 | `{ok: true}` |
 | `GET /health` | `main.py` | 헬스 체크 | `{status, env}` |
 | `GET /papers?limit=20&offset=0` | `api/papers.py` | 논문 목록, 최신 발행일 순. `limit` 1~100(기본 20), `offset` 0 이상. 범위를 벗어나면 422 | `PaperListResponse` |
 | `GET /papers/{paper_id}` | `api/papers.py` | 논문 상세 + 요약 3칸. 없는 id는 404, UUID 형식이 아니면 422 | `PaperDetailResponse` |
