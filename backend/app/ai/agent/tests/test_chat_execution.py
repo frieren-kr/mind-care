@@ -89,6 +89,8 @@ class ChatExecutionTests(unittest.TestCase):
         runner, prepared, context = run.call_args.args
         self.assertIs(type(runner), AgentLoopRunner)
         self.assertEqual((runner.max_tool_rounds, runner.max_total_tool_calls), (5, 10))
+        self.assertTrue(runner.allow_parallel_tools)
+        self.assertEqual(runner.max_parallel_calls,3)
         self.assertIs(runner.registry, runner.executor.registry)
         self.assertIsInstance(runner.prompt_builder, ChatPromptBuilder)
         self.assertIs(run.call_args.kwargs["output_model"], ChatAnswerV1)
@@ -109,7 +111,7 @@ class ChatExecutionTests(unittest.TestCase):
             for context in contexts:
                 self.execute(deps, context)
                 runners.append(run.call_args.args[0])
-        names = lambda index: [d["function"]["name"] for d in deps.client.requests[index][1]]
+        names = lambda index: [d["name"] for d in deps.client.requests[index][1]]
         self.assertEqual(names(0), [n.value for n in ToolName])
         self.assertEqual(names(1), [ToolName.SEARCH_EVIDENCE.value])
         self.assertEqual(names(2), names(0))

@@ -23,11 +23,11 @@ class ToolContract:
     output_model: type[BaseModel]
 
     def definition(self) -> dict[str, Any]:
-        return {"type": "function", "function": {
+        return {"type": "function", "strict": False,
             "name": self.name.value,
             "description": self.description,
             "parameters": self.input_model.model_json_schema(),
-        }}
+        }
 
 
 TOOL_CONTRACTS = {
@@ -94,6 +94,9 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolSpec | None:
         return self._specs.get(name)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(self._specs)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [spec.contract.definition() for spec in self._specs.values()]

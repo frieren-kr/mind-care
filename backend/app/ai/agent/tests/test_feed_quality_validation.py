@@ -80,7 +80,7 @@ class FeedQualityValidationTests(unittest.TestCase):
                 packages = {QUERIES[t]: topic_package(t) for t in topics}
                 client = FakeLLMClient([ModelTurn(tool_calls=[ToolCall(id=str(i), name='search_evidence',
                     arguments={'query': QUERIES[t]}) for i, t in enumerate(topics)]),
-                    ModelTurn(text=json.dumps(decisions(5, range(5))))])
+                    ModelTurn(text=json.dumps(decisions(min(len(topics)*8, 10), range(5))))])
                 symptoms = [t for t in topics if t != 'support']
                 patients = ([{'patient_ref': f'p{i+1}', 'symptoms': [t]} for i, t in enumerate(symptoms)]
                             if name == 'multiple_patients' else [{'patient_ref': 'p1', 'symptoms': symptoms}])
@@ -93,7 +93,7 @@ class FeedQualityValidationTests(unittest.TestCase):
                 self.assertFalse(any(s.pmid.startswith('indirect:') for s in result.sources))
                 self.assertEqual(len(result.output.items), 5)
                 projection = json.loads(client.requests[1][0][-1].content)
-                self.assertEqual(projection['candidate_count'], 5)
+                self.assertEqual(projection['candidate_count'], min(len(topics)*8, 10))
                 self.assertEqual(next(m.content for m in client.requests[0][0] if m.role == 'user'), prepared)
                 for t in topics:
                     if t != 'support': self.assertNotIn('caregiver', QUERIES[t])
@@ -103,7 +103,7 @@ class FeedQualityValidationTests(unittest.TestCase):
         for name, packages in cohort().items():
             table = FeedCandidates()
             for call_id, source in packages.items(): table.add(call_id, source)
-            output, refs = table.finalize(json.dumps(decisions(table.count, range(table.count))), packages)
+            output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), packages)
             actual = [r.pmid for r in refs]
             baseline = [packages[c].evidence[i].pmid for c, i in relevance_baseline(packages)]
             changes[name] = (actual, baseline)

@@ -12,7 +12,7 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceSearchInput
 from ..workflows.feed_execution import FeedExecutionV1
-from .test_feed_candidates import decisions, package
+from .test_feed_candidates import decisions, package, review_turn
 from . import test_parallel_feed as parallel
 from .test_parallel_feed import calls, registry
 from .test_workflows import CONTEXT
@@ -25,7 +25,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         table = FeedCandidates()
         for call_id, source in packages.items():
             table.add(call_id, source)
-        output, refs = table.finalize(json.dumps(decisions(table.count, range(table.count))), packages)
+        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), packages)
         return table, output, refs
 
     def test_one_two_three_queries_retrieve_eight_sixteen_twenty_four_in_parallel(self):
@@ -38,7 +38,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
                     barrier.wait(2)
                     return package([f'{args.query}-{i}' for i in range(args.top_k)])
                 client = FakeLLMClient([ModelTurn(tool_calls=calls(count)),
-                    ModelTurn(text=json.dumps(decisions(5, range(5))))])
+                    ModelTurn(text=json.dumps(decisions(min(count*8, 10), range(5))))])
                 result = FeedExecutionV1(client, registry(handler))(CONTEXT, '{}')
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertCountEqual(searched, [(f'topic {i}', 8) for i in range(count)])
@@ -46,14 +46,14 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
                 self.assertEqual(result.execution.total_tool_calls, count)
                 self.assertEqual(len(client.requests), 2)
                 projection = json.loads(client.requests[1][0][-1].content)
-                self.assertEqual(projection['candidate_count'], 5)
+                self.assertEqual(projection['candidate_count'], min(count*8, 10))
                 self.assertEqual(len(result.output.items), 5)
-                # All 8/16/24 originals are retained internally, only 5 project.
+                # All 8/16/24 originals stay internal; only 8/10/10 are projected.
                 for source in result.sources:
                     query = f'topic {source.source_ref.tool_call_id[-1]}'
                     self.assertEqual(source.pmid, f'{query}-{source.source_ref.evidence_index}')
                 serialized = json.dumps([m.model_dump(mode='json') for m in client.requests[1][0]])
-                self.assertNotIn('Synthetic paper 7', serialized)
+                self.assertEqual(sum(len(json.loads(m.content)['candidates']) for m in client.requests[1][0] if m.kind == 'evidence'), min(count*8, 10))
 
     def test_default_is_feed_only_and_query_ids_arguments_are_not_mutated(self):
         original = calls(1)[0]
@@ -87,8 +87,9 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         turns = []
         for i in range(3):
             call = calls(1)[0].model_copy(update={'id': str(i), 'arguments': {'query': f'topic {i}'}})
-            turns.append(ModelTurn(tool_calls=[call]))
-        turns.append(ModelTurn(text=json.dumps(decisions(5, range(5)))))
+            turn = ModelTurn(tool_calls=[call])
+            turns.append(review_turn(turn, i) if i else turn)
+        turns.append(ModelTurn(text=json.dumps(decisions(8, range(5)))))
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, registry(
             lambda c, a: package([f'{a.query}-{i}' for i in range(a.top_k)])))(CONTEXT, '{}')
@@ -98,10 +99,10 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         self.assertEqual(client.options[-1].tool_choice, 'none')
 
     def test_retrieval_budget_cannot_reset_on_followup_even_with_larger_generic_runner_limits(self):
-        # Defense in depth: shared Runner defaults can exceed Feed's 3-call
-        # wrapper, but cannot make its Feed-only retrieval budget exceed 24.
+        # A generic Runner cannot exceed the Feed-specific three-round cap.
         turns = [ModelTurn(tool_calls=[ToolCall(id=str(i), name='search_evidence',
             arguments={'query': f'topic {i}'})]) for i in range(4)]
+        turns = [review_turn(turn, i) if i else turn for i, turn in enumerate(turns)]
         searched = []
         def handler(context, args):
             searched.append(args.top_k)

@@ -123,14 +123,14 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 | `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
 | `save_feed_batch(user_id, items: list[FeedItemIn])` | AI 피드 한 묶음 (`paper_id, personal_reason?, category?, relevance_score?`). 목록 순서대로 `rank` 1부터. **트랜잭션 하나** — 없는 사용자·논문이 있으면 `ValueError`, 아무것도 저장 안 됨. 빈 목록도 `ValueError` | `SavedFeedBatch(batch_id, generated_at)` |
 | `get_latest_feed_batch(user_id, *, max_age: timedelta, reference_time)` | `reference_time`은 **tz-aware**. `created_at > reference_time - max_age`인 가장 최근 묶음 | `FeedBatch(batch_id, generated_at, items)` — items는 `rank` 순, 항목마다 `personal_reason, category, relevance_score, is_saved, paper: PaperDetailResponse`. 없으면 `None` |
-| `get_recent_feed_papers(user_id, *, days=30, limit=50, reference_time=None)` | 읽기 전용. 기간은 `(reference_time - days, reference_time]` — 미래 시각의 행은 빠진다. `reference_time`은 **tz-aware**, `None`이면 지금. `days`·`limit`은 1 이상 정수(아니면 `ValueError`) | `list[FeedRecentPaper(paper_id, pmid?, title, last_recommended_at, times_recommended)]` — **논문별로 묶음**(같은 논문이 여러 묶음에 있어도 1개), 최근 추천 순, 최대 `limit`개. `pmid`는 `source='pubmed'`일 때만 값(아니면 `None`). 이력 없음·없는 사용자는 `[]` |
+| `get_recent_feed_papers(user_id, *, days=7, limit=50, reference_time=None)` | 읽기 전용. 기간은 `(reference_time - days, reference_time]` — 미래 시각의 행은 빠진다. `reference_time`은 **tz-aware**, `None`이면 지금. `days`·`limit`은 1 이상 정수(아니면 `ValueError`) | `list[FeedRecentPaper(paper_id, pmid?, title, last_recommended_at, times_recommended)]` — **논문별로 묶음**(같은 논문이 여러 묶음에 있어도 1개), 최근 추천 순, 최대 `limit`개. `pmid`는 `source='pubmed'`일 때만 값(아니면 `None`). 이력 없음·없는 사용자는 `[]` |
 
 **`get_recent_feed_papers()` 사용 예시** (Feed Agent가 같은 논문을 반복 추천하지 않게):
 
 ```python
 from app.db.feed_read import get_recent_feed_papers
 
-recent = get_recent_feed_papers(user_id, days=30, reference_time=reference_time)  # 피드와 같은 기준 시각
+recent = get_recent_feed_papers(user_id, reference_time=reference_time)  # 기본 7일·50편  # 피드와 같은 기준 시각
 
 # (a) Agent 입력(1단계 context)에 넣는다 — LLM이 "이미 추천한 논문"을 알게
 context["recently_recommended"] = [
@@ -284,7 +284,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   | 방문 | 지난 진료(`is_visited = true` AND `visit_date` ∈ `[reference_date - 365일, reference_date]`) **또는** 예정 진료(`is_visited = false` AND `visit_date` ∈ `[reference_date, reference_date + 90일]`) | `visit_date DESC, created_at DESC, id` | 환자당 20 |
   | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
   | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
-  | 최근 추천 (`recently_recommended`, 2026-10-26) | 이 사용자의 `feed_items.created_at` ∈ `(reference_time - 30일, reference_time]`, **논문별로 묶음**. `get_recent_feed_papers()`와 같은 SQL을 **같은 트랜잭션**에서 실행 | `last_recommended_at DESC, paper_id` | 50편 (`total_count` 없음, 없으면 `[]`) |
+  | 최근 추천 (`recently_recommended`, 2026-10-26) | 이 사용자의 `feed_items.created_at` ∈ `(reference_time - 7일, reference_time]`, **논문별로 묶음**. `get_recent_feed_papers()`와 같은 SQL을 **같은 트랜잭션**에서 실행 | `last_recommended_at DESC, paper_id` | 50편 (`total_count` 없음, 없으면 `[]`) |
 - **안전 이벤트: 플래그가 전부 false인 날(= 확인했고 사건 없음)은 적격이 아니다** (`total_count`에도 안 들어간다).
 - **★ 조건 변경 (2026-10-13) — 진료·복약은 상태와 날짜가 맞는 기록만 적격이다.** 허웅 님
   `ProductionFeedContextSource`는 아래 조합이 하나라도 오면 **스냅샷 전체를 거부**한다. 그래서 조회와
@@ -384,6 +384,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   python -m scripts.update_papers --only summarize --retry-skipped    # 요약 3번 실패해 건너뛰던 논문도 다시 시도
   ```
   그 밖의 옵션: `--days-back`(수집 기간, 기본 7일 — cron 주기보다 길게), `--max-results`(수집 최대, 기본 100), `--lock-file`.
+  지난 기간 채우기: `--from-date YYYY-MM-DD --to-date YYYY-MM-DD`(둘 다 주면 `--days-back` 대신, 한 달씩 전부 받아 달마다 저장. `--max-results`는 안 씀). 서버 명령·예상 시간은 [`deploy.md`](deploy.md) 9절.
 - 요약 실패 논문은 저장되지 않아 다음 실행 때 다시 시도되지만, 실패 횟수를 상태 파일(`--state-file`, 기본은 `--log-file`과 같은 폴더의 `update_papers_state.json`)에 논문 id별로 적어 **3번 실패하면 다음 실행부터 건너뛴다**(로그에 "건너뜀 n건 (PMID 목록)", 종료 코드 1의 원인 아님). 상태 파일이 없거나 깨지면 새로 시작하고, `--dry-run`은 기록하지 않는다.
 - **자동 실행: AWS 서버(EC2 1대)에서 cron으로 실행 예정.** 예: `0 3 * * 1 cd /path/backend && .venv/bin/python -m scripts.update_papers --log-file logs/update_papers.log`
 - 테스트: `python -m unittest tests.test_update_papers` (가짜 단계·가짜 모델, DB 불필요).

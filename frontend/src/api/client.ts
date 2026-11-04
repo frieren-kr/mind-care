@@ -17,7 +17,7 @@ export function toApiError(error: unknown): ApiError {
 }
 
 type RequestOptions = {
-  method?: 'GET' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH';
   query?: Record<string, string | number | boolean | null | undefined>;
   body?: unknown;
   /** 첫 추천 요청은 임베딩 모델을 불러오느라 오래 걸려서 넉넉하게 둔다 */
@@ -35,7 +35,14 @@ function buildUrl(path: string, query: RequestOptions['query']): string {
 async function errorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json();
+    // 서버에 아직 없는 주소 (FastAPI 기본 응답) — 백엔드 API가 만들어지기 전
+    if (body?.detail === 'Not Found' || body?.detail === 'Method Not Allowed') {
+      return '서버에 아직 이 기능이 없어요. 백엔드 API가 준비되면 사용할 수 있어요.';
+    }
     if (typeof body?.detail === 'string') return body.detail;
+    // 입력 검증 실패(422): 첫 번째 이유를 보여 준다 (백엔드 검증 문구는 한국어)
+    const first = Array.isArray(body?.detail) ? body.detail[0]?.msg : null;
+    if (typeof first === 'string') return first.replace(/^Value error, /, '');
   } catch {
     // 본문이 JSON이 아니면 상태 코드로 안내한다
   }

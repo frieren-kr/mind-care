@@ -304,7 +304,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
 
     def assert_configured_dependency_returns_ai(self):
         import httpx
-        from app.ai.agent.tests.test_openai_client import completion
+        from app.ai.agent.tests.test_openai_client import response_fixture
         from app.ai.agent.tests.test_feed_execution import final_turn
 
         requests = []
@@ -312,15 +312,14 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         def transport(request):
             requests.append(json.loads(request.content))
             if len(requests) == 1:
-                return httpx.Response(200, json=completion({
-                    "role": "assistant", "content": None, "tool_calls": [{
-                        "id": "search_1", "type": "function", "function": {
-                            "name": "search_evidence",
-                            "arguments": json.dumps({"query": "Dementia sleep research"}),
-                        },
+                return httpx.Response(200, json=response_fixture({
+                    "calls": [{
+                        "id": "item_search_1", "call_id": "search_1", "type": "function_call",
+                        "name": "search_evidence", "status": "completed",
+                        "arguments": json.dumps({"query": "Dementia sleep research"}),
                     }],
-                }, "tool_calls"))
-            return httpx.Response(200, json=completion({"role": "assistant", "content": final_turn().text}))
+                }))
+            return httpx.Response(200, json=response_fixture({"text": final_turn().text}))
 
         self.use_real_dependency_with_mock_provider(transport)
         with patch("app.ai.retrieval.search.search", return_value=self.search.return_value) as rag, \
@@ -335,7 +334,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertEqual(body["items"][0]["title"], "DB title 0")
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(r["model"] == "gpt-5.6-luna" for r in requests))
-        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["search_evidence"])
+        self.assertEqual([t["name"] for t in requests[0]["tools"]], ["search_evidence"])
         rag.assert_called_once_with(query="Dementia sleep research", k=8)
         save.assert_called_once()
         self.search.assert_not_called()

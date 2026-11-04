@@ -20,7 +20,7 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..workflows.feed_execution import FeedExecutionV1
 from .test_feed_candidates import decisions, package
-from .test_openai_client import completion
+from .test_openai_client import response_fixture
 from .test_workflows import CONTEXT
 
 
@@ -42,7 +42,7 @@ class ParallelFeedTests(unittest.TestCase):
 
     def run_feed(self, handler, count=3, *, safe=True, **options):
         client = FakeLLMClient([ModelTurn(tool_calls=calls(count)),
-                                ModelTurn(text=json.dumps(decisions(5, range(5))))])
+                                ModelTurn(text=json.dumps(decisions(min(count*8, 10), range(5))))])
         execution = FeedExecutionV1(client, registry(handler, safe), **options)
         result = execution(CONTEXT, '{"patients":[]}')
         return result, client
@@ -76,8 +76,8 @@ class ParallelFeedTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources], ['0-0', '1-0', '2-0', '0-1', '1-1'])
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources],
                          [('opaque_0', 0), ('opaque_1', 0), ('opaque_2', 0), ('opaque_0', 1), ('opaque_1', 1)])
-        tool_messages = [m for m in client.requests[1][0] if m.role == 'tool']
-        self.assertEqual([m.tool_call_id for m in tool_messages], [f'opaque_{i}' for i in range(3)])
+        tool_messages = [m for m in client.requests[1][0] if m.type == "function_call_output"]
+        self.assertEqual([m.call_id for m in tool_messages], [f'opaque_{i}' for i in range(3)])
         self.assertEqual([t.result_count for t in result.execution.called_tools], [8, 8, 8])
         self.assertTrue(all(c[0] == CONTEXT.request_id and c[1] == 'request-local' and c[2] for c in contexts))
 
@@ -198,18 +198,19 @@ class ParallelFeedTests(unittest.TestCase):
         result = AgentLoopRunner(client, registry(handler)).run('Synthetic', CONTEXT)
         self.assertEqual(result.status, 'completed')
         self.assertEqual(order, [f'topic {i}' for i in range(3)])
-        self.assertEqual(client.options, [None, None])
+        self.assertEqual([o.tool_choice for o in client.options], ["auto", "auto"])
+        self.assertTrue(all(o.parallel_tool_calls is None for o in client.options))
 
     def test_round_robin_dedup_no_scores_and_followup_rebuild(self):
         table, source = FeedCandidates(), {}
         for call_id, pmids in [('A',[None,'same','a','b','c','d']), ('B',['same','x','y']), ('C',['z'])]:
             source[call_id] = package(pmids)
             table.add(call_id, source[call_id])
-        result, refs = table.finalize(json.dumps(decisions(5, range(5))), source)
+        result, refs = table.finalize(json.dumps(decisions(8, range(5))), source)
         self.assertEqual([s.pmid for s in refs], ['same','z','a','x','b'])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in result.items],
                          [('A',1),('C',0),('A',2),('B',1),('A',3)])
-        self.assertEqual(json.loads(table.message().content)['candidate_count'], 5)
+        self.assertEqual(json.loads(table.message().content)['candidate_count'], 8)
 
     def test_registry_marks_only_explicit_production_search_parallel_safe(self):
         self.assertTrue(build_evidence_registry().get('search_evidence').parallel_safe)
@@ -222,10 +223,8 @@ class ParallelFeedTests(unittest.TestCase):
         def transport(request):
             wire.append(json.loads(request.content))
             if len(wire) == 1:
-                return httpx.Response(200,json=completion({'role':'assistant','content':None,'tool_calls':[
-                    {'id':c.id,'type':'function','function':{'name':c.name,'arguments':json.dumps(c.arguments)}}
-                    for c in calls(3)]}, 'tool_calls'))
-            return httpx.Response(200,json=completion({'role':'assistant','content':json.dumps(decisions(5,range(5)))}))
+                return httpx.Response(200,json=response_fixture({'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + c.id, 'call_id': c.id, 'name': c.name, 'arguments': json.dumps(c.arguments), 'status': 'completed'} for c in calls(3)]}))
+            return httpx.Response(200,json=response_fixture({'text': json.dumps(decisions(10, range(5)))}))
         sdk = OpenAI(api_key='offline-placeholder',http_client=httpx.Client(transport=httpx.MockTransport(transport)))
         self.addCleanup(sdk.close)
         def handler(context,args):
@@ -236,11 +235,11 @@ class ParallelFeedTests(unittest.TestCase):
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(len(wire), 2)
         self.assertEqual(wire[0]['tool_choice'], 'required')
-        self.assertEqual(wire[1]['tool_choice'], 'none')
-        self.assertTrue(all(w['parallel_tool_calls'] and w['reasoning_effort']=='none' for w in wire))
+        self.assertEqual(wire[1]['tool_choice'], 'auto')
+        self.assertTrue(all(w['parallel_tool_calls'] and 'reasoning' not in w for w in wire))
         self.assertEqual(sorted(top_k), [('topic 0',8),('topic 1',8),('topic 2',8)])
-        self.assertNotIn('FeedDecisionDraft', str(wire[0]['messages']))
-        self.assertEqual(sum('"untrusted_feed_candidates"' in (m.get('content') or '') for m in wire[1]['messages']),1)
+        self.assertNotIn('FeedDecisionDraft', str(wire[0]['input']))
+        self.assertEqual(sum('"untrusted_feed_candidates"' in (m.get('content') or '') for m in wire[1]['input']),1)
 
     def test_resource_admission_respects_deadline_without_starting_a_worker(self):
         from threading import BoundedSemaphore

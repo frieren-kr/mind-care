@@ -134,10 +134,10 @@ class RecentlyRecommendedTests(FeedReadTestBase):
         self.assertEqual(snapshot(self.user_id).recently_recommended, [])
 
     def test_recent_papers_are_included_in_order(self):
-        self._recommend(self.papers[0], 10)
+        self._recommend(self.papers[0], 6)
         self._recommend(self.papers[1], 2)
         self._recommend(self.papers[0], 5)
-        self._recommend(self.papers[1], 31)   # 기간 밖
+        self._recommend(self.papers[1], 7)    # 경계: 기간 밖
         self._recommend(self.papers[0], -1)   # 미래
         recent = snapshot(self.user_id).recently_recommended
         self.assertEqual([(r.paper_id, r.times_recommended) for r in recent],
@@ -696,12 +696,13 @@ class SourceDtoCompatibilityTests(FeedReadTestBase):
                 [pick(r, s.SourceCareLog) for r in snap.recent_care_logs.items],
                 snap.recent_care_logs.total_count),
             long_term_summary=pick(snap.long_term_summary, s.SourceLongTermSummary),
+            recently_recommended=[pick(r, s.SourceRecentFeedPaper) for r in snap.recently_recommended],
         )
 
         # Loader가 하는 재검증 + 불변식 검사를 그대로 통과해야 한다.
         revalidated = s.FeedContextSourceSnapshot.model_validate(source_snapshot)
         from app.ai.agent.workflows.feed_context_loader import _validate_source_invariants
-        _validate_source_invariants(revalidated, self.user_id)
+        _validate_source_invariants(revalidated, self.user_id, REFERENCE_TIME)
 
         self.assertEqual(revalidated.managed_patients.total_count, 1)
         self.assertEqual(len(revalidated.recent_care_logs.items), 2)

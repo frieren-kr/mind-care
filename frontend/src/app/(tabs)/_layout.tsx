@@ -1,7 +1,9 @@
 import { Tabs } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import type { ColorValue } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { FontFamily, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 // 아이콘: iOS는 SF Symbols, Android·웹은 Material Symbols 이름
@@ -12,16 +14,24 @@ const TabIcon = (name: SymbolViewProps['name']) =>
 
 export default function TabLayout() {
   const theme = useTheme();
+  const insets = useSafeAreaInsets();
   return (
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: theme.primary,
         tabBarInactiveTintColor: theme.textSecondary,
-        tabBarLabelStyle: { fontSize: 13, fontWeight: '700' },
-        tabBarStyle: { backgroundColor: theme.backgroundElement },
+        tabBarLabelStyle: { fontSize: 13, lineHeight: 18, fontFamily: FontFamily.bold },
+        // 기본 높이에는 26px 아이콘 + 13px 글자가 다 들어가지 않아 글자 아래쪽이 잘린다.
+        // 높이를 직접 주면 하단 시스템 영역(insets.bottom)이 빠지므로 같이 더한다
+        tabBarStyle: {
+          backgroundColor: theme.backgroundElement,
+          height: 64 + insets.bottom,
+          paddingTop: Spacing.one,
+          paddingBottom: Spacing.two + insets.bottom,
+        },
         headerStyle: { backgroundColor: theme.backgroundElement },
         headerTintColor: theme.text,
-        headerTitleStyle: { fontSize: 20, fontWeight: '700' },
+        headerTitleStyle: { fontSize: 20, fontFamily: FontFamily.bold },
       }}>
       <Tabs.Screen
         name="index"

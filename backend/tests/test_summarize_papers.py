@@ -209,24 +209,34 @@ class SummarizePapersTest(unittest.TestCase):
         # 초록에 없는 영어 이름(LLM이 지어낸 것)은 검사하지 않는다.
         self.assertEqual(problems("배경", "아우벨리티는 줄였습니다.", [Drug(ko="아우벨리티", en="Madeupname")]), [])
 
-    def test_missing_drug_english_triggers_regeneration(self):
+    def test_missing_drug_english_is_fixed_without_regeneration(self):
         paper_id = self.paper_id
         papers = [(paper_id, "Auvelity for agitation", "BACKGROUND: Auvelity ...")]
         drugs = [{"ko": "아우벨리티", "en": "Auvelity"}]
         bad = json.dumps({**GOOD, "summary_finding": "아우벨리티는 증상을 줄였습니다.", "drugs": drugs})
-        good = json.dumps({**GOOD, "summary_finding": "아우벨리티(Auvelity)는 증상을 줄였습니다.", "drugs": drugs})
 
-        client = FakeClient(bad, then=good)
-        report = run(papers, client, "fake-model")
+        client = FakeClient(bad)
+        with self.assertLogs("summarize_papers", "INFO") as logs:
+            report = run(papers, client, "fake-model")
 
-        self.assertEqual((client.calls, len(report.done), report.failed), (2, 1, []))
-        self.assertIn("약 이름 영어 괄호", report.regenerated[0][1][0])
-        markdown = summarize_papers.to_markdown(report, "fake-model")
-        self.assertIn("약 이름 영어 괄호 검사: 걸린 논문 1편 [1], 재생성 1회, 재생성 뒤에도 걸려 최종 실패 0편", markdown)
-        self.assertIn("금지 단어 검사: 걸린 논문 0편", markdown)
+        self.assertEqual((client.calls, len(report.done), report.failed, report.regenerated), (1, 1, [], []))
+        self.assertIn("약 이름 괄호 자동 보정: 아우벨리티(Auvelity)", logs.output[0])
+        self.assertIn("약 이름 영어 괄호 검사: 걸린 논문 0편", summarize_papers.to_markdown(report, "fake-model"))
         self.assertEqual(
             functions.get_paper_detail(paper_id).summary_finding, "아우벨리티(Auvelity)는 증상을 줄였습니다."
         )
+
+    def test_other_problems_still_rejected_after_drug_fix(self):
+        papers = [(self.paper_id, "Auvelity for agitation", "BACKGROUND: Auvelity ...")]
+        bad = json.dumps({**GOOD, "summary_finding": "아우벨리티는 차이가 있었습니다(p < 0.05).",
+                          "drugs": [{"ko": "아우벨리티", "en": "Auvelity"}]})
+
+        report = run(papers, FakeClient(bad), "fake-model")
+
+        self.assertEqual(report.done, [])
+        self.assertIn("통계 표기", report.failed[0][2])
+        self.assertNotIn("약 이름 영어 괄호", report.failed[0][2])
+        self.assertIsNone(functions.get_paper_detail(self.paper_id).summary_finding)
 
     def test_flagged_summary_is_regenerated_once(self):
         bad = json.dumps({**GOOD, "summary_finding": "차이가 있었습니다(p < 0.05)."})
@@ -305,6 +315,47 @@ class SummarizePapersTest(unittest.TestCase):
         saved = functions.get_paper_detail(self.paper_id)
         self.assertEqual((saved.study_type, saved.evidence_level), ("rct", "2"))
         self.assertEqual(saved.summary_finding, "발견")
+
+
+class FixDrugEnglishTest(unittest.TestCase):
+    """fix_drug_english(): 영어 괄호가 빠진 약 이름의 첫 등장 뒤에 "(영어)"를 붙인다 (DB 없이)."""
+
+    SOURCE = "Brexpiprazole and donepezil for agitation in Alzheimer's disease"
+    DRUGS = [Drug(ko="브렉스피프라졸", en="brexpiprazole"), Drug(ko="도네페질", en="donepezil")]
+
+    def fix(self, background, finding, drugs=DRUGS):
+        summary = Summary(**{**GOOD, "summary_background": background, "summary_finding": finding})
+        return summarize_papers.fix_drug_english(summary, drugs, self.SOURCE)
+
+    def test_fixes_one(self):
+        fixed, notes = self.fix("배경", "브렉스피프라졸은 증상을 줄였고, 브렉스피프라졸을 오래 썼습니다.", self.DRUGS[:1])
+        self.assertEqual(fixed.summary_finding, "브렉스피프라졸(brexpiprazole)은 증상을 줄였고, 브렉스피프라졸을 오래 썼습니다.")
+        self.assertEqual(notes, ["브렉스피프라졸(brexpiprazole)"])
+        self.assertEqual(check(fixed, self.DRUGS[:1], self.SOURCE), [])
+
+    def test_fixes_several_at_first_mention_across_sections(self):
+        fixed, notes = self.fix("도네페질을 쓰는 환자가 많습니다.", "브렉스피프라졸과 도네페질을 비교했습니다.")
+        self.assertEqual(fixed.summary_background, "도네페질(donepezil)을 쓰는 환자가 많습니다.")
+        self.assertEqual(fixed.summary_finding, "브렉스피프라졸(brexpiprazole)과 도네페질을 비교했습니다.")
+        self.assertEqual(sorted(notes), ["도네페질(donepezil)", "브렉스피프라졸(brexpiprazole)"])
+        self.assertEqual(check(fixed, self.DRUGS, self.SOURCE), [])
+
+    def test_leaves_existing_parentheses_alone(self):
+        summary = Summary(**{**GOOD, "summary_finding": "브렉스피프라졸(brexpiprazole)과 도네페질 (donepezil)을 썼습니다."})
+        fixed, notes = summarize_papers.fix_drug_english(summary, self.DRUGS, self.SOURCE)
+        self.assertIs(fixed, summary)
+        self.assertEqual(notes, [])
+
+    def test_other_parenthesis_is_not_touched_and_still_flagged(self):
+        fixed, notes = self.fix("배경", "브렉스피프라졸(새 약)을 썼습니다.", self.DRUGS[:1])
+        self.assertEqual((fixed.summary_finding, notes), ("브렉스피프라졸(새 약)을 썼습니다.", []))
+        self.assertIn("약 이름 영어 괄호 빠짐", check(fixed, self.DRUGS[:1], self.SOURCE)[0])
+
+    def test_other_checks_unchanged(self):
+        fixed, _ = self.fix("배경", "브렉스피프라졸은 차이가 있었습니다(p < 0.05).", self.DRUGS[:1])
+        problems = check(fixed, self.DRUGS[:1], self.SOURCE)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("통계 표기", problems[0])
 
 
 if __name__ == "__main__":

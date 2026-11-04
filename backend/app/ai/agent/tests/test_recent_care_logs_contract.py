@@ -32,7 +32,7 @@ class RecentCareLogsContractTests(TestCase):
         schema = c.RecentCareLogsInput.model_json_schema()
         self.assertEqual(set(schema["properties"]), {"days", "limit"})
         self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS].definition()["function"]["parameters"], schema)
+        self.assertEqual(TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS].definition()["parameters"], schema)
         for field, default, maximum in (("days", 14, 90), ("limit", 10, 30)):
             self.assertEqual(schema["properties"][field]["type"], "integer")
             self.assertEqual(schema["properties"][field]["default"], default)

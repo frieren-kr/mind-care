@@ -94,6 +94,10 @@ def _project_read_snapshot(raw: FeedReadSnapshot) -> s.FeedContextSourceSnapshot
         ),
         managed_patients=_read_collection(raw.managed_patients, _read_patient),
         recent_care_logs=_read_collection(raw.recent_care_logs, _read_log),
+        recently_recommended=[s.SourceRecentFeedPaper(
+            paper_id=row.paper_id, pmid=row.pmid, title=row.title,
+            last_recommended_at=row.last_recommended_at, times_recommended=row.times_recommended,
+        ) for row in raw.recently_recommended],
         long_term_summary=None if summary is None else s.SourceLongTermSummary(
             user_id=summary.user_id, period_start=summary.period_start, period_end=summary.period_end,
             summary=summary.summary, updated_tags=list(summary.updated_tags), generated_at=summary.generated_at,
@@ -156,7 +160,7 @@ class ProductionFeedContextSource:
             if len(validated.managed_patients.items) > MAX_MANAGED_PATIENTS:
                 raise ValueError("Managed patient limit exceeded")
             snapshot = _project_read_snapshot(validated)
-            _validate_source_invariants(snapshot, user_id)
+            _validate_source_invariants(snapshot, user_id, reference_time)
             _validate_returned_read_policy(snapshot, reference_date)
             return snapshot
         except Exception:

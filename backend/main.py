@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, papers, recommendations, users
+from app.api import auth, chat, papers, recommendations, users
 from app.config import settings
 
 logger = logging.getLogger("uvicorn.error")
@@ -69,3 +69,4 @@ app.include_router(papers.router)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(recommendations.router)
+app.include_router(chat.router)

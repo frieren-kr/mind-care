@@ -21,6 +21,8 @@ export const Colors = {
     onPrimary: '#FFFFFF',
     border: '#D8DCE2',
     highlight: '#FFF6DB',
+    /** "우리 상황에서는?" 같은 개인화 설명의 강조 띠 */
+    accent: '#9A5B00',
   },
   dark: {
     text: '#F1F3F5',
@@ -32,6 +34,7 @@ export const Colors = {
     onPrimary: '#0B1F36',
     border: '#353A40',
     highlight: '#3A3220',
+    accent: '#F0B550',
   },
 } as const;
 
@@ -89,10 +92,28 @@ export const Spacing = {
   six: 64,
 } as const;
 
+/**
+ * 모서리. "AI 앱처럼 전부 둥글지 않게" (10/26 주현 님 의견): 카드·버튼·입력창은 거의 각지게 두고,
+ * 포인트(근거 배지·선택 칩)와 챗봇 말풍선만 둥글게 한다.
+ */
 export const Radius = {
-  card: 16,
+  card: 4,
+  bubble: 18,
   pill: 999,
 } as const;
+
+/** 앱 글꼴 Pretendard (assets/fonts, SIL OFL 1.1). 굵기마다 파일이 달라서 fontWeight 대신 이름으로 고른다 */
+export const FontFamily = {
+  regular: 'Pretendard-Regular',
+  semibold: 'Pretendard-SemiBold',
+  bold: 'Pretendard-Bold',
+} as const;
+
+export const FontAssets = {
+  [FontFamily.regular]: require('@/assets/fonts/Pretendard-Regular.otf'),
+  [FontFamily.semibold]: require('@/assets/fonts/Pretendard-SemiBold.otf'),
+  [FontFamily.bold]: require('@/assets/fonts/Pretendard-Bold.otf'),
+};
 
 /** 버튼·탭 등 터치 영역 최소 높이 */
 export const MinTouch = 48;

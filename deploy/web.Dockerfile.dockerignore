@@ -1,0 +1,8 @@
+# web.Dockerfile 전용 (컨텍스트 ../frontend). frontend/ 를 건드리지 않으려고 여기에 둔다.
+node_modules
+.expo
+dist
+web-build
+.env
+.env.*
+*.log

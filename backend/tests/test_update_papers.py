@@ -126,6 +126,55 @@ class StageFunctionTest(unittest.TestCase):
                 update_papers.stage_classify(NS(dry_run=False))
 
 
+class CollectOptionsTest(unittest.TestCase):
+    """수집 단계: --days-back(기존) / --from-date·--to-date(지난 기간 채우기). PubMed·DB는 가짜."""
+
+    def parse(self, *argv):
+        seen = {}
+        with mock.patch.object(update_papers, "run_stages", side_effect=lambda a: seen.setdefault("a", a) and 0), \
+                tempfile.TemporaryDirectory() as tmp:
+            update_papers.main(["--lock-file", str(Path(tmp) / "run.lock"), *argv])
+        return seen["a"]
+
+    def collect(self, *argv):
+        from app.collectors import pubmed
+        from app.schemas import SavePapersResult
+
+        result = SavePapersResult(total=5, inserted=2, skipped=3)
+        with mock.patch.object(pubmed, "collect_and_store", return_value=result) as recent, \
+                mock.patch.object(pubmed, "collect_range_and_store", return_value=result) as by_range:
+            out = update_papers.stage_collect(self.parse(*argv))
+        return out, recent, by_range
+
+    def test_days_back_default_unchanged(self):
+        out, recent, by_range = self.collect()
+        recent.assert_called_once_with(days_back=7, max_results=100)
+        by_range.assert_not_called()
+        self.assertEqual(out[:2], (2, 0))
+
+    def test_date_range_replaces_days_back(self):
+        from datetime import date
+
+        out, recent, by_range = self.collect("--from-date", "2024-01-01", "--to-date", "2025-12-31", "--days-back", "3")
+        by_range.assert_called_once_with(date(2024, 1, 1), date(2025, 12, 31), dry_run=False)
+        recent.assert_not_called()
+        self.assertEqual(out, (2, 0, "2024-01-01~2025-12-31 5편 중 신규 2, 중복 3"))
+
+    def test_date_range_dry_run(self):
+        out, _, by_range = self.collect("--from-date", "2024-01-01", "--to-date", "2024-01-31", "--dry-run")
+        self.assertTrue(by_range.call_args.kwargs["dry_run"])
+        self.assertEqual(out[0], 5)
+
+    def test_bad_date_options_exit(self):
+        for argv in (["--from-date", "2024-01-01"], ["--to-date", "2024-01-01"],
+                     ["--from-date", "2025-01-01", "--to-date", "2024-12-31"], ["--from-date", "2024-13-01", "--to-date", "2025-01-01"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+                self.parse(*argv)
+
+    def test_large_summary_limit(self):
+        self.assertEqual(self.parse("--limit", "3000").limit, 3000)
+
+
 class SkipFailedTest(unittest.TestCase):
     """요약에 MAX_FAILS번 실패한 논문을 상태 파일에 기록하고 다음 실행부터 건너뛰는지 (DB·OpenAI 모두 가짜)."""
 

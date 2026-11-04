@@ -4,8 +4,8 @@ from typing import Protocol, Sequence
 
 from .outputs import FeedAnswerV2, FinalOutputModel
 from .feed_candidates import build_feed_decision_policy
-from .schemas import AgentContext, Message, ModelTurn, ToolOutcome
-from .tools.contracts import EvidencePackage, ToolResultEnvelope
+from .schemas import AgentContext, Message
+from .tools.contracts import EvidencePackage
 
 DEFAULT_SYSTEM_PROMPT = """당신은 치매/MCI 가족 간병인을 돕는 Mind Care 도우미다.
 진단을 확정하거나 처방/투약 변경을 지시하지 말고, 환자 상태를 추측해 사실로 말하지 않는다.
@@ -25,7 +25,7 @@ def build_structured_output_policy(output_model: FinalOutputModel) -> Message:
     policy = """최종 답변은 아래 JSON Schema를 따르는 단일 JSON object로 반환한다.
 Tool 선택/추가 호출은 기존 방식으로 계속하고, Tool Call이 없는 마지막 text만 JSON으로 작성한다.
 markdown fence, 숨겨진 reasoning, UI 디자인, disclaimer, follow_up 필드는 만들지 않는다.
-source_ref/citation_refs는 성공한 search_evidence의 tool_result message에 있는 tool_call_id와
+source_ref/citation_refs의 tool_call_id는 성공한 search_evidence의 function_call_output.call_id이며
 data.evidence의 0-based index만 사용한다. 다른 Tool/실패한 검색/없는 근거를 참조하지 않는다.
 PMID/DOI/URL/실제 논문 제목/journal/발행일/DB ID/북마크/read_minutes/evidence_level을
 metadata 필드로 생성하지 않는다. 서버가 출처 원문에서 붙인다.
@@ -46,8 +46,6 @@ class PromptBuilder(Protocol):
 
     def build_initial_messages(self, user_input: str, context: AgentContext) -> list[Message]: ...
 
-    def build_tool_followup_messages(self, turn: ModelTurn, outcomes: Sequence[ToolOutcome]) -> list[Message]: ...
-
     def build_final_response_context(self, evidence: Sequence[EvidencePackage]) -> list[Message]: ...
 
 
@@ -66,15 +64,6 @@ class DefaultPromptBuilder:
             # 문자열 조립/요약/strip 없이 원문 그대로 보존한다.
             Message(role="user", kind="user_input", content=user_input),
         ]
-
-    def build_tool_followup_messages(self, turn: ModelTurn, outcomes: Sequence[ToolOutcome]) -> list[Message]:
-        messages = [Message(role="assistant", kind="model", content=turn.text, tool_calls=turn.tool_calls)]
-        for result in outcomes:
-            envelope = ToolResultEnvelope(success=result.success, data=result.data,
-                                          error=result.error.model_dump() if result.error else None)
-            messages.append(Message(role="tool", kind="tool_result", tool_call_id=result.call_id,
-                                    content=envelope.model_dump_json()))
-        return messages
 
     def build_final_response_context(self, evidence: Sequence[EvidencePackage]) -> list[Message]:
         if not evidence:

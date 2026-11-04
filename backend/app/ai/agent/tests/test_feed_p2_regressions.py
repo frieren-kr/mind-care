@@ -4,6 +4,7 @@ import unittest
 from threading import Barrier, Event, Thread
 from unittest.mock import patch
 
+from ..conversation import Conversation
 from ..feed_candidates import FeedCandidates, FeedDecisionError
 from ..schemas import ModelTurn
 from ..testing.fake_llm import FakeLLMClient
@@ -27,7 +28,7 @@ class FeedP2RegressionTests(unittest.TestCase):
         source['B'].evidence[0].title='X original B snapshot'
         table=FeedCandidates()
         for call in ('A','B','C'): table.add(call,source[call])
-        output,refs=table.finalize(json.dumps(decisions(5,range(5))),source)
+        output,refs=table.finalize(json.dumps(decisions(9,range(5))),source)
         self.assertEqual([s.pmid for s in refs],['a1','X','c1','a2','b1'])
         self.assertEqual([(s.source_ref.tool_call_id,s.source_ref.evidence_index) for s in refs],
                          [('A',0),('B',0),('C',0),('A',1),('B',1)])
@@ -35,7 +36,7 @@ class FeedP2RegressionTests(unittest.TestCase):
         self.assertEqual([s.source_ref for s in refs],[i.source_ref for i in output.items])
         source['B'].evidence[0].title='mutated'
         with self.assertRaises(FeedDecisionError) as caught:
-            table.finalize(json.dumps(decisions(5,range(5))),source)
+            table.finalize(json.dumps(decisions(9,range(5))),source)
         self.assertEqual(caught.exception.code,'candidate_source_mismatch')
 
     def test_all_duplicates_single_and_distinct_pools_keep_unique_bounded_candidates(self):
@@ -61,7 +62,7 @@ class FeedP2RegressionTests(unittest.TestCase):
         box={}
         def run():box['result']=execution(CONTEXT,'{}')
         with patch.object(FeedCandidates,'add',autospec=True) as publish, patch.object(
-                execution.runner.prompt_builder,'build_tool_followup_messages',autospec=True) as followup:
+                Conversation,'append_turn',autospec=True) as followup:
             worker=Thread(target=run,daemon=True);worker.start()
             try:
                 worker.join(1)

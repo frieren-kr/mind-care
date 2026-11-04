@@ -26,7 +26,7 @@ class PatientProfileContractTests(TestCase):
         schema = c.PatientProfileInput.model_json_schema()
         self.assertEqual(schema["properties"], {})
         self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(TOOL_CONTRACTS[ToolName.PATIENT_PROFILE].definition()["function"]["parameters"], schema)
+        self.assertEqual(TOOL_CONTRACTS[ToolName.PATIENT_PROFILE].definition()["parameters"], schema)
 
     def test_additional_arguments_rejected_before_handler(self):
         for key, value in {"patient_id": str(CONTEXT.patient_id), "user_id": str(CONTEXT.user_id),

@@ -28,7 +28,7 @@ def search(identifier="search_1", query="Dementia sleep research"):
 
 
 def outcomes(deps, request=-1):
-    return [(m.tool_call_id, json.loads(m.content)) for m in deps.client.requests[request][0] if m.role == "tool"]
+    return [(m.call_id, json.loads(m.content)) for m in deps.client.requests[request][0] if m.type == "function_call_output"]
 
 
 class ChatWorkflowTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class ChatWorkflowTests(unittest.TestCase):
         context = CONTEXT.model_copy(update={"patient_id": None})
         deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(refs=[reference()])])
         self.assertIs(deps.workflow().run(context, "최근 연구를 알려줘"), deps.receipt)
-        self.assertEqual([d["function"]["name"] for d in deps.client.requests[0][1]], ["search_evidence"])
+        self.assertEqual([d["name"] for d in deps.client.requests[0][1]], ["search_evidence"])
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
         self.assertEqual(deps.saved[0].sources[0].source_ref, deps.saved[0].output.citation_refs[0])
 
@@ -119,7 +119,7 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertEqual([e[0] for e in deps.tool_events], [c.name for c in calls])
         self.assertEqual([e[3] for e in deps.tool_events], [1, 1, 1])
         self.assertEqual(len(deps.client.requests), 2)
-        self.assertEqual([call.id for call in next(m for m in deps.client.requests[1][0] if m.role == "assistant").tool_calls],
+        self.assertEqual([m.provider_output["call_id"] for m in deps.client.requests[1][0] if m.type == "provider_output" and m.provider_output["type"] == "function_call"],
                          [c.id for c in calls])
         entries = outcomes(deps)
         self.assertEqual([identifier for identifier, _ in entries], [c.id for c in calls])
@@ -134,15 +134,16 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_followup_tool_choice_observes_prior_profile_result(self):
         test = self
         class ProfileDrivenFake(FakeLLMClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 if len(self.requests) == 1:
-                    value = json.loads(next(m.content for m in messages if m.role == "tool"))
+                    value = json.loads(next(m.content for m in messages if m.type == "function_call_output"))
                     test.assertEqual(value["data"]["symptoms"], ["수면 변화"])
                     self.turns.append(ModelTurn(tool_calls=[search(query="Dementia sleep changes research")]))
                 elif len(self.requests) == 2:
-                    test.assertEqual([m.tool_call_id for m in messages if m.role == "tool"], ["profile_1", "search_1"])
+                    test.assertEqual([m.call_id for m in messages if m.type == "function_call_output"], ["profile_1", "search_1"])
                     self.turns.append(chat_final(refs=[reference()]))
-                return super().generate(messages, tools)
+                return super().generate(request)
         deps = FakeChatDependencies(client=ProfileDrivenFake([ModelTurn(tool_calls=[chat_call()])]))
         self.assertIs(deps.workflow().run(CONTEXT, "상태에 맞는 연구를 알려줘"), deps.receipt)
         self.assertEqual(len(deps.client.requests), 3)
@@ -164,7 +165,7 @@ class ChatWorkflowTests(unittest.TestCase):
             for identifier in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id)):
                 self.assertNotIn(identifier, text)
             self.assertFalse(any(m.kind == "agent_context" for m in messages))
-            self.assertTrue(all(m.role == "tool" for m in messages if m.kind == "tool_result"))
+            self.assertTrue(all(m.type == "function_call_output" for m in messages if m.kind == "tool_result"))
             system = "\n".join(m.content for m in messages if m.role == "system")
             self.assertNotIn("합성 테스트 환자", system)
             self.assertNotIn("FAKE-PMID", system)
@@ -289,9 +290,10 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_request_deadline_stops_provider_wait_and_never_handoffs(self):
         release = threading.Event()
         class WaitingProvider(FakeLLMClient):
-            def generate(self, messages, tools):
+            def generate(self, request):
+                messages, tools = request.inputs, request.tools
                 release.wait(1)
-                return super().generate(messages, tools)
+                return super().generate(request)
         deps = FakeChatDependencies(client=WaitingProvider([chat_final()]), request_timeout_seconds=0.03)
         try:
             result = self.assert_stopped(deps)

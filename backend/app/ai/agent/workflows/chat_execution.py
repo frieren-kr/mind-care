@@ -47,13 +47,14 @@ class ChatExecutionV1:
                 raise TypeError("ToolRegistry required")
             # Snapshot through the existing canonical Registry validator. Even a
             # reused factory registry cannot share its mutable mapping with a run.
-            specs = tuple(supplied.get(d["function"]["name"]) for d in supplied.definitions())
+            specs = tuple(supplied.get(name) for name in supplied.names())
             registry = ToolRegistry(specs, mode=supplied.mode)
             if context.patient_id is None and any(registry.get(name.value) is not None for name in (
                     ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS)):
                 raise ValueError("Patient Tools require a selected patient")
             runner = AgentLoopRunner(self.client, registry, prompt_builder=ChatPromptBuilder(),
                 max_tool_rounds=5, max_total_tool_calls=10,
+                allow_parallel_tools=True, max_parallel_calls=3,
                 tool_timeout_seconds=self.tool_timeout_seconds,
                 request_timeout_seconds=self.request_timeout_seconds)
             return runner.run_structured(prepared_input, context, output_model=ChatAnswerV1)

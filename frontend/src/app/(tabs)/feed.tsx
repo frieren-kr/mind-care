@@ -3,30 +3,20 @@ import { ScrollView, StyleSheet } from 'react-native';
 
 import { currentUserId, getRecommendations, getUserProfile } from '@/api';
 import { PaperCard } from '@/components/paper-card';
+import { SkeletonPaperList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
-import { Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
+import { Chip, ErrorView, Screen } from '@/components/ui';
 import { CategoryLabel } from '@/constants/labels';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
-import type { Category, RecommendationResponse } from '@/types';
+import { useTheme } from '@/hooks/use-theme';
+import type { Category } from '@/types';
+import { feedCaption, fewItemsNotice } from '@/utils/feed';
 
 const categoryOrder: Category[] = ['treatment', 'care', 'prevention', 'diagnosis'];
 
-/** "오늘 만든 추천" / "3일 전에 만든 추천" (날짜 기준) */
-function generatedLabel(iso: string): string | null {
-  const created = new Date(iso);
-  if (Number.isNaN(created.getTime())) return null;
-  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const days = Math.round((startOfDay(new Date()) - startOfDay(created)) / 86_400_000);
-  return days <= 0 ? '오늘 만든 맞춤 추천' : `${days}일 전에 만든 맞춤 추천`;
-}
-
-function feedCaption(feed: RecommendationResponse): string {
-  if (feed.mode === 'search') return '돌보시는 분의 증상·관심사와 가까운 연구예요';
-  return (feed.generated_at && generatedLabel(feed.generated_at)) || '맞춤 추천 연구예요';
-}
-
 export default function FeedScreen() {
+  const theme = useTheme();
   // null = 관리 환자 전체 기준
   const [patientId, setPatientId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Category | 'all'>('all');
@@ -45,6 +35,7 @@ export default function FeedScreen() {
   const categories = categoryOrder.filter((c) => data?.items.some((i) => i.category === c));
   const activeFilter = filter !== 'all' && categories.includes(filter) ? filter : 'all';
   const items = (data?.items ?? []).filter((i) => activeFilter === 'all' || i.category === activeFilter);
+  const notice = data && !feed.loading ? fewItemsNotice(data) : null;
 
   return (
     <Screen refreshing={feed.loading && data !== null} onRefresh={refresh}>
@@ -85,16 +76,26 @@ export default function FeedScreen() {
       {/* 피드 대기 문구 (10/14 회의): AI 피드는 최대 15초, 서버를 켠 뒤 첫 검색은 30초까지 걸린다 */}
       {feed.error && <ErrorView message={feed.error.message} onRetry={() => feed.reload()} />}
       {feed.loading && data === null && (
-        <LoadingView
-          message="맞춤 연구를 고르고 있어요"
-          hint={'돌보시는 분의 상황에 맞는 연구를 찾는 중이에요.\n처음에는 30초쯤 걸릴 수 있으니 잠시만 기다려 주세요.'}
-        />
+        <>
+          <ThemedText type="bold">맞춤 연구를 고르고 있어요</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            돌보시는 분의 상황에 맞는 연구를 찾는 중이에요. 처음에는 30초쯤 걸릴 수 있으니 잠시만 기다려 주세요.
+          </ThemedText>
+          <SkeletonPaperList />
+        </>
       )}
       {feed.loading && data !== null && (
         <ThemedText type="small" themeColor="textSecondary">
           추천을 다시 불러오고 있어요. 새로 만들 때는 15초쯤 걸릴 수 있어요.
         </ThemedText>
       )}
+
+      {/* AI가 5편보다 적게 고른 경우 (최대 5편, 관련성이 낮은 논문으로 채우지 않는다) */}
+      {notice ? (
+        <ThemedText type="small" style={[styles.notice, { borderLeftColor: theme.primary }]}>
+          {notice}
+        </ThemedText>
+      ) : null}
 
       {items.map((item) => (
         <PaperCard key={item.id} item={item} />
@@ -109,5 +110,9 @@ export default function FeedScreen() {
 const styles = StyleSheet.create({
   chips: {
     gap: Spacing.two,
+  },
+  notice: {
+    borderLeftWidth: 3,
+    paddingLeft: Spacing.two,
   },
 });

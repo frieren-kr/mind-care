@@ -30,14 +30,16 @@ class ToolCall(AgentModel):
 class ModelTurn(AgentModel):
     text: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    output_items: list[dict[str, Any]] = Field(default_factory=list, repr=False)
 
 
 class Message(AgentModel):
-    role: Literal["system", "user", "assistant", "tool"]
+    type: Literal["message", "function_call_output", "provider_output"] = "message"
+    role: Literal["system", "user", "assistant"] | None = None
     content: str | None = None
     kind: Literal["policy", "agent_context", "user_input", "model", "tool_result", "evidence"]
-    tool_calls: list[ToolCall] = Field(default_factory=list)
-    tool_call_id: str | None = None
+    call_id: str | None = None
+    provider_output: dict[str, Any] | None = Field(default=None, repr=False)
 
 
 class AgentError(AgentModel):
@@ -63,7 +65,6 @@ class ToolTrace(AgentModel):
 
 class AgentState(AgentModel):
     request_id: str
-    messages: list[Message] = Field(default_factory=list)
     tool_round: int = 0
     total_tool_calls: int = 0
     called_tools: list[ToolTrace] = Field(default_factory=list)
