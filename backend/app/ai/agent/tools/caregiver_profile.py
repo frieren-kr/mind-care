@@ -1,7 +1,9 @@
-"""Authenticated caregiver profile declarations and interpretation; no DB handler."""
+"""Caregiver profile declarations, interpretation and thin Handler; no DB access."""
+from typing import Protocol
+
 from pydantic import AwareDatetime, Field, StrictInt
 
-from ..schemas import AgentModel
+from ..schemas import AgentContext, AgentModel
 
 
 CAREGIVER_PROFILE_DATA_POLICY = """[간병인 프로필 데이터 해석 정책]
@@ -70,3 +72,19 @@ class CaregiverProfileData(AgentModel):
 class CaregiverProfileOutput(AgentModel):
     profile: CaregiverProfileData | None = Field(
         description="현재 인증된 간병인의 저장 프로필. null은 프로필 미등록인 정상 조회 결과이며 조회 실패는 Tool 오류로 구분한다.")
+
+
+class CaregiverProfileReader(Protocol):
+    def get_caregiver_profile(self, *, context: AgentContext) -> CaregiverProfileOutput:
+        """Read the authenticated user's saved profile, or return a normal absence."""
+        ...
+
+
+class CaregiverProfileHandler:
+    """Forward trusted Context; Executor owns input/output validation and errors."""
+
+    def __init__(self, reader: CaregiverProfileReader):
+        self.reader = reader
+
+    def __call__(self, context: AgentContext, args: CaregiverProfileInput) -> CaregiverProfileOutput:
+        return self.reader.get_caregiver_profile(context=context)

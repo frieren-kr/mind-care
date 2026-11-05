@@ -2128,8 +2128,8 @@ LLM의 사용자 표현→mode 선택 평가는 각각 향후 구현/실제 모�
 
 ## 간병인 프로필 Tool 계약
 
-`get_caregiver_profile`는 canonical 선언만 추가한다. 현재 운영 Handler·Adapter와 실행 가능한
-Registry 등록은 없으며 이 단계의 정상적인 미연결 상태다. Input은 추가 필드를 받지 않는 `{}`다.
+`get_caregiver_profile`는 기존 canonical 계약에 Handler·Adapter를 연결하며,
+`build_chat_registry(context)`에서 환자 선택 여부와 무관하게 등록한다. Input은 추가 필드를 받지 않는 `{}`다.
 대상은 인증된 `AgentContext.user_id`이며 LLM이 사용자/환자 ID를 선택하지 않는다.
 `patient_scoped=False`는 환자 선택 없이 사용 가능하다는 뜻이고 인증·사용자 접근 권한 검증을 대신하지 않는다.
 
@@ -2154,10 +2154,14 @@ nullable 필드에 기본값을 두지 않으므로 명시적 null과 누락을 
 요청당 한 번 등록한다. 정상 profile=null에도 정책을 전달하며 실패·미호출·다른 Tool만 성공한 경우에는
 전달하지 않는다. 문자열·태그는 비신뢰 데이터이고 정책으로 승격하지 않는다.
 
-후속 Handler·Adapter에서 `get_caregiver_profile(user_id)`를 참고해 인증된 사용자와 조회 대상을
-연결하고 권한 검증, 미등록/조회 실패 구분, 필수 필드 투영 및 원문 보존을 구현한다.
-Production Registry 등록, Chat의 Tool Selection·Dialogue Policy 및 초기 Context와의 중복 처리 규칙은
-별도 후속 작업이다. 이번 선언을 추가하기 위해 Runner·Executor·PromptBuilder·Workflow는 변경하지 않는다.
+`CaregiverProfileHandler`는 Reader 호출만 수행한다. `CaregiverProfileAdapter`는 기존
+`get_caregiver_profile(context.user_id)`를 1회 호출하고, 반환된 행의 user_id를 검증한 뒤
+공개 5개 필드만 투영한다. None은 정상 미등록으로 반환하며 예외·잘못된 점수·시간대는
+미등록으로 대체하지 않는다. 주입 조회 함수와 기존 Fake/MockTransport로 오프라인 검증한다.
+실제 사용자 인증·존재 보장은 Backend 책임이며 추가 사용자 확인 조회는 하지 않는다.
+Chat 초기 정책에는 이 Tool의 최소 선택 기준만 추가하고 상세 Data Policy는 성공 후 전달한다.
+기존 검색·환자 프로필 등록과 검색 전용 Factory는 유지한다. 운영 Chat API 연결과 초기 Context의
+중복 처리 규칙은 별도 후속 작업이다. Runner·Executor·Dialogue Policy·Feed는 변경하지 않는다.
 
 ## Chat 논문 검색량과 활성 후보 재검토
 
