@@ -2061,18 +2061,20 @@ Fake/Mock 테스트는 정책이 전달되고 종료/추가 검색 경로가 허
 검색/LLM 호출 수·후보 수·입출력 토큰·응답시간(기존 120초 제한)을 함께 확인한다. 검색/추천 편수 증가만으로 성공을 판정하지 않는다.
 
 
-## get_patient_medical_visits — Contract-only
+## get_patient_medical_visits — Handler / Adapter
 
 `tools/medical_visits.py`는 `PatientMedicalVisitsInput`, `MedicalVisitItem`,
 `PatientMedicalVisitsOutput`, `PATIENT_MEDICAL_VISITS_DATA_POLICY`를 소유한다.
-canonical `ToolName.PATIENT_MEDICAL_VISITS`와 Contract만 선언하며 운영 Handler·Adapter는 없다.
-`production_registry()`의 실행 정의에 자동 추가되지 않는다. 합성 Handler는 테스트 모드에서만 사용한다.
+`PatientMedicalVisitsHandler`와 `PatientMedicalVisitsAdapter`를 구현하고, 환자 선택 시에만
+`build_chat_registry(..., visits_reader=...)`에 canonical ToolSpec을 등록한다. 기본 Adapter는 기존
+DB 함수를 호출 시점에 가져오며 생성만으로 조회하지 않는다. 빈 `production_registry()`와
+Feed용 검색 전용 Factory는 유지한다. 새 API는 없으며 실제 운영 연결은 후속이다.
 
 입력은 `status="completed"`, `start_date=None`, `end_date=None`, `limit=5`다.
 날짜 양 끝 포함, 동일 날짜 허용, 역전 거부, 과거·미래 허용이며 limit은 엄격한 정수 1~20이다.
 환자와 KST 기준일은 서버가 결정하므로 환자/사용자 ID나 기준일 인자를 받지 않는다.
 
-| status | 조회·정렬 계약 (향후 Handler 책임) |
+| status | 조회·정렬 계약 (Handler·Adapter 및 DB 조회 함수 책임) |
 |---|---|
 | completed | 방문 완료 등록 (`is_visited=true`), 방문일 내림차순 |
 | upcoming | KST 오늘 포함 이후의 미방문 등록, 사용자 날짜 범위와 교집합, 방문일 오름차순 |
@@ -2092,11 +2094,40 @@ nullable 텍스트 `hospital_name`, `department`, `visit_reason`, `diagnosis`, `
 `ToolContract.data_policy`로 연결되며 실행·출력 검증 성공 후 trusted system 메시지로 요청당 한 번만
 전달한다. 초기 프롬프트·Tool Description에 상세 정책을 넣지 않으며 실패 시 새로 전달하지 않는다.
 
-후속 Handler·Adapter는 권한/환자 Scope, KST 기준일, 상태별 필터·정렬과 실제 limit을 보장해야 한다.
-현재 `list_medical_visits()`는 방문일 내림차순 후 LIMIT이므로 upcoming 결과를 뒤집기만 하면
-가까운 일정이 누락될 수 있다. LIMIT 전 가장 가까운 날짜 우선 선택 전략이 필요하다.
-DB DTO의 실제 nullable 필드 매핑 누락이 None으로 숨지 않는지 검증하고, `visits`의 ToolTrace
-result_count 지원도 연동 단계에서 확인한다. 이번 단계에서는 DB·Executor를 변경하지 않는다.
+Handler는 upcoming에서만 기존 `app.user_schemas.today()`로 KST 기준일을 호출당 한 번 결정한다.
+테스트는 today_fn을 주입할 수 있다. 다른 status에는 기준일 계산 없이 인자를 그대로 전달한다.
+Adapter는 get_patient()으로 환자 ID와 caregiver_id를 확인한 뒤 completed/unvisited/all에서
+기존 list_medical_visits(patient_id, is_visited=..., start_date=..., end_date=..., limit=...)를 사용한다.
+이 경로는 visit_date DESC, created_at DESC, id ASC를 유지한다. Feed의 365일/90일 조건은 적용하지 않는다.
+
+upcoming의 기존 내림차순 LIMIT 결과를 뒤집는 대체 경로는 없다. 별도 주입 계약은 다음과 같다.
+
+```python
+class UpcomingMedicalVisitsQuery(Protocol):
+    def __call__(self, *, user_id: UUID, patient_id: UUID, start_date: date,
+                 end_date: date | None, limit: int) -> list[MedicalVisitOut]: ...
+```
+
+호출 시 start_date는 max(사용자 시작일 또는 KST 오늘, KST 오늘), end_date는 사용자 지정 종료일
+또는 None이며 limit은 1~20이다. is_visited=False는 고정 조건으로 인자에 넣지 않는다.
+환자 소속 확인 후 end_date가 유효 시작일보다 이르면 조회 없이 정상 visits=[]로 반환한다.
+그 외에는 upcoming_query_fn이 미연결일 때 NotImplementedError로 실패하며 빈 성공으로 숨기지 않는다.
+DB 담당자는 user_id로 환자 소속을 확인하고, patient_id/is_visited=False/양 끝 포함 날짜 조건을
+적용해야 한다. visit_date ASC, created_at DESC, id ASC 정렬을 LIMIT보다 먼저 적용하여 가까운
+일정부터 선정해야 한다. 기존 MedicalVisitOut을 반환하며 새 DTO나 Agent SQL을 만들지 않는다.
+향후 PatientMedicalVisitsAdapter(upcoming_query_fn=조회함수)를 visits_reader로 주입해 연결한다.
+
+Adapter는 반환 목록 전체의 타입·환자·상태·포함 날짜 범위·정렬(tie-break 포함)·현재 limit를
+재검증하고 12개 공개 필드를 명시적으로 투영한다. 누락된 nullable 컬럼은 정상 null과 구분하며,
+DB 모델의 원래 fields_set도 검사해 기본값이 누락을 숨기지 않게 한다. 행 삭제·재정렬·중복 제거·
+자동 절단은 하지 않는다. 정상 빈 목록은 성공이지만 None·권한 실패·DB 오류는 빈 결과로 대체하지 않는다.
+Chat 초기 Tool 선택 기준에만 진료 조회 문장을 추가하며 Contract·Data Policy·Runner는 유지한다.
+
+후속 검증: 실제 DB 필터와 LIMIT 전 선정·정렬, 빈 결과에서도 소속 확인, 병렬 호출 안전성,
+기존 소속 조회와 목록 조회 간 트랜잭션 일관성 및 운영 연결. Fake 조회만으로 원본 전체에서
+가장 가까운 일정이 선정됐음을 입증하지는 않는다. `ToolTrace.result_count`는 기존 Executor가
+visits를 집계하지 않아 성공 시에도 None이다. 실행·반환값에는 영향이 없으며 공통 Executor의
+관측 건수 지원 여부는 별도 후속 검토로 남긴다. 이번 구현에서 DB·Executor를 변경하지 않는다.
 
 
 ## get_patient_assessments — Contract-only

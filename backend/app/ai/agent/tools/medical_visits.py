@@ -1,10 +1,11 @@
-"""Registered medical visit contracts and interpretation; no DB handler."""
+"""Registered medical visit contracts, interpretation and Reader-backed Handler."""
+from collections.abc import Callable
 from datetime import date
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import Field, StrictInt, model_validator
 
-from ..schemas import AgentModel
+from ..schemas import AgentContext, AgentModel
 
 
 PATIENT_MEDICAL_VISITS_DATA_POLICY = """[병원 방문 및 진료 기록 데이터 해석 정책]
@@ -115,3 +116,30 @@ class PatientMedicalVisitsOutput(AgentModel):
         "조회 조건에 해당하는 등록된 병원 방문 기록. upcoming은 visit_date 오름차순으로 가까운 날짜부터, "
         "그 외 상태는 visit_date 내림차순으로 반환한다. 현재 호출의 limit 이하로 제한되며 "
         "전체 방문 기록이나 전체 건수를 보장하지 않는다. 필터·정렬·실제 limit 준수는 Handler·Adapter 책임이다."))
+
+
+class PatientMedicalVisitsReader(Protocol):
+    def get_patient_medical_visits(self, *, context: AgentContext,
+                                   status: Literal["completed", "upcoming", "unvisited", "all"],
+                                   start_date: date | None, end_date: date | None,
+                                   limit: int, today_kst: date | None) -> PatientMedicalVisitsOutput:
+        """Read authorized visits with status-specific date ordering and limit."""
+        ...
+
+
+class PatientMedicalVisitsHandler:
+    def __init__(self, reader: PatientMedicalVisitsReader, *, today_fn: Callable[[], date] | None = None):
+        self.reader = reader
+        self.today_fn = today_fn
+
+    def __call__(self, context: AgentContext, args: PatientMedicalVisitsInput) -> PatientMedicalVisitsOutput:
+        today_kst = None
+        if args.status == "upcoming":
+            today_fn = self.today_fn
+            if today_fn is None:
+                from app.user_schemas import today as today_fn
+            today_kst = today_fn()
+            if type(today_kst) is not date:
+                raise ValueError("Medical visit reference must be a server KST date")
+        return self.reader.get_patient_medical_visits(context=context, status=args.status,
+            start_date=args.start_date, end_date=args.end_date, limit=args.limit, today_kst=today_kst)
