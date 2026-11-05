@@ -261,7 +261,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
         def handler(context,args):
             barrier.wait(2)
             return source[args.query]
-        native=[reasoning(),function('call_one','{"query":"one"}'),function('call_two','{"query":"two"}')]
+        native=[reasoning(),function('call_one','{"query":"one","top_k":2}'),function('call_two','{"query":"two","top_k":3}')]
         native[1]['id']='output_item_not_a_citation';native[2].pop('id')
         def transport(request):
             wire.append(json.loads(request.content))
@@ -296,7 +296,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
         before = deepcopy(sources)
         result, wire = self.execute_sdk(sources, [
             response([function('call-alpha', '{"query":"first"}')]),
-            response([function('call-beta', '{"query":"second"}')]),
+            response([function('call-beta', '{"query":"second","top_k":4}')]),
             response_fixture({'text': chat_final(selected=[False, True, False, True]).text}),
         ], '두 검색의 연구 결과를 비교해 주세요.')
         self.assertEqual(result.execution.status, 'completed')
@@ -387,7 +387,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
             if args.query=='bad':raise RuntimeError('PRIVATE')
             return package(['A'])
         for mask,expected in (([True],'completed'),([True,True],'invalid_response')):
-            client=FakeLLMClient([ModelTurn(tool_calls=[search('bad','bad'),search('good','good')]),chat_final(selected=mask)])
+            client=FakeLLMClient([ModelTurn(tool_calls=[search('bad','bad',top_k=1),search('good','good',top_k=2)]),chat_final(selected=mask)])
             tools=ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],handler,parallel_safe=True),))
             result=ChatExecutionV1(client,lambda c:tools)(CONTEXT,prepare_chat_input(CONTEXT,'Synthetic'))
             self.assertEqual(result.execution.status,expected)
@@ -406,7 +406,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
         self.assertEqual(second.execution.status,'invalid_response')
         self.assertEqual(second.sources,[])
 
-    def test_chat_keeps_top_k_range_and_research_types_without_feed_filtering(self):
+    def test_chat_caps_top_k_without_feed_research_type_filtering(self):
         data=package(['A','B','C',None])
         for item,kind in zip(data.evidence,('protocol','animal','expert_opinion','guideline'),strict=True):item.study_type=kind
         data.evidence[3].evidence_type='guideline'
@@ -415,7 +415,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
         result,_=self.execute([ModelTurn(tool_calls=[search(top_k=20)]),chat_final(selected=[True]*4)],
                              lambda c,a:seen.append(a.top_k) or data)
         self.assertEqual(result.execution.status,'completed')
-        self.assertEqual(seen,[20])
+        self.assertEqual(seen,[10])
         self.assertEqual([s.study_type for s in result.sources],['protocol','animal','expert_opinion','guideline'])
         self.assertIsNone(result.sources[-1].pmid)
 

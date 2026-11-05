@@ -183,8 +183,8 @@ class WorkflowPolicyHookTests(unittest.TestCase):
                 def handler(c, a):
                     if a.query == 'bad': raise RuntimeError('private')
                     return package(['A'])
-                good, bad = function('good', '{"query":"good"}'), function('bad', '{"query":"bad"}')
-                turns = [response([bad, good])] if same_turn else [response([good]), response([bad])]
+                good, bad = function('good', '{"query":"good","top_k":2}'), function('bad', '{"query":"bad","top_k":1}')
+                turns = [response([bad, good])] if same_turn else [response([good]), response([function('bad', '{"query":"bad","top_k":2}')])]
                 result, wire = self.execute('chat', turns + [self.final('chat', 1, (0,))], handler)
                 self.assertEqual(result.execution.status, 'completed')
                 self.assert_hook(wire, 'chat')

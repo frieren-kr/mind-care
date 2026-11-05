@@ -25,7 +25,7 @@ from .test_workflows import CONTEXT
 
 
 def calls(count):
-    return [ToolCall(id=f'call-{i}',name='search_evidence',arguments={'query':str(i)})
+    return [ToolCall(id=f'call-{i}',name='search_evidence',arguments={'query':str(i),'top_k':i+1})
             for i in range(count)]
 
 
@@ -112,7 +112,7 @@ class ParallelChatTests(unittest.TestCase):
             def search_evidence(self,*,query,top_k,context):
                 barrier.wait(2);return package([query])
         tools=build_evidence_registry(retriever=SyntheticRetriever(),parallel_safe=True)
-        native=[function(f'call-{i}',json.dumps({'query':str(i)})) for i in range(3)]
+        native=[function(f'call-{i}',json.dumps({'query':str(i),'top_k':i+1})) for i in range(3)]
         native[0].pop('id');native[1]['id']=None
         def transport(req):
             body=json.loads(req.content);wire.append(body)

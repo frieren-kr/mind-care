@@ -159,6 +159,7 @@ class EvidenceStore:
             rows.append(item.model_dump(exclude={'pmid', 'doi', 'source_url'}))
         return Message(role='user', kind='evidence', content=json.dumps({
             'context_type':'untrusted_chat_candidates', 'candidate_count':len(rows),
+            'candidate_version':snapshot.version,
             'candidates':rows}, ensure_ascii=False, allow_nan=False))
 
     def finalize_chat(self, text: str, snapshot: EvidenceSnapshot) -> tuple[ChatAnswerV1, list[ResolvedEvidence]]:

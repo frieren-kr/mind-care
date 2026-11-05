@@ -419,10 +419,15 @@ class StructuredWorkflowTests(TestCase):
         self.assertEqual(result.sources, [])
 
     def test_multiple_search_calls_are_not_confused(self):
-        result, _ = self.run_output(draft([True, True]),
+        def distinct(context, args):
+            data = package(args.query)
+            data.evidence[0].pmid = args.query
+            return data
+        registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], distinct),))
+        result, _ = self.run_output(draft([True, True]), registry=registry,
                                     preceding=[tool_turn(
-                                        call(ToolName.SEARCH_EVIDENCE, {"query": "first"}, identifier="search_1"),
-                                        call(ToolName.SEARCH_EVIDENCE, {"query": "second"}, identifier="search_2"))])
+                                        call(ToolName.SEARCH_EVIDENCE, {"query": "first", "top_k": 1}, identifier="search_1"),
+                                        call(ToolName.SEARCH_EVIDENCE, {"query": "second", "top_k": 2}, identifier="search_2"))])
         self.assertEqual(result.execution.status, "completed")
         self.assertEqual([source.source_ref.tool_call_id for source in result.sources], ["search_1", "search_2"])
 
@@ -507,7 +512,8 @@ class StructuredWorkflowTests(TestCase):
                     workflow_policies = [m for m in final_messages if '"title": "FeedDecisionDraft"' in (m.content or '')]
                     self.assertEqual(len(workflow_policies), 1)
                     self.assertEqual(workflow_policies[0].role, "system")
-                self.assertEqual([message.role or message.type for message in final_messages if message not in policies],
+                self.assertEqual([message.role or message.type for message in final_messages if message not in policies
+                                 and not (message.kind == "agent_context" and "chat_search_budget" in message.content)],
                                  ["system"] * (2 if model is FeedAnswerV2 else 3)
                                  + ["user", "provider_output", "function_call_output", "provider_output", "function_call_output"]
                                  + ["user"])

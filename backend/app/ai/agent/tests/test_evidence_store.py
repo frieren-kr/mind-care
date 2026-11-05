@@ -144,16 +144,17 @@ class EvidenceStoreTests(unittest.TestCase):
             ids = [f'{iteration}:{i}:' + ''.join(rng.choices('Ab9_-:/한글☃',k=35)) for i in range(2)]
             data = [package(['same',None]), package(['same','other'])]
             data[0].evidence[1].evidence_type='guideline'
-            data[1].evidence[0].doi=f'original-doi-{iteration}'
+            data[0].evidence[0].doi=f'original-doi-{iteration}'
+            data[1].evidence[0].doi=f'later-doi-{iteration}'
             tools=ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],lambda c,a:data[int(a.query)]),))
-            client=FakeLLMClient([ModelTurn(tool_calls=[ToolCall(id=ids[i],name='search_evidence',arguments={'query':str(i)}) for i in range(2)]),
-                                 chat_final('정상 설명',selected=[False,True,True,False])])
+            client=FakeLLMClient([ModelTurn(tool_calls=[ToolCall(id=ids[i],name='search_evidence',arguments={'query':str(i),'top_k':2*(i+1)}) for i in range(2)]),
+                                 chat_final('정상 설명',selected=[True,True,False])])
             runner=AgentLoopRunner(client,tools)
             result=runner.run_structured('Synthetic',CONTEXT,output_model=ChatAnswerV1)
             self.assertEqual(result.execution.status,'completed')
-            self.assertEqual([(s.source_ref.tool_call_id,s.source_ref.evidence_index) for s in result.sources],[(ids[0],1),(ids[1],0)])
-            self.assertIsNone(result.sources[0].pmid)
-            self.assertEqual(result.sources[1].doi,f'original-doi-{iteration}')
+            self.assertEqual([(s.source_ref.tool_call_id,s.source_ref.evidence_index) for s in result.sources],[(ids[0],0),(ids[0],1)])
+            self.assertIsNone(result.sources[1].pmid)
+            self.assertEqual(result.sources[0].doi,f'original-doi-{iteration}')
             client.turns.append(chat_final())
             self.assertEqual(runner.run_structured('New request',CONTEXT,output_model=ChatAnswerV1).sources,[])
 

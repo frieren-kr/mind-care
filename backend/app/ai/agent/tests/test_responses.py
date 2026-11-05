@@ -203,7 +203,7 @@ class ResponsesTests(unittest.TestCase):
             self.assertNotIn('parallel_tool_calls',body)
             if len(issued)<6:
                 count=1 if body.get('parallel_tool_calls') is False else 3
-                batch=[function(f'call-{i}',json.dumps({'query':f'query-{i}'}))
+                batch=[function(f'call-{i}',json.dumps({'query':f'query-{i}','top_k':i+1}))
                        for i in range(len(issued),min(len(issued)+count,6))]
                 issued.extend(c['call_id'] for c in batch)
                 return httpx.Response(200,json=response(batch))
@@ -226,14 +226,14 @@ class ResponsesTests(unittest.TestCase):
             self.assertEqual([i['call_id'] for i in outputs],issued[:index*3])
             self.assertTrue(all(json.loads(i['output'])['success'] for i in outputs))
 
-    def test_chat_sdk_keeps_five_round_and_ten_call_limits(self):
-        for batch_size,expected_calls in ((1,5),(11,0)):
+    def test_chat_sdk_keeps_five_round_and_ten_executed_call_limits(self):
+        for batch_size,expected_calls in ((1,5),(11,10)):
             with self.subTest(batch_size=batch_size):
                 wire=[];executed=[]
                 def transport(req):
                     wire.append(json.loads(req.content))
                     return httpx.Response(200,json=response([
-                        function(f'call-{len(wire)}-{i}') for i in range(batch_size)]))
+                        function(f'call-{len(wire)}-{i}', json.dumps({'query':'dementia','top_k':i+1 if batch_size>1 and len(wire)==1 else 10})) for i in range(batch_size)]))
                 execution=ChatExecutionV1(self.client(transport),lambda c:registry(
                     lambda c,a:executed.append(a.query) or package(['A'])))
                 result=execution(CONTEXT,'{"user_message":"Synthetic","patient_scope_available":true}')

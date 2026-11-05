@@ -148,8 +148,14 @@ class SearchEvidencePolicyTests(unittest.TestCase):
                 handler.assert_not_called()
                 self.assertEqual(len(wire), 1)
                 self.assert_delivery(wire)
-                self.assertEqual(wire[0].get('tools', []),
-                                 [TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE].definition()] if enabled else [])
+                expected = [TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE].definition()] if enabled else []
+                received = deepcopy(wire[0].get('tools', []))
+                if enabled:
+                    properties = received[0]['parameters']['properties']
+                    self.assertEqual(set(properties), {'query','top_k','exclude_candidates','candidate_version'})
+                    properties.pop('exclude_candidates'); properties.pop('candidate_version')
+                    properties['top_k'] = expected[0]['parameters']['properties']['top_k']
+                self.assertEqual(received, expected)
 
     def test_chat_and_feed_success_and_empty_results_deliver_same_policy(self):
         for channel in ('chat', 'feed'):
@@ -216,22 +222,22 @@ class SearchEvidencePolicyTests(unittest.TestCase):
         source.evidence[0].publication_year = None
         original = deepcopy(source.model_dump())
         result, wire = self.execute('chat', [response([function('first')]), response([function('second')]),
-            self.final('chat', 4, (1, 2))], lambda context, args: source)
+            self.final('chat', 2, (0, 1))], lambda context, args: source)
         self.assertEqual(result.execution.status, 'completed')
         self.assert_delivery(wire)
         expected = [row.model_dump(exclude={'pmid', 'doi', 'source_url'}) for row in source.evidence]
         for index, body in enumerate(wire[1:], 1):
-            self.assertEqual(self.projection(body, 'chat')['candidates'], expected * index)
+            self.assertEqual(self.projection(body, 'chat')['candidates'], expected)
             self.assertTrue(all(injection not in m.get('content', '')
                                 for m in body['input'] if m.get('role') == 'system'))
         self.assertEqual([(s.source_ref.tool_call_id, s.source_ref.evidence_index, s.pmid)
-                          for s in result.sources], [('first', 1, 'B'), ('second', 0, 'A')])
-        self.assertEqual(result.sources[1].title, injection)
-        self.assertEqual(result.sources[1].doi, 'synthetic-doi')
+                          for s in result.sources], [('first', 0, 'A'), ('first', 1, 'B')])
+        self.assertEqual(result.sources[0].title, injection)
+        self.assertEqual(result.sources[0].doi, 'synthetic-doi')
         self.assertEqual(source.model_dump(), original)
 
     def test_chat_same_turn_searches_keep_complete_bundle_before_single_policy(self):
-        native = [function('one', '{"query":"one"}'), function('two', '{"query":"two"}')]
+        native = [function('one', '{"query":"one","top_k":1}'), function('two', '{"query":"two","top_k":2}')]
         result, wire = self.execute('chat', [response(native), self.final('chat', 2, (0, 1))],
                                     lambda context, args: package([args.query]))
         self.assertEqual(result.execution.status, 'completed')
@@ -284,7 +290,7 @@ class SearchEvidencePolicyTests(unittest.TestCase):
 
     def test_feed_multiple_provider_calls_share_policy_without_changing_source_order(self):
         result, wire = self.execute('feed', [response([
-            function('one', '{"query":"one"}'), function('two', '{"query":"two"}')]),
+            function('one', '{"query":"one","top_k":1}'), function('two', '{"query":"two","top_k":2}')]),
             self.final('feed', 2, (0, 1))], lambda context, args: package([args.query]))
         self.assertEqual(result.execution.status, 'completed')
         self.assert_delivery(wire)
@@ -340,7 +346,7 @@ class SearchEvidencePolicyTests(unittest.TestCase):
                 raise RuntimeError('PRIVATE_ERROR')
             return package(['good'])
         result, wire = self.execute('chat', [response([
-            function('bad', '{"query":"bad"}'), function('good', '{"query":"good"}')]),
+            function('bad', '{"query":"bad","top_k":1}'), function('good', '{"query":"good","top_k":2}')]),
             self.final('chat', 1, (0,))], handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assert_delivery(wire)

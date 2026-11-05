@@ -157,14 +157,17 @@ class ChatWorkflowTests(unittest.TestCase):
         deps.workflow().run(CONTEXT, question)
         initial = deps.client.requests[0][0]
         self.assertEqual([(m.role, m.kind) for m in initial],
-                         [("system", "policy"), ("system", "policy"), ("user", "user_input")])
-        self.assertEqual(json.loads(initial[-1].content), {"user_message": question, "patient_scope_available": True})
+                         [("system", "policy"), ("system", "policy"), ("user", "user_input"), ("system", "agent_context")])
+        self.assertEqual(json.loads(next(m.content for m in initial if m.kind == "user_input")), {"user_message": question, "patient_scope_available": True})
         self.assertFalse(any(m.kind == "tool_result" for m in initial))
         for messages, _ in deps.client.requests:
             text = json.dumps([m.model_dump(mode="json") for m in messages], ensure_ascii=False)
             for identifier in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id)):
                 self.assertNotIn(identifier, text)
-            self.assertFalse(any(m.kind == "agent_context" for m in messages))
+            progress = [json.loads(m.content) for m in messages if m.kind == "agent_context"]
+            self.assertEqual(len(progress), 1)
+            self.assertEqual(set(progress[0]), {"context_type", "remaining_candidate_budget", "candidate_limit", "target_top_k"})
+            self.assertEqual(progress[0]["context_type"], "chat_search_budget")
             self.assertTrue(all(m.type == "function_call_output" for m in messages if m.kind == "tool_result"))
             system = "\n".join(m.content for m in messages if m.role == "system")
             self.assertNotIn("합성 테스트 환자", system)
