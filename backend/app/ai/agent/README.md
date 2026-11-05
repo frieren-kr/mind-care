@@ -2130,11 +2130,13 @@ Chat 초기 Tool 선택 기준에만 진료 조회 문장을 추가하며 Contra
 전체 방문 건수나 LIMIT 이전 건수가 아니다. DB 조회 및 Tool 반환값 계약은 변경하지 않는다.
 
 
-## get_patient_assessments — Contract-only
+## get_patient_assessments — Handler / Adapter
 
 `tools/assessments.py`는 `PatientAssessmentsInput`, `AssessmentItem`, `PatientAssessmentsOutput`,
-`PATIENT_ASSESSMENTS_DATA_POLICY`를 소유한다. canonical `ToolName.PATIENT_ASSESSMENTS`만 등록하며
-Handler·Adapter와 운영 ToolSpec은 없다. 합성 Handler는 테스트 모드에서만 사용한다.
+`PATIENT_ASSESSMENTS_DATA_POLICY`를 소유한다. `PatientAssessmentsHandler`와
+`PatientAssessmentsAdapter`가 구현되어 있으며 `build_chat_registry(..., assessments_reader=...)`는
+환자 선택 시에만 canonical ToolSpec을 등록한다. 기본 Adapter는 기존 함수를 호출 시점에 가져온다.
+빈 production_registry와 Feed용 검색 전용 Factory는 유지하며 새 API는 만들지 않는다.
 
 입력은 `mode="latest_by_type"`, `assessment_type=None`, `limit=20`이다. limit은 최대 반환 개수로
 엄격한 정수 1~30이며 정확한 결과 개수가 아니다. 검사명은 null 또는 1~64자 nonblank 문자열로
@@ -2160,11 +2162,29 @@ result_detail은 비신뢰 원문이며 평가 주체·날짜·null·빈 목록�
 정책은 ToolContract가 소유하고 기존 Runner가 출력 검증 성공 후 별도 trusted system 메시지로
 요청당 한 번만 전달한다. 초기 프롬프트나 Tool Description에 정책 전문을 미리 포함하지 않는다.
 
-후속 Handler·Adapter는 권한/환자 Scope, 검사명 정규화, 검사별 최신 선택·정렬·limit 및 메타데이터
-매핑을 보장해야 한다. 메타데이터는 ASSESSMENT_TYPES/list_assessment_types()의 현재 정의와 연결하고
-원본 점수·날짜·서술은 보존한다. 확인 불가한 메타데이터는 추정하지 않는다. nullable 기본값 때문에
-실제 매핑 누락이 숨지 않는지도 검증한다. 점수와 서술이 상충해도 임의 보정하지 않는다.
-ToolTrace.result_count의 assessments 지원은 실제 Handler 연결 시 검토하며 이번에는 Executor를 변경하지 않는다.
+Handler는 검증된 Context/mode/assessment_type/limit만 Reader에 전달한다. Adapter는 get_patient()으로
+소속을 확인한 뒤, 입력 검사명에 기존 normalize_assessment_type()을 적용한다. 미지원 입력은 빈 성공이
+아닌 오류다. 검사별 최신 결과는 get_latest_assessments(patient_id), 이력은
+list_assessments(patient_id, assessment_type=표준 검사명 또는 None, limit=limit)를 재사용한다.
+latest_by_type은 반환 목록 전체의 환자·타입·누락 필드·검사 종류 중복을 검사한 뒤
+특정 검사 필터와 limit를 적용한다. 이름순은 get_latest_assessments의 DB collation을 따르며
+다를 수 있는 Python 문자열 순서를 중복 강제하지 않는다. history는 검사별 최신 재선정 없이 DB의 평가일·입력 시각 내림차순,
+id 오름차순을 검증하고 보존하며 조건 불일치·초과 반환을 실패시킨다. 재정렬·동일 날짜 중복 제거는 없다.
+
+메타데이터는 기존 list_assessment_types()의 AssessmentTypeInfo를 사용하며 검사명·점수 범위표를
+Agent에 복제하지 않는다. CDR allowed의 최저·최고값 계산도 Backend 정본이 담당한다.
+name/min/max/higher_is_worse만 공개 필드로 연결하고 id/patient_id/created_at은 제외한다.
+성공한 메타데이터 목록에 해당 검사 항목이 없으면 네 필드는 None이며, 저장된 검사명은 바꾸지 않는다.
+조회 함수 실패나 잘못된 메타데이터를 정상 누락으로 숨기지 않는다. 빈 선정 결과에는 메타데이터 조회가 없다.
+원본 score/result_detail/assessed_at/assessed_by가 빠졌는지 원래 fields_set도 검사한다.
+저장된 점수·날짜·서술과 점수/서술 간 차이는 보존하며 임상적 정정·새 점수 범위 검증을 하지 않는다.
+공통 Executor는 출력 검증·직렬화된 assessments의 실제 반환 개수(빈 성공 0, 실패 None)를
+ToolTrace.result_count에 기록한다. 전체 평가 횟수나 LIMIT 이전 건수를 의미하지 않는다.
+
+테스트는 get_patient_fn/get_latest_assessments_fn/list_assessments_fn/list_assessment_types_fn을
+주입한다. 실제 DB 권한·동시 변경 시 소속 확인과 조회의 일관성·정렬 collation·최신 1건의 실제 선정은
+DB 통합 검증 대상이다. 점수/서술의 임상적 의미와 실제 모델 답변 품질도 오프라인 통과만으로 입증하지 않는다.
+이번 구현에서 DB·DTO·기존 Contract·Data Policy·Runner·Feed는 변경하지 않는다.
 
 ## 환자 날짜별 안전 체크 Tool 계약
 

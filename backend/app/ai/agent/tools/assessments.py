@@ -1,10 +1,10 @@
-"""Registered assessment contracts and interpretation; no DB handler or normalization."""
+"""Registered assessment contracts, interpretation and Reader-backed Handler."""
 from datetime import date
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import Field, StrictInt, field_validator
 
-from ..schemas import AgentModel
+from ..schemas import AgentContext, AgentModel
 
 
 PATIENT_ASSESSMENTS_DATA_POLICY = """[인지기능 및 임상 평가 기록 데이터 해석 정책]
@@ -237,3 +237,20 @@ class PatientAssessmentsOutput(AgentModel):
             "전체 평가 기록이나 전체 건수를 보장하지 않는다."
         ),
     )
+
+
+class PatientAssessmentsReader(Protocol):
+    def get_patient_assessments(self, *, context: AgentContext,
+                                mode: Literal["latest_by_type", "history"],
+                                assessment_type: str | None, limit: int) -> PatientAssessmentsOutput:
+        """Read authorized selected assessments with current scale metadata."""
+        ...
+
+
+class PatientAssessmentsHandler:
+    def __init__(self, reader: PatientAssessmentsReader):
+        self.reader = reader
+
+    def __call__(self, context: AgentContext, args: PatientAssessmentsInput) -> PatientAssessmentsOutput:
+        return self.reader.get_patient_assessments(context=context, mode=args.mode,
+            assessment_type=args.assessment_type, limit=args.limit)
