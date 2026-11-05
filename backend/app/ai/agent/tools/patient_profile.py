@@ -1,4 +1,8 @@
-"""Interpretation policy for stored patient profiles; no retrieval or models."""
+"""Stored patient profile policy and thin Handler; no DB access."""
+from typing import Protocol
+
+from ..schemas import AgentContext
+from .contracts import PatientProfileInput, PatientProfileOutput
 
 PATIENT_PROFILE_DATA_POLICY = """[환자 기본 프로필 데이터 해석 정책]
 
@@ -48,3 +52,19 @@ null 및 빈 목록을 정상 상태나 해당 사실의 실제 부재로 단정
 현재 반환된 프로필에서 확인 가능한 사실만 설명한다.
 기록되지 않은 개인정보, 증상, 진단, 단계,
 치료 계획 또는 환자 상태를 만들어내지 않는다."""
+
+
+class PatientProfileReader(Protocol):
+    def get_patient_profile(self, *, context: AgentContext) -> PatientProfileOutput:
+        """Read the selected patient's profile; implementations own source/scope checks."""
+        ...
+
+
+class PatientProfileHandler:
+    """Forward the trusted Context; Executor owns input/output validation and errors."""
+
+    def __init__(self, reader: PatientProfileReader):
+        self.reader = reader
+
+    def __call__(self, context: AgentContext, args: PatientProfileInput) -> PatientProfileOutput:
+        return self.reader.get_patient_profile(context=context)
