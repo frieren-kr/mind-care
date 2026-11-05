@@ -143,6 +143,33 @@ class MedicalVisitsExecutionCompatibilityTests(unittest.TestCase):
     def registry(self, handler):
         return ToolRegistry((ToolSpec(CONTRACT, handler, test_only=True),), mode='test')
 
+    def test_executor_trace_counts_validated_returned_visits_including_empty(self):
+        for count in (0, 2):
+            data = {'visits': [{**ROW, 'visit_content': 'PRIVATE visit note'} for _ in range(count)]}
+            executor = ToolExecutor(self.registry(Mock(return_value=data)))
+            with self.assertLogs('app.ai.agent.executor', level='INFO') as captured:
+                outcome, trace = executor.execute(
+                    ToolCall(id='visit', name=CONTRACT.name.value, arguments={}), CONTEXT)
+            self.assertTrue(outcome.success)
+            self.assertEqual(trace.result_count, count)
+            self.assertEqual(outcome.data, PatientMedicalVisitsOutput.model_validate(data).model_dump(mode='json'))
+            log = '\n'.join(captured.output)
+            self.assertIn(f'result_count={count}', log)
+            self.assertNotIn('PRIVATE', log)
+
+    def test_executor_failed_or_invalid_visits_have_no_result_count(self):
+        cases = [(Mock(return_value=None), 'empty_result'),
+                 (Mock(side_effect=RuntimeError('PRIVATE DB detail')), 'tool_exception'),
+                 (Mock(return_value={'visits': [ROW, {**ROW, 'is_visited': 1}]}), 'invalid_output')]
+        for handler, code in cases:
+            with self.subTest(code=code):
+                outcome, trace = ToolExecutor(self.registry(handler)).execute(
+                    ToolCall(id='visit', name=CONTRACT.name.value, arguments={}), CONTEXT)
+                self.assertFalse(outcome.success)
+                self.assertEqual(outcome.error.code, code)
+                self.assertIsNone(outcome.data)
+                self.assertIsNone(trace.result_count)
+
     def test_executor_validates_and_passes_trusted_context(self):
         data = {'visits': [{**ROW, 'diagnosis': '등록된 합성 소견', 'visit_content': '원문 메모'}]}
         handler = Mock(return_value=data)

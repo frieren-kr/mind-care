@@ -2125,9 +2125,9 @@ Chat 초기 Tool 선택 기준에만 진료 조회 문장을 추가하며 Contra
 
 후속 검증: 실제 DB 필터와 LIMIT 전 선정·정렬, 빈 결과에서도 소속 확인, 병렬 호출 안전성,
 기존 소속 조회와 목록 조회 간 트랜잭션 일관성 및 운영 연결. Fake 조회만으로 원본 전체에서
-가장 가까운 일정이 선정됐음을 입증하지는 않는다. `ToolTrace.result_count`는 기존 Executor가
-visits를 집계하지 않아 성공 시에도 None이다. 실행·반환값에는 영향이 없으며 공통 Executor의
-관측 건수 지원 여부는 별도 후속 검토로 남긴다. 이번 구현에서 DB·Executor를 변경하지 않는다.
+가장 가까운 일정이 선정됐음을 입증하지는 않는다. `ToolTrace.result_count`는 공통 Executor가
+출력 검증·직렬화에 성공한 visits의 실제 반환 개수를 기록한다. 정상 빈 목록은 0이며 실패는 None이다.
+전체 방문 건수나 LIMIT 이전 건수가 아니다. DB 조회 및 Tool 반환값 계약은 변경하지 않는다.
 
 
 ## get_patient_assessments — Contract-only
