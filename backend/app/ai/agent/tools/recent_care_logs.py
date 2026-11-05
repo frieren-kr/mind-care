@@ -1,4 +1,10 @@
-"""Interpretation policy for stored patient care logs; no retrieval or models."""
+"""Stored patient care log policy and rolling-window Handler; no DB access."""
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from typing import Protocol
+
+from ..schemas import AgentContext
+from .contracts import RecentCareLogsInput, RecentCareLogsOutput
 
 RECENT_CARE_LOGS_DATA_POLICY = """[최근 환자 돌봄 기록 데이터 해석 정책]
 
@@ -43,3 +49,27 @@ logs가 비어 있어도 total_count가 양수이면 조회 조건 내 기록이
 
 현재 반환된 데이터에서 확인 가능한 사실만 설명한다.
 기록되지 않은 측정값, 사건, 날짜, 원인 또는 임상적 판단을 만들어내지 않는다."""
+
+
+class RecentCareLogsReader(Protocol):
+    def get_recent_care_logs(self, *, context: AgentContext, start_at: datetime,
+                             end_at: datetime, limit: int) -> RecentCareLogsOutput:
+        """Read authorized patient_care rows and their pre-limit count in [start, end)."""
+        ...
+
+
+class RecentCareLogsHandler:
+    """One clock read per Tool call, then UTC elapsed-time arithmetic and Reader."""
+
+    def __init__(self, reader: RecentCareLogsReader, *, now_fn: Callable[[], datetime] | None = None):
+        self.reader = reader
+        self.now_fn = now_fn
+
+    def __call__(self, context: AgentContext, args: RecentCareLogsInput) -> RecentCareLogsOutput:
+        end_at = datetime.now(timezone.utc) if self.now_fn is None else self.now_fn()
+        if not isinstance(end_at, datetime) or end_at.utcoffset() is None:
+            raise ValueError("Care log reference time must be timezone-aware")
+        end_at = end_at.astimezone(timezone.utc)
+        start_at = end_at - timedelta(hours=24 * args.days)
+        return self.reader.get_recent_care_logs(context=context, start_at=start_at,
+                                               end_at=end_at, limit=args.limit)

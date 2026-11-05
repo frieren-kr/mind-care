@@ -1371,8 +1371,9 @@ annotation 저장, semantic memory 갱신 등의 side effect를 수행하지 않
 
 `get_recent_care_logs`는 trusted server `AgentContext`가 지정한 현재 사용자/환자에 대해,
 간병인이 저장한 최근 **patient_care 돌봄 기록**을 제한된 범위에서 읽기 전용으로 조회해
-개인화 context를 제공하는 Tool이다. 현재는 합성 Fake만 존재한다. 아래 조회/권한 의미는
-V1 계약이며 실제 DB 조회 함수, Backend DTO/Adapter, Real Handler, production 등록은 후속이다.
+개인화 context를 제공하는 Tool이다. Handler·Adapter와 Chat Registry 등록은 구현되어 있다.
+전용 DB 조회 함수는 미연결이며, 현재 성공 경로는 주입된 가짜 조회 함수로 검증한다.
+기존 Feed Snapshot을 가져와 사후 필터링하는 대체 경로는 사용하지 않는다.
 
 LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며 문자열 숫자/bool/float를
 거부한다. `days`는 기본 14, 1..90이고 `limit`은 기본 10, 1..30의 최대 반환 개수다.
@@ -1380,15 +1381,16 @@ LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며
 대상 사용자/환자와 종료 시각을 LLM argument로 선택하거나 바꿀 수 없다.
 기존 PromptBuilder의 trusted Context system message와 ID 전달은 이번에 변경하지 않는다.
 
-현재 단일 caregiver DB 구조에서 **향후 Real Handler/Backend Adapter가 강제할 backing semantics**:
+현재 단일 caregiver DB 구조에서 **실제 DB 조회 함수가 보장해야 할 backing semantics**:
 
 1. 먼저 `patient_profiles.id == context.patient_id`인 환자의
    `patient_profiles.caregiver_id == context.user_id`인지 서버에서 검증한다.
 2. 조회 row는 `care_logs.patient_id == context.patient_id`,
    `care_logs.user_id == context.user_id`, `care_logs.log_type == "patient_care"`를 모두 만족해야 한다.
 
-이는 현재 Fake가 실제 접근 권한을 검증한다는 뜻이 아니다. 권한/identity 실패를 빈 logs로
-위장하지 않는다. DB query, 권한 적용, timeout/cancellation 및 production 연결은 후속 책임이다.
+Adapter는 반환된 모든 row의 user/patient/log_type을 검증하지만, Fake 테스트나 row 검증만으로
+실제 환자 소속·권한을 보장하지 않는다. 특히 빈 결과에서도 DB 함수가 권한을 확인해야 한다.
+권한/identity 실패를 빈 logs로 위장하지 않는다. 실제 SQL·권한·트랜잭션 검증은 후속 책임이다.
 
 `end_at`은 Handler가 요청당 한 번 결정한 조회 종료 시각이고,
 UTC 기준으로 `start_at = end_at - timedelta(days=args.days)`다. 달력 날짜 N개가 아닌 최근 **N×24시간
@@ -1397,7 +1399,8 @@ rolling window**이며 DST 등에서도 UTC instant 기준으로 N×24시간을 
 `start_at < end_at`이어야 한다. 모든 시각은 timezone-aware이며 offset이 달라도 실제 instant로
 비교한다. `logged_at`은 DB의 기록 시각이며 content가 서술하는 사건/증상의 발생 시각으로 추론하지 않는다.
 
-향후 Real Handler는 종료 시각을 timezone-aware instant로 결정하고, duration 계산 전에 UTC로 정규화한다.
+Handler는 호출당 한 번 종료 시각을 결정하고, timezone-aware인지 확인한 뒤 UTC로 정규화한다.
+테스트에서만 now_fn으로 고정 시각을 주입할 수 있으며 duration 계산 전에 UTC로 변환한다.
 
 ```python
 end_utc = end_at.astimezone(timezone.utc)
@@ -1407,8 +1410,7 @@ start_utc = end_utc - timedelta(hours=24 * args.days)
 DB의 `TIMESTAMPTZ` 조회 경계도 instant 기준의 `start_utc <= logged_at < end_utc`로 적용한다.
 local wall-clock timezone datetime에 직접 `timedelta(days=...)`를 적용하는 계산에 의존하지 않는다.
 DST spring-forward/fall-back에서도 실제 elapsed duration은 항상 `days × 24시간`이어야 한다.
-이는 후속 구현 규칙이며 현재 Real Handler는 없다. 향후 Handler 테스트에서는 두 DST 전환 모두
-`days=1`의 UTC elapsed가 정확히 24시간인지 확인한다.
+Handler 테스트는 두 DST 전환 모두 `days=1`의 UTC elapsed가 정확히 24시간인지 확인한다.
 
 출력은 `period`, `logs`, `total_count`뿐이다. `period`는 `start_at`, `end_at`만,
 각 `CareLogItem`은 `logged_at`, `content`, `mood_tag`만 포함한다. 환자/사용자/간병인 ID와
@@ -1420,7 +1422,7 @@ DST spring-forward/fall-back에서도 실제 elapsed duration은 항상 `days ×
 `total_count`는 동일한 authorization/patient/user/log_type/period 조건의 **limit 적용 전 전체 row 수**다.
 Handler는 `0 <= len(logs) <= limit`, `len(logs) <= total_count`를 유지해야 하며 일관된
 DB snapshot에서는 보통 `len(logs) == min(limit, total_count)`다. count와 목록의 snapshot
-일관성 확보는 Real Handler 책임이다. Output validator는 input.limit를 알지 못하므로
+일관성 확보는 후속 DB 조회 함수 책임이다. Output validator는 input.limit를 알지 못하므로
 이를 추측하지 않는다. 다만 어떤 유효한 V1 input에서도 31개 이상을 반환할 수 없으므로
 Output schema는 `logs`의 절대 최대 길이 30을 강제하며, count 하한, 기간 포함 여부, 최신순도 검증한다.
 
@@ -1449,6 +1451,34 @@ invalid output은 failure이며 empty success로 숨기지 않는다. 기존 Exe
 임상 진단/상태 판정, annotation 저장, profile 수정, embedding/memory 생성·갱신을 하지 않는다.
 read-only이며 business side effect가 없다. 긴 content의 크기 제한/truncation 정책과
 Real Handler용 DB index/performance 검토는 후속이며 이번 V1에 새 필드나 DB 변경을 추가하지 않는다.
+
+#### DB 담당자 후속 연결 계약
+
+`RecentCareLogsHandler`는 기간을 계산하고 Reader를 호출한다. `RecentCareLogsAdapter(query_fn=...)`는
+다음 keyword 입력·반환 계약의 함수를 1회 호출하며, 새로운 SQL이나 DB 함수를 정의하지 않는다.
+
+```python
+query_fn(*, user_id: UUID, patient_id: UUID, start_at: datetime, end_at: datetime,
+         limit: int) -> FeedReadCollection[FeedReadCareLog]
+```
+
+함수명은 추후 DB 담당자와 확정한다. 반환 DTO의 items/total_count는 모두 필수다.
+DB 함수는 환자의 caregiver_id 확인, user_id/patient_id/patient_care 및 `[start_at,end_at)` 필터,
+`logged_at DESC, id DESC` 정렬과 limit 적용 전 전체 건수를 동일한 권한 확인·읽기 전용
+REPEATABLE READ Snapshot에서 보장해야 한다. 권한 실패는 정상 0건으로 반환하지 않는다.
+DB id는 내부 정렬에만 사용하고 기존 FeedReadCareLog DTO에는 포함하지 않는다.
+
+Adapter는 기존 FeedReadCollection/FeedReadCareLog로 결과를 재검증한 뒤 scope·현재 limit를
+검사하고 RecentCareLogsOutput으로 투영한다. 기간·최신순·건수 하한은 기존 Output 검증을
+재사용한다. 위반 행을 삭제하거나, 정렬·중복 제거·total_count 재계산·원문 축약을 하지 않는다.
+`query_fn=None`인 기본 Adapter는 NotImplementedError를 발생시키며 Executor의 tool_exception으로
+처리된다. DB 미연결을 정상 빈 조회로 대체하지 않는다. 생성 시점에는 DB 접근을 하지 않는다.
+
+후속 함수는 `RecentCareLogsAdapter(query_fn=조회함수)`를 구성하여
+`build_chat_registry(..., care_logs_reader=adapter)`에 주입하면 된다. 환자 선택 시에만 Tool을
+등록하며 기존 검색·프로필 Tool과 Feed용 검색 전용 Factory는 유지한다. 새 API는 만들지 않는다.
+가짜 조회 함수 테스트는 SQL 필터·정렬 tie-break·정확한 집계·Snapshot의 실제 일관성을
+입증하지 않는다. 이 항목과 실제 운영 연결은 이후 DB 통합 테스트로 확인한다.
 
 ### search_evidence V1 semantics
 

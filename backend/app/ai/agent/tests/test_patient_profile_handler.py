@@ -51,7 +51,7 @@ class PatientProfileHandlerTests(TestCase):
     def test_chat_factory_uses_canonical_production_specs_and_keeps_search_only_factory(self):
         tools = build_chat_registry(CONTEXT)
         self.assertEqual(tools.mode, 'production')
-        self.assertEqual(set(tools.names()), {'search_evidence', 'get_patient_profile', 'get_caregiver_profile'})
+        self.assertEqual(set(tools.names()), {'search_evidence', 'get_patient_profile', 'get_caregiver_profile', 'get_recent_care_logs'})
         for name in (ToolName.PATIENT_PROFILE, ToolName.SEARCH_EVIDENCE):
             spec = tools.get(name.value)
             self.assertIs(spec.contract, TOOL_CONTRACTS[name])
@@ -143,7 +143,7 @@ class PatientProfileHandlerTests(TestCase):
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertEqual(result.execution.errors, [])
                 self.assertEqual(result.sources, [])
-                self.assertEqual({d['name'] for d in wire[0]['tools']}, {'search_evidence','get_patient_profile','get_caregiver_profile'})
+                self.assertEqual({d['name'] for d in wire[0]['tools']}, {'search_evidence','get_patient_profile','get_caregiver_profile','get_recent_care_logs'})
                 self.assertFalse(any(m.get('content') == PATIENT_PROFILE_DATA_POLICY for m in wire[0]['input']))
                 messages = wire[1]['input']
                 output = next(m for m in messages if m.get('type') == 'function_call_output' and m['call_id'] == 'profile')
