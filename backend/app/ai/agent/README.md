@@ -2188,8 +2188,9 @@ DB 통합 검증 대상이다. 점수/서술의 임상적 의미와 실제 모�
 
 ## 환자 날짜별 안전 체크 Tool 계약
 
-`get_patient_safety_events`는 canonical Contract 선언만 제공한다. Handler·Adapter·DB 조회와
-운영 Registry 연결은 아직 이 작업의 범위가 아니며, 미연결 상태 자체를 결함으로 취급하지 않는다.
+`get_patient_safety_events`는 기존 canonical Contract에 `PatientSafetyEventsHandler`와
+`PatientSafetyEventsAdapter`를 연결한다. `build_chat_registry(..., safety_events_reader=...)`에서
+환자 선택 시에만 등록하며 기본 Adapter는 기존 DB 함수를 호출 시점에 가져온다. 새 API는 없다.
 `patient_scoped=True`를 기존 Executor가 사용한다. 환자/사용자 ID와 기준 날짜는 LLM 입력으로 받지 않는다.
 
 | mode | 허용 기간 인자 | 의미 |
@@ -2202,7 +2203,8 @@ DB 통합 검증 대상이다. 점수/서술의 임상적 의미와 실제 모�
 거부하며 빈 입력은 최근 30일이다. 단일 object JSON Schema와 필드 설명을 사용하고,
 조건부 필수/금지 조합은 Pydantic Validator가 최종 검증한다. 내부 미사용 필드는 None이며
 입력을 재직렬화할 때는 `model_dump(exclude_none=True)`로 활성 인자만 전달한다.
-월 경과 수에는 임의 보관기간 상한을 두지 않는다. 현재 날짜를 읽거나 월초·월말·윤년을 계산하지 않는다.
+월 경과 수에는 임의 보관기간 상한을 두지 않는다. Handler가 KST 기준일을 호출당 한 번 읽고
+같은 Tool 파일의 순수 함수 resolve_safety_period()로 달력 기간을 계산한다. today_fn 주입을 지원한다.
 
 출력은 필수 `period.start_date/end_date`(양 끝 포함, 1~31일)와 필수 `events`(최대 31행)다.
 각 행은 `event_date`, 세 필수 StrictBool `has_fall/has_wandering/has_missing`,
@@ -2217,14 +2219,26 @@ id/patient_id/created_at, limit, total_count, has_more, 페이지네이션은 �
 전용 Data Policy는 기존 ToolContract 경로에서 출력 검증 성공 후에만 system 메시지로 한 번 전달된다.
 초기 Definition에는 기능과 Input Schema만 있고, 별도의 Workflow 후속 Hook은 추가하지 않는다.
 
-향후 Handler·Adapter가 KST 기준 날짜, 모드별 기간, 월 경계·연도 변경·윤년,
-계산된 연도의 표현 가능 범위(1~9999), 미래 월 요청 거부 및 실제 요청 기간 일치를 보장한다.
+Handler는 기존 app.user_schemas.today()를 사용하고 recent_days에서 오늘-(days-1)부터 오늘까지,
+두 월 모드에서 월 1일~말일을 적용한다. 월 인덱스와 calendar.monthrange()로 연도 변경·윤년을
+처리하며 0001년 이전으로 넘어가는 계산과 미래 월은 실패시킨다. 9999-12도 다음 달을 생성하지
+않고 계산한다. Reader 반환 period가 실제 요청 기간과 다르면 실패한다.
 현재 월은 월 전체를 조건으로 사용하되 미래 날짜의 기록을 생성하거나 false로 채우지 않는다.
-권한·원본 환자 확인 후 공개 필드만 투영하고, 모두 false인 행도 포함하여 기간 내 모든 DB 행을
-누락 없이 조회해야 한다. 최대 31행이라는 DTO 검증만으로 조회의 완전성을 증명할 수 없다.
+Adapter는 get_patient()으로 환자 ID와 caregiver_id를 확인한 뒤
+list_safety_events(patient_id, start_date=시작일, end_date=종료일, limit=31)를 1회 호출한다.
+DB의 UNIQUE(patient_id,event_date)와 최대 31일 조건에 따라 기간 내 모든 저장 행을 조회한다.
+Feed의 true 플래그/180일 필터는 사용하지 않는다. source SafetyEventOut과 원래 fields_set을
+검사하여 note 누락·다른 환자·비정상 Boolean을 거부하고 공개 5개 필드만 명시적으로 투영한다.
+날짜 정렬·중복·기간 포함 여부는 기존 Output Validator를 재사용하며 행 삭제·재정렬·절단은 없다.
+최대 31행이라는 DTO 검증만으로 조회의 완전성을 증명할 수 없다.
 조회 실패를 events=[]로 숨기지 않는다. 자유 메모의 개인정보 자동 제거는 이 계약이 보장하지 않는다.
-대표 성공·빈 결과·매핑 누락은 MockTransport로 확인하며, 실제 달력 계산·DB·권한 및
-LLM의 사용자 표현→mode 선택 평가는 각각 향후 구현/실제 모델 평가에서 수행한다.
+공통 Executor의 events 관측 건수는 반환된 날짜별 행 개수다. 빈 성공은 0, 실패는 None이며
+사고 발생 횟수나 조회 기간의 날짜 수가 아니다. Chat 초기 Tool 선택 문장에 긴급 안전 안내 우선을
+포함하고 상세 Data Policy는 기존 성공 후 요청당 1회 전달 경로를 그대로 사용한다.
+달력 계산·상한·잘못된 반환값과 SDK 정책 메시지는 오프라인 테스트로 확인한다. 실제 DB의 권한,
+기간 조회 완전성·유일성·동시 변경 시 소속 확인과 조회의 일관성 및 운영 연결은 후속 통합 검증이다.
+LLM의 사용자 표현→mode 선택과 실제 안전 답변 품질은 Mock 통과만으로 입증하지 않는다.
+DB·DTO·기존 Contract·Data Policy·Runner·Feed 및 검색 전용 Factory는 변경하지 않는다.
 
 ## 간병인 프로필 Tool 계약
 

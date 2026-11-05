@@ -83,7 +83,7 @@ class RecentCareLogsHandlerTests(TestCase):
 
     def test_selected_patient_registry_adds_canonical_logs_but_user_scope_omits_it(self):
         tools=build_chat_registry(CONTEXT)
-        self.assertEqual(set(tools.names()),{'search_evidence','get_patient_profile','get_caregiver_profile','get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments'})
+        self.assertEqual(set(tools.names()),{'search_evidence','get_patient_profile','get_caregiver_profile','get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
         spec=tools.get('get_recent_care_logs')
         self.assertIs(spec.contract,TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS])
         self.assertTrue(spec.parallel_safe)

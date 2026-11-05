@@ -1,10 +1,12 @@
-"""Date-level safety check contracts and interpretation; no lookup or date resolution."""
-from datetime import date
-from typing import Literal
+"""Date-level safety contracts, interpretation and calendar-period Handler."""
+from calendar import monthrange
+from collections.abc import Callable
+from datetime import date, timedelta
+from typing import Literal, Protocol
 
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
-from ..schemas import AgentModel
+from ..schemas import AgentContext, AgentModel
 
 
 PATIENT_SAFETY_EVENTS_DATA_POLICY = """[환자 날짜별 안전 체크 기록 해석 정책]
@@ -96,3 +98,47 @@ class PatientSafetyEventsOutput(AgentModel):
         if any(previous <= current for previous, current in zip(dates, dates[1:])):
             raise ValueError("Safety events must have unique dates in latest-first order")
         return self
+
+
+def resolve_safety_period(args: PatientSafetyEventsInput, reference_date: date) -> SafetyEventsPeriod:
+    """Resolve inclusive calendar dates without clipping months or underflow."""
+    if type(reference_date) is not date:
+        raise ValueError("Safety events reference must be a KST date")
+    if args.mode == "recent_days":
+        return SafetyEventsPeriod(start_date=reference_date - timedelta(days=args.days - 1), end_date=reference_date)
+    if args.mode == "relative_month":
+        index = (reference_date.year - 1) * 12 + reference_date.month - 1 - args.months_ago
+        if index < 0:
+            raise ValueError("Safety events month is out of range")
+        year_index, month_index = divmod(index, 12)
+        year, month = year_index + 1, month_index + 1
+    else:
+        year, month = args.year, args.month
+        if (year, month) > (reference_date.year, reference_date.month):
+            raise ValueError("Safety events month must not be in the future")
+    return SafetyEventsPeriod(start_date=date(year, month, 1),
+        end_date=date(year, month, monthrange(year, month)[1]))
+
+
+class PatientSafetyEventsReader(Protocol):
+    def get_patient_safety_events(self, *, context: AgentContext,
+                                  start_date: date, end_date: date) -> PatientSafetyEventsOutput:
+        """Read every authorized stored row in the inclusive period."""
+        ...
+
+
+class PatientSafetyEventsHandler:
+    def __init__(self, reader: PatientSafetyEventsReader, *, today_fn: Callable[[], date] | None = None):
+        self.reader = reader
+        self.today_fn = today_fn
+
+    def __call__(self, context: AgentContext, args: PatientSafetyEventsInput) -> PatientSafetyEventsOutput:
+        today_fn = self.today_fn
+        if today_fn is None:
+            from app.user_schemas import today as today_fn
+        period = resolve_safety_period(args, today_fn())
+        result = self.reader.get_patient_safety_events(context=context,
+            start_date=period.start_date, end_date=period.end_date)
+        if result.period != period:
+            raise ValueError("Safety events period mismatch")
+        return result

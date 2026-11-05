@@ -63,7 +63,7 @@ class PatientAssessmentsHandlerTests(TestCase):
         reader = Mock(spec=PatientAssessmentsReader)
         registry = build_chat_registry(CONTEXT,assessments_reader=reader)
         self.assertEqual(set(registry.names()),{'search_evidence','get_patient_profile','get_caregiver_profile',
-            'get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments'})
+            'get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
         spec = registry.get('get_patient_assessments')
         self.assertIs(spec.contract,TOOL_CONTRACTS[ToolName.PATIENT_ASSESSMENTS])
         self.assertIs(spec.handler.reader,reader)

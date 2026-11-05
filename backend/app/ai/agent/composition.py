@@ -4,6 +4,7 @@ from .adapters.patient_profile import PatientProfileAdapter
 from .adapters.patient_medications import PatientMedicationsAdapter
 from .adapters.patient_medical_visits import PatientMedicalVisitsAdapter
 from .adapters.patient_assessments import PatientAssessmentsAdapter
+from .adapters.patient_safety_events import PatientSafetyEventsAdapter
 from .adapters.recent_care_logs import RecentCareLogsAdapter
 from .adapters.rag_evidence import RagEvidenceRetriever
 from .registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
@@ -14,6 +15,7 @@ from .tools.patient_profile import PatientProfileHandler, PatientProfileReader
 from .tools.medications import PatientMedicationsHandler, PatientMedicationsReader
 from .tools.medical_visits import PatientMedicalVisitsHandler, PatientMedicalVisitsReader
 from .tools.assessments import PatientAssessmentsHandler, PatientAssessmentsReader
+from .tools.safety_events import PatientSafetyEventsHandler, PatientSafetyEventsReader
 from .tools.recent_care_logs import RecentCareLogsHandler, RecentCareLogsReader
 from .tools.search_evidence import SearchEvidenceHandler
 
@@ -37,6 +39,7 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
                         medications_reader: PatientMedicationsReader | None = None,
                         visits_reader: PatientMedicalVisitsReader | None = None,
                         assessments_reader: PatientAssessmentsReader | None = None,
+                        safety_events_reader: PatientSafetyEventsReader | None = None,
                         parallel_safe: bool = True) -> ToolRegistry:
     """Chat registry_factory: search/user profile plus selected patient read Tools.
 
@@ -63,6 +66,9 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
         assessments = PatientAssessmentsAdapter() if assessments_reader is None else assessments_reader
         specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_ASSESSMENTS],
             PatientAssessmentsHandler(assessments), parallel_safe=parallel_safe))
+        safety_events = PatientSafetyEventsAdapter() if safety_events_reader is None else safety_events_reader
+        specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_SAFETY_EVENTS],
+            PatientSafetyEventsHandler(safety_events), parallel_safe=parallel_safe))
     caregiver = CaregiverProfileAdapter() if caregiver_reader is None else caregiver_reader
     specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.CAREGIVER_PROFILE],
         CaregiverProfileHandler(caregiver), parallel_safe=parallel_safe))
