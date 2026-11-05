@@ -1,6 +1,7 @@
 """Explicit production Tool assembly; no API registration or Workflow policy."""
 from .adapters.caregiver_profile import CaregiverProfileAdapter
 from .adapters.patient_profile import PatientProfileAdapter
+from .adapters.patient_medications import PatientMedicationsAdapter
 from .adapters.recent_care_logs import RecentCareLogsAdapter
 from .adapters.rag_evidence import RagEvidenceRetriever
 from .registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
@@ -8,6 +9,7 @@ from .schemas import AgentContext
 from .tools.caregiver_profile import CaregiverProfileHandler, CaregiverProfileReader
 from .tools.evidence_tools import EvidenceRetriever
 from .tools.patient_profile import PatientProfileHandler, PatientProfileReader
+from .tools.medications import PatientMedicationsHandler, PatientMedicationsReader
 from .tools.recent_care_logs import RecentCareLogsHandler, RecentCareLogsReader
 from .tools.search_evidence import SearchEvidenceHandler
 
@@ -28,8 +30,9 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
                         patient_reader: PatientProfileReader | None = None,
                         caregiver_reader: CaregiverProfileReader | None = None,
                         care_logs_reader: RecentCareLogsReader | None = None,
+                        medications_reader: PatientMedicationsReader | None = None,
                         parallel_safe: bool = True) -> ToolRegistry:
-    """Chat registry_factory: search/user profile plus selected patient profile/logs.
+    """Chat registry_factory: search/user profile plus selected patient read Tools.
 
     Backend owns authentication and endpoint wiring. Injected readers must be
     read-only and safe for concurrent calls when parallel_safe is True.
@@ -45,6 +48,9 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
         logs = RecentCareLogsAdapter() if care_logs_reader is None else care_logs_reader
         specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS],
             RecentCareLogsHandler(logs), parallel_safe=parallel_safe))
+        medications = PatientMedicationsAdapter() if medications_reader is None else medications_reader
+        specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_MEDICATIONS],
+            PatientMedicationsHandler(medications), parallel_safe=parallel_safe))
     caregiver = CaregiverProfileAdapter() if caregiver_reader is None else caregiver_reader
     specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.CAREGIVER_PROFILE],
         CaregiverProfileHandler(caregiver), parallel_safe=parallel_safe))

@@ -252,9 +252,10 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 
 ## 복약 기록 Tool 선언 및 데이터 해석 계약
 
-`get_patient_medications`는 환자 전용 읽기 Contract로 선언되어 있다. 운영 Handler·Adapter는
-구현하거나 등록하지 않았으며 `production_registry()`는 계속 비어 있다. 기존 세 Fake Tool도 그대로다.
-아래 선언은 실제 DB 조회나 운영 연결 완료를 뜻하지 않는다.
+`get_patient_medications`는 환자 전용 읽기 Tool이다. `PatientMedicationsHandler`와
+`PatientMedicationsAdapter`가 구현되어 있으며 `build_chat_registry()`는 환자 선택 시에만
+canonical Contract로 등록한다. 기존 세 Fake Tool과 빈 `production_registry()`는 그대로다.
+실제 API 연결이나 DB 통합 검증 완료를 뜻하지는 않는다.
 
 - `tools/medications.py`: `PatientMedicationsInput(status="taking"|"stopped"|"all", limit=20)`;
   limit은 strict 정수 1~30이다. 환자는 입력 ID가 아니라 trusted AgentContext에서 결정한다.
@@ -263,7 +264,7 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
   note는 부작용에 한정되지 않은 자유 메모 원문이며 날짜·횟수·사실을 보완하지 않는다.
 - `PatientMedicationsOutput(medications, total_count)`: 목록 최대 30개, total_count는 strict 비음수 정수이며
   반환 개수 이상이다. 동일 status/Scope 조건의 limit 적용 전 건수다. 실제 limit/status 준수와
-  조회 실패 구분·권한·row identity·일관된 조회/매핑은 후속 Handler 책임이다.
+  조회 실패 구분·권한·row identity·매핑은 Adapter가 담당한다.
 
 Tool별 해석 정책은 해당 Tool 영역의 `PATIENT_MEDICATIONS_DATA_POLICY`가 소유한다.
 `ToolContract.data_policy`에 보관하되 definition의 description에는 간결한 기능 설명만 전달한다.
@@ -272,7 +273,8 @@ Tool별 해석 정책은 해당 Tool 영역의 `PATIENT_MEDICATIONS_DATA_POLICY`
 요청별 전달 집합으로 같은 Tool의 정책을 한 번만 이력에 추가한다. 이후 continuation에도 같은
 메시지 하나를 유지하며 요청 간 상태는 공유하지 않는다. 비신뢰 결과는 기존 function_call_output에
 그대로 남기며 전체 호출/결과 묶음의 순서를 바꾸거나 중간에 정책을 끼우지 않는다.
-Output Field 설명은 자동 공개되지 않는다. Chat 초기 System Prompt나 Dialogue/Data Policy는 그대로다.
+Output Field 설명은 자동 공개되지 않는다. Chat 초기 Tool 선택 정책에만 복약 조회 기준을 추가하며
+Dialogue/Data Policy 및 복약 전용 Data Policy는 그대로다.
 기존 Tool의 빈 정책은 메시지를 추가하지 않으며 Feed 검색 계약도 바뀌지 않는다.
 
 환자 전용 여부는 `ToolContract.patient_scoped`로 선언하고 기존 Executor 및 Chat 사전 Scope 검사가
@@ -284,7 +286,24 @@ Output Field 설명은 자동 공개되지 않는다. Chat 초기 System Prompt�
 전달 경로를 재사용하므로 Tool별 데이터 해석을 ChatWorkflow에 다시 작성할 필요가 없다.
 대화 행동 자체의 변경이 필요하면 별도의 Dialogue/Tool Selection 정책 작업으로 검토한다.
 
-후속 작업은 실제 데이터 조회·권한 검증·매핑·status/limit 준수·일관된 전체 건수 및 운영 Registry 연결이다.
+Handler는 검증된 Context/status/limit를 Reader에 전달한다. Adapter는 기존 `get_patient()`으로
+환자 ID와 caregiver_id를 확인한 뒤 `list_medications(patient_id, is_taking=...)`를 1회 호출한다.
+status의 taking/stopped/all은 각각 True/False/None에 대응한다. 전체 반환 목록을 기존
+MedicationOut으로 타입 재검증하고 모든 행의 patient_id/status를 확인한다. limit 밖의 잘못된
+행도 실패시키며 조용히 삭제·보정하지 않는다. DB 정렬(is_taking DESC, start_date DESC NULLS LAST,
+created_at DESC, id)을 유지한 채 limit만 적용하고, total_count는 전체 목록 길이로 계산한다.
+Feed의 최근 90일 중단약 조건은 적용하지 않는다. 7개 Tool 필드만 투영하며 UUID와 DB 갱신 시각은 제외한다.
+정상 빈 목록은 성공이지만 None·조회 오류·권한 실패는 빈 목록으로 대체하지 않는다.
+
+테스트에서는 `PatientMedicationsAdapter(get_patient_fn=..., list_medications_fn=...)` 또는
+`build_chat_registry(..., medications_reader=...)`로 가짜 Reader를 주입한다. 기본 Adapter는
+호출 시점에 기존 user_functions의 두 함수를 가져오며 생성만으로 DB에 접근하지 않는다.
+환자 미선택 시에는 기존 search_evidence/get_caregiver_profile만 노출한다.
+
+후속 작업은 Backend API 연결과 실제 DB 필터·정렬·전체 목록 조회 성능 검증이다. 소속 확인과
+목록 조회는 별도 DB 호출로 동일 트랜잭션 Snapshot을 공유하지 않으므로, 동시 소속 변경에 대한
+권한 일관성은 DB 통합 검증에서 별도로 확인해야 한다. 필요 시 DB 담당자와 조회 계약을 조정하고
+Adapter 연결 부분만 최소 변경한다. 이번 구현은 새 SQL·DB 함수·DTO·API를 추가하지 않는다.
 현재 반환 데이터만 해석하며, 향후 실제 복약 체크·누락·용량 변경 이력과 다른 출처의 활용을 금지하지 않는다.
 실제 DB/LLM 연결 및 의료적 해석의 행동 평가는 이번 오프라인 선언 검증과 구분한다.
 

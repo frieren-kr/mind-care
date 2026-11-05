@@ -1,10 +1,10 @@
-"""Registered medication data contract and interpretation; no DB handler."""
+"""Registered medication contract, interpretation and Reader-backed Handler."""
 from datetime import date
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import Field, StrictInt, model_validator
 
-from ..schemas import AgentModel
+from ..schemas import AgentContext, AgentModel
 
 
 PATIENT_MEDICATIONS_DATA_POLICY = """[복약 기록 데이터 해석 정책]
@@ -51,3 +51,19 @@ class PatientMedicationsOutput(AgentModel):
         if self.total_count < len(self.medications):
             raise ValueError("Count cannot be less than returned medications")
         return self
+
+
+class PatientMedicationsReader(Protocol):
+    def get_patient_medications(self, *, context: AgentContext,
+                                status: Literal["taking", "stopped", "all"],
+                                limit: int) -> PatientMedicationsOutput:
+        """Read authorized registered medications and their pre-limit count."""
+        ...
+
+
+class PatientMedicationsHandler:
+    def __init__(self, reader: PatientMedicationsReader):
+        self.reader = reader
+
+    def __call__(self, context: AgentContext, args: PatientMedicationsInput) -> PatientMedicationsOutput:
+        return self.reader.get_patient_medications(context=context, status=args.status, limit=args.limit)

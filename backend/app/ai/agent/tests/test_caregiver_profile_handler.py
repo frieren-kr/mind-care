@@ -60,7 +60,7 @@ class CaregiverProfileHandlerTests(TestCase):
         for context in (CONTEXT,USER_CONTEXT):
             tools = build_chat_registry(context)
             expected = {'search_evidence','get_caregiver_profile'}
-            if context.patient_id is not None: expected.update({'get_patient_profile','get_recent_care_logs'})
+            if context.patient_id is not None: expected.update({'get_patient_profile','get_recent_care_logs','get_patient_medications'})
             self.assertEqual(set(tools.names()),expected)
             self.assertEqual(tools.mode,'production')
             spec = tools.get('get_caregiver_profile')
