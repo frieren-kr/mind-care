@@ -112,6 +112,9 @@ class CaregiverFocusTest(unittest.TestCase):
     def test_query_intent(self):
         self.assertTrue(query_targets_caregiver("caregiver support programs for people with mild dementia"))
         self.assertTrue(query_targets_caregiver("보호자 부담 줄이는 법"))
+        self.assertTrue(query_targets_caregiver("간병이 너무 힘들어요"))
+        self.assertTrue(query_targets_caregiver("caregiver burden in dementia"))
+        self.assertFalse(query_targets_caregiver("엄마가 밤에 자꾸 깨요"))
         self.assertFalse(query_targets_caregiver("sleep disturbance in mild dementia: interventions and management"))
 
 

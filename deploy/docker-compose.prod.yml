@@ -31,6 +31,10 @@ services:
     build: ../backend
     image: mindcare-backend
     restart: unless-stopped
+    # X-Forwarded-For는 web(nginx, 아래 고정 IP)이 보낸 것만 믿는다 (로그인 횟수 제한을 사용자 IP 기준으로).
+    # uvicorn 0.30은 정확한 IP만 받는다 (대역 표기 X). web의 ipv4_address를 바꾸면 여기도 같이 바꾼다.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "10.231.0.10"]
     env_file: ../backend/.env
     environment:
       # .env의 DATABASE_URL(localhost)을 덮어쓴다 — 컨테이너끼리는 서비스 이름 db로 찾는다.
@@ -63,6 +67,17 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./htpasswd:/etc/nginx/htpasswd:ro  # 서버에서 만든다 (레포에 올리지 않음)
+    networks:
+      default:
+        ipv4_address: 10.231.0.10  # backend의 --forwarded-allow-ips와 같은 값
+
+# web에 고정 IP를 주려고 기본 네트워크 대역을 정해 둔다.
+# 도커 기본 대역(172.17~31, 192.168)과 EC2 기본 VPC(172.31.0.0/16)를 피했다.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 10.231.0.0/24
 
 volumes:
   pgdata:

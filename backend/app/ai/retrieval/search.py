@@ -19,10 +19,13 @@ search("엄마가 밤에 자꾸 깨요", k=5) 를 부르면 관련 논문 k편�
 여러 질문을 합칠 때 (환자 여러 명 / 고민 여러 개):
     search_by_queries(["sleep disturbance in mild dementia ...", "wandering in dementia ..."], k=5)
 
-보호자 중심 논문 미루기 (기본 켜짐):
-  환자 증상 검색어면 보호자 수면·우울, 교대근무자 등 '보호자·인력 대상' 논문 점수를 0.05 깎는다.
-  검색어에 caregiver/family/보호자/간병인 등이 있으면 깎지 않는다. (CAREGIVER_PENALTY 참고)
-    python -m app.ai.retrieval.search "sleep disturbance in mild dementia" --no-caregiver-penalty   # 끄고 비교
+환자 중심 검색 (기본 켜짐, 10/28 팀 합의):
+  환자 증상 검색어면 보호자 수면·우울·부담, 교대근무자 등 '보호자·인력 본인 대상' 논문을 **제외**한다.
+  환자+보호자가 함께 하는 연구는 남긴다 (evidence.is_caregiver_focused).
+  검색어가 보호자에 관한 것(caregiver, burden, 보호자, 간병인, 가족 등)이면 보호자 논문을 그대로 둔다
+  (evidence.query_targets_caregiver) → 간병인 부담 점검·챗봇 "간병이 힘들어요"·단어표 '보호자 지원 프로그램'용.
+  피드에서 보호자 논문 비율 조절은 웅님 Agent 담당.
+    python -m app.ai.retrieval.search "sleep disturbance in mild dementia" --keep-caregiver   # 제외 끄고 비교
 
 가이드라인 붙이기 (A안: 논문 k편과 따로, evidence 목록 맨 뒤에 evidence_type="guideline"으로):
     search("엄마가 밤에 자꾸 깨요", k=5, guidelines=2)   # 논문 5편 + 가이드라인 2개
@@ -83,11 +86,11 @@ class EvidencePackage(BaseModel):
 
 CANDIDATE_MULTIPLIER = 3  # 동물·비치매 연구 등을 걸러낸 뒤에도 k편이 남도록 k×3편을 먼저 가져온다
 
-# 환자 증상 검색에서 보호자 중심 논문(보호자 수면·우울, 교대근무자 등)의 점수를 이만큼 깎아 뒤로 미룬다.
-# 임베딩이 "누구의 수면인지"를 잘 구분하지 못해서 생기는 문제 (웅님 실환경 테스트, 10/24).
-# 골드셋 실험(scripts/eval_patient_focus.py): 0.05에서 수면 검색 Top-10의 보호자 논문 1.5편 → 0편,
-# nDCG는 거의 그대로(P1 0.448→0.431, P2 0.405→0.406, P3 0.330→0.316 — 골드셋 라벨이 보호자 관점이라 약간 손해).
-# 검색어가 보호자 본인을 찾는 것(보호자 부담·지원 프로그램 등)이면 깎지 않는다 (evidence.query_targets_caregiver).
+# 환자 증상 검색에서 보호자 중심 논문(보호자 수면·우울, 교대근무자 등) 처리.
+# 임베딩이 "누구의 수면인지"를 잘 구분하지 못해서 보호자 논문이 위로 오는 문제 (웅님 실환경 테스트, 10/24).
+#   10/25: 점수를 0.05 깎아 뒤로 미루기 (scripts/eval_patient_focus.py로 값 결정)
+#   10/28: 팀 합의로 '제외'로 변경 (환자 중심 추천). 보호자 검색어일 때는 그대로 둔다.
+# CAREGIVER_PENALTY는 '제외'를 끄고(exclude_caregiver=False) 뒤로 미루기만 할 때 쓰는 값 (실험·비교용).
 CAREGIVER_PENALTY = 0.05
 
 
@@ -97,9 +100,11 @@ def _candidates(
     exclude_animal: bool = True,
     dementia_only: bool = True,
     caregiver_penalty: float = 0.0,
+    drop_caregiver: bool = False,
 ) -> list[EvidenceItem]:
     """질문 벡터로 DB에서 가까운 논문 n편을 받아, 필터를 통과한 것만 유사도 순으로 돌려준다.
 
+    drop_caregiver=True면 보호자 중심 논문을 아예 뺀다 (환자 증상 검색일 때).
     caregiver_penalty > 0이면 보호자 중심 논문을 그 점수만큼 깎은 값으로 **순서만** 다시 정한다.
     relevance_score는 원래 코사인 유사도 그대로 둔다 (웅님 Agent 계약: "검색 유사도").
     웅님 Agent(feed_candidates._rank_topic)는 점수가 같은 묶음 안에서만 바꾸고 RAG 순서를 유지하므로
@@ -118,8 +123,11 @@ def _candidates(
             continue
         if dementia_only and not is_dementia_related(p.mesh_terms, p.title, p.abstract):
             continue
+        caregiver_paper = (drop_caregiver or caregiver_penalty) and is_caregiver_focused(p.title)
+        if drop_caregiver and caregiver_paper:
+            continue  # 환자 증상 검색에서 보호자·인력 본인 대상 논문은 뺀다
         score = float(score_by_id[p.paper_id])
-        rank_score = score - caregiver_penalty if caregiver_penalty and is_caregiver_focused(p.title) else score
+        rank_score = score - caregiver_penalty if caregiver_paper else score
         out.append((rank_score,                                                             # ⑤
             EvidenceItem(
                 evidence_type="new_research",
@@ -139,9 +147,25 @@ def _candidates(
     return [it for _, it in out]
 
 
+def _rerank(query: str, items: list[EvidenceItem]) -> list[EvidenceItem]:
+    """임베딩 상위 RERANK_POOL편을 reranker 점수로 다시 정렬한다. 나머지는 원래 순서로 뒤에 붙인다."""
+    from app.ai.retrieval.embedding import paper_text
+    from app.ai.retrieval.rerank import RERANK_POOL, rerank_scores
+
+    pool, rest = items[:RERANK_POOL], items[RERANK_POOL:]
+    scores = rerank_scores(query, [paper_text(it.title, it.abstract) for it in pool])
+    ranked = [it for _, it in sorted(zip(scores, pool), key=lambda x: x[0], reverse=True)]
+    return ranked + rest
+
+
 def _penalty_for(query: str, caregiver_penalty: float) -> float:
     """검색어가 보호자 본인을 찾으면 0, 아니면(환자 증상 검색) caregiver_penalty."""
     return 0.0 if query_targets_caregiver(query) else caregiver_penalty
+
+
+def _drop_for(query: str, exclude_caregiver: bool) -> bool:
+    """환자 증상 검색이고 exclude_caregiver면 True (보호자 논문 제외). 보호자 검색어면 False."""
+    return exclude_caregiver and not query_targets_caregiver(query)
 
 
 def _guideline_candidates(query_vec: list[float], n: int) -> list[EvidenceItem]:
@@ -191,14 +215,18 @@ def search(
     exclude_animal: bool = True,
     dementia_only: bool = True,
     guidelines: int = 0,
-    caregiver_penalty: float = CAREGIVER_PENALTY,
+    exclude_caregiver: bool = True,
+    caregiver_penalty: float = 0.0,
+    rerank: bool = False,
 ) -> EvidencePackage:
     """질문(한국어·영어 모두 가능)으로 관련 논문 k편을 찾아 Evidence Package로 돌려준다.
 
     exclude_animal=True면 동물·세포 연구(쥐 실험 등)는 결과에서 뺀다. (보호자 피드용 기본값)
     dementia_only=True면 치매·MCI와 무관한 논문(뇌졸중·파킨슨 등)은 뺀다. (evidence.is_dementia_related)
     guidelines=N이면 논문 k편 뒤에 가이드라인 N개를 따로 붙인다 (evidence_type="guideline"). 기본 0.
-    caregiver_penalty: 환자 증상 검색일 때 보호자 중심 논문 감점 (기본 0.05, 0이면 끔).
+    exclude_caregiver=True(기본)면 환자 증상 검색일 때 보호자 본인 대상 논문을 뺀다. 보호자 검색어면 그대로.
+    caregiver_penalty: 제외 대신 뒤로 미루기만 할 때의 감점 (기본 0, 실험용 — exclude_caregiver=False와 함께).
+    rerank=True면 임베딩 상위 RERANK_POOL(30)편을 reranker로 다시 정렬한 뒤 k편 (실험 중, 기본 꺼짐).
     """
     query = (query or "").strip()
     if not query or (k <= 0 and guidelines <= 0):
@@ -208,8 +236,13 @@ def search(
     if k > 0:
         filtering = exclude_animal or dementia_only
         n = k * CANDIDATE_MULTIPLIER if filtering else k
+        if rerank:
+            from app.ai.retrieval.rerank import RERANK_POOL
+
+            n = max(n, RERANK_POOL)
         items = _candidates(vec, n, exclude_animal, dementia_only,
-                            _penalty_for(query, caregiver_penalty))[:k]
+                            _penalty_for(query, caregiver_penalty), _drop_for(query, exclude_caregiver))
+        items = (_rerank(query, items) if rerank else items)[:k]
     return EvidencePackage(query=query, evidence=items + _guideline_candidates(vec, guidelines))
 
 
@@ -219,7 +252,8 @@ def search_by_queries(
     exclude_animal: bool = True,
     dementia_only: bool = True,
     guidelines: int = 0,
-    caregiver_penalty: float = CAREGIVER_PENALTY,
+    exclude_caregiver: bool = True,
+    caregiver_penalty: float = 0.0,
 ) -> EvidencePackage:
     """질문 여러 개(예: 환자별·고민별로 웅님 LLM이 만든 쿼리)로 검색해서 k편으로 합친다.
 
@@ -237,7 +271,8 @@ def search_by_queries(
 
     vecs = [embed_query(q) for q in queries]
     penalties = [_penalty_for(q, caregiver_penalty) for q in queries]
-    papers = _merge_papers(vecs, k, exclude_animal, dementia_only, penalties) if k > 0 else []
+    drops = [_drop_for(q, exclude_caregiver) for q in queries]
+    papers = _merge_papers(vecs, k, exclude_animal, dementia_only, penalties, drops) if k > 0 else []
     return EvidencePackage(query=label, evidence=papers + _merge_guidelines(vecs, guidelines))
 
 
@@ -260,11 +295,14 @@ def _merge_guidelines(vecs: list[list[float]], n: int) -> list[EvidenceItem]:
 def _merge_papers(
     vecs: list[list[float]], k: int, exclude_animal: bool, dementia_only: bool,
     penalties: list[float] | None = None,
+    drops: list[bool] | None = None,
 ) -> list[EvidenceItem]:
     """질문마다 논문 후보를 받아 라운드 로빈으로 k편 고른다."""
     n = k * CANDIDATE_MULTIPLIER
     penalties = penalties or [0.0] * len(vecs)
-    lists = [_candidates(v, n, exclude_animal, dementia_only, pen) for v, pen in zip(vecs, penalties)]
+    drops = drops or [False] * len(vecs)
+    lists = [_candidates(v, n, exclude_animal, dementia_only, pen, drop)
+             for v, pen, drop in zip(vecs, penalties, drops)]
 
     picked: dict[str, EvidenceItem] = {}
     order: list[str] = []
@@ -295,16 +333,19 @@ if __name__ == "__main__":
     ap.add_argument("--include-animal", action="store_true", help="동물·세포 연구도 포함")
     ap.add_argument("--all-diseases", action="store_true", help="치매 외 질환 논문도 포함 (필터 끄기)")
     ap.add_argument("--guidelines", type=int, default=0, help="논문 뒤에 붙일 가이드라인 개수")
-    ap.add_argument("--no-caregiver-penalty", action="store_true", help="보호자 중심 논문 감점 끄기 (비교용)")
+    ap.add_argument("--keep-caregiver", action="store_true", help="보호자 논문 제외 끄기 (비교용)")
+    ap.add_argument("--rerank", action="store_true", help="reranker로 다시 정렬 (실험)")
     a = ap.parse_args()
 
     pkg = search(a.query, a.k, exclude_animal=not a.include_animal, dementia_only=not a.all_diseases,
-                 guidelines=a.guidelines, caregiver_penalty=0.0 if a.no_caregiver_penalty else CAREGIVER_PENALTY)
+                 guidelines=a.guidelines, exclude_caregiver=not a.keep_caregiver, rerank=a.rerank)
     if a.json:
         print(pkg.model_dump_json(indent=2))
     else:
         print(f'\n질문: "{pkg.query}"  →  {len(pkg.evidence)}편\n')
         for i, e in enumerate(pkg.evidence, 1):
             tag = "가이드라인" if e.evidence_type == "guideline" else e.study_type
+            if e.evidence_type != "guideline" and is_caregiver_focused(e.title):
+                tag += "·보호자"
             print(f"{i}. [{e.relevance_score:.3f}] [{tag}] {e.title}")
             print(f"   {e.journal or e.organization or '-'} ({e.publication_year or '-'})  {e.source_url}\n")

@@ -10,7 +10,7 @@ EC2 한 대(Ubuntu 24.04, t3.medium 메모리 4GB + 스왑 4GB, Docker 설치됨
 | `backend/.dockerignore` | `.env`·덤프·로그·캐시가 이미지에 들어가지 않게 |
 | `deploy/docker-compose.prod.yml` | 서버용 compose. db(127.0.0.1:5432) + backend(127.0.0.1:8000) + web(80) |
 | `deploy/web.Dockerfile` (+ `.dockerignore`) | 프론트 웹 빌드(`expo export`) → nginx 이미지 |
-| `deploy/nginx.conf` | `/` 정적 파일, `/api/` → backend, 사이트 전체 기본 인증 |
+| `deploy/nginx.conf` | `/` 정적 파일(기본 인증), `/api/` → backend(기본 인증 없음, 로그인 토큰으로 보호 → 10번) |
 | `deploy/run_update_papers.sh` | 실행 중인 backend 컨테이너 안에서 `update_papers` 배치를 돌린다 (cron용) |
 
 compose 명령은 **항상 레포 루트에서, `--env-file backend/.env`를 붙여서** 쓴다. 아래에서는 줄여서 `$DC`로 적는다.
@@ -163,7 +163,8 @@ free -h                                                       # 배치 중 메�
 ## 8. 웹 공개 (nginx, 주소 하나)
 
 `http://서버IP/` → 프론트 웹(정적 파일), `http://서버IP/api/...` → backend(접두사 `/api`를 떼고 전달).
-**사이트 전체에 HTTP 기본 인증**(팀 공용 아이디·비밀번호 하나)이 걸린다. db·backend 포트는 그대로 `127.0.0.1`만.
+**화면(`/`)에 HTTP 기본 인증**(팀 공용 아이디·비밀번호 하나)이 걸린다. db·backend 포트는 그대로 `127.0.0.1`만.
+로그인 반영(10번) 뒤에는 `/api/`에 기본 인증이 없고, 개인화 API는 로그인 토큰(Bearer)으로 막는다.
 
 ### 8-1. AWS 설정 (처음 한 번)
 
@@ -267,6 +268,68 @@ free -h                                 # 임베딩 중 메모리·스왑
 ```
 
 끝나면 로그 마지막에 `끝 … 종료 코드 N`이 찍힌다 (0 성공, 1 일부 실패 — 실패한 요약은 다음 실행·cron이 다시 시도).
+
+## 10. 로그인(JWT) 서버 반영
+
+**로그인 화면이 붙은 프론트와 같이 올린다.** 백엔드만 먼저 올리면 지금 웹(토큰 없이 `EXPO_PUBLIC_DEV_USER_ID`로 동작)의
+홈·피드·내 정보·챗봇이 모두 401이 된다. API 동작·프론트 계약은 [`backend/AUTH_CHECK.md`](../backend/AUTH_CHECK.md).
+
+이번에 바뀌는 배포 설정:
+
+- `nginx.conf`: `/api/`는 기본 인증을 끄고(`auth_basic off`) 앱이 보낸 `Authorization: Bearer …`를 그대로 backend에 넘긴다.
+  기본 인증과 Bearer가 같은 `Authorization` 헤더를 써서 둘을 같이 걸 수 없다. 화면(`/`) 기본 인증과 `/api/docs` 차단은 그대로.
+- 로그인 횟수 제한(IP당 1분 10회)이 **사용자 IP 기준**으로 돌게, nginx가 `X-Forwarded-For`·`X-Real-IP`에 실제 접속 IP를 넣고
+  backend uvicorn은 **web 컨테이너(고정 IP `10.231.0.10`)가 보낸 값만** 믿는다 (`--proxy-headers --forwarded-allow-ips`).
+  그래서 compose 기본 네트워크 대역을 `10.231.0.0/24`로 고정했다. 서버에 이 대역을 쓰는 네트워크가 이미 있으면
+  `docker-compose.prod.yml`의 대역·IP·`--forwarded-allow-ips`를 같이 바꾼다.
+
+### 10-1. `backend/.env`에 추가 (값은 레포·단톡·로그에 붙여 넣지 않는다)
+
+- `AUTH_JWT_SECRET` — **필수**, 32바이트 이상 무작위 값. 서버에서 `python3 -c "import secrets; print(secrets.token_urlsafe(48))"`로 만든다.
+  없거나 짧으면 로그인·보호 API가 503이다.
+- `AUTH_JWT_ISSUER`, `AUTH_JWT_AUDIENCE`, `AUTH_ACCESS_TOKEN_MINUTES` — 선택 (기본값 있음, 토큰 유효 1~60분)
+- `APP_ENV` — 시연 계정 스크립트(`seed_dev_auth`)는 `development` 또는 `test`일 때만 돈다.
+
+### 10-2. 순서 (레포 루트에서)
+
+```bash
+cd ~/mind-care
+git pull
+$DC down                     # 네트워크 대역이 바뀌어 한 번 내렸다 올린다. -v 는 절대 붙이지 않는다 (DB 삭제)
+$DC up -d db                 # DB만 먼저
+$DC exec -T db psql -U mindcare -d mindcare -v ON_ERROR_STOP=1 --single-transaction \
+    < backend/app/db/migrations/011_authentication.sql
+$DC up -d --build            # 이미지 재빌드 (requirements에 PyJWT·argon2-cffi 추가) + backend·web 기동
+$DC ps
+```
+
+- 011은 대소문자·앞뒤 공백만 다른 같은 이메일이 있으면 전체가 중단된다 (정리 후 다시 실행). 다시 실행해도 안전하다.
+- 반영 중 cron 배치(5번)·채우기(9번)가 돌고 있으면 `down`이 같이 끝낸다. 배치가 없는 시간에 한다.
+
+### 10-3. 시연 계정 만들기
+
+기존 시연 사용자(`dev-seed-1~4@example.com`)에 비밀번호만 연결한다. 새 사용자를 만들지 않고 환자·기록은 그대로다.
+비밀번호는 숨김 입력(12~128자)이라 `-T` 없이 실행한다. 정한 비밀번호는 단톡으로만 공유한다.
+
+```bash
+$DC exec backend python -m scripts.seed_dev_auth --all-dev-profiles --dry-run   # 저장 후 되돌림 (점검)
+$DC exec backend python -m scripts.seed_dev_auth --all-dev-profiles
+# 한 명만: $DC exec backend python -m scripts.seed_dev_auth --email dev-seed-1@example.com
+```
+
+### 10-4. 확인
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/                       # 401 (화면 기본 인증 그대로)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/api/health             # 200 (API는 기본 인증 없음)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/api/feed/00000000-0000-0000-0000-000000000000  # 401 (토큰 필요)
+$DC exec backend python -m scripts.check_auth --base-url http://127.0.0.1:8000   # 로그인~로그아웃 점검 (이메일·비밀번호 입력)
+```
+
+- 내 PC 브라우저로 로그인해 본 뒤 `$DC logs --tail 20 backend`의 접속 로그 IP가 **내 공인 IP**면 IP 기준 제한이 동작하는 것이다
+  (`10.231.0.10`이 보이면 nginx·uvicorn 설정이 안 맞은 것).
+- 로그인 뒤에는 사용자마다 자기 데이터만 보인다 (8번 "모두 같은 시연 사용자"는 로그인 전 이야기).
+- HTTP라 로그인 비밀번호·토큰도 암호화되지 않고 오간다. 시연용 비밀번호만 쓰고, 오래 공개하면 HTTPS를 붙인다.
 
 ### 9-4. 예상 시간·비용 (약 2,100편 기준, 2026-10-27 측정으로 어림)
 

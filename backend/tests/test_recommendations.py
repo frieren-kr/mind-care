@@ -40,6 +40,7 @@ from app.feed_schemas import FeedBatch, FeedBatchItem, SavedFeedBatch
 from app.schemas import PaperDetailResponse
 from app.user_schemas import APP_TIMEZONE, FeedSettingsOut, PatientContext, UserProfileContext
 from main import app
+from tests.auth_helpers import allow_business_test_requests
 
 # 시드 스크립트(scripts/seed_dev_profiles.py)가 만드는 샘플 간병인 이메일.
 SEED_EMAIL_ONE_PATIENT = "dev-seed-1@example.com"   # 환자 1명
@@ -206,6 +207,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
     """Actual Handoff/HTTP/Production Stage 1 with mocked reads, no DB or RAG I/O."""
 
     def setUp(self):
+        allow_business_test_requests(self, app)
         from app.ai.agent.tests.test_feed_context_production_source import NOW, USER, P1, P2, patient, snapshot
         self.user, self.patient_ids = USER, (P1, P2)
         self.snapshot = snapshot
@@ -302,7 +304,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
 
     def assert_configured_dependency_returns_ai(self):
         import httpx
-        from app.ai.agent.tests.test_openai_client import completion
+        from app.ai.agent.tests.test_openai_client import response_fixture
         from app.ai.agent.tests.test_feed_execution import final_turn
 
         requests = []
@@ -310,15 +312,14 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         def transport(request):
             requests.append(json.loads(request.content))
             if len(requests) == 1:
-                return httpx.Response(200, json=completion({
-                    "role": "assistant", "content": None, "tool_calls": [{
-                        "id": "search_1", "type": "function", "function": {
-                            "name": "search_evidence",
-                            "arguments": json.dumps({"query": "Dementia sleep research"}),
-                        },
+                return httpx.Response(200, json=response_fixture({
+                    "calls": [{
+                        "id": "item_search_1", "call_id": "search_1", "type": "function_call",
+                        "name": "search_evidence", "status": "completed",
+                        "arguments": json.dumps({"query": "Dementia sleep research"}),
                     }],
-                }, "tool_calls"))
-            return httpx.Response(200, json=completion({"role": "assistant", "content": final_turn().text}))
+                }))
+            return httpx.Response(200, json=response_fixture({"text": final_turn().text}))
 
         self.use_real_dependency_with_mock_provider(transport)
         with patch("app.ai.retrieval.search.search", return_value=self.search.return_value) as rag, \
@@ -333,7 +334,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertEqual(body["items"][0]["title"], "DB title 0")
         self.assertEqual(len(requests), 2)
         self.assertTrue(all(r["model"] == "gpt-5.6-luna" for r in requests))
-        self.assertEqual([t["function"]["name"] for t in requests[0]["tools"]], ["search_evidence"])
+        self.assertEqual([t["name"] for t in requests[0]["tools"]], ["search_evidence"])
         rag.assert_called_once_with(query="Dementia sleep research", k=8)
         save.assert_called_once()
         self.search.assert_not_called()
@@ -472,6 +473,7 @@ class FeedCacheTests(unittest.TestCase):
     T0 = datetime(2026, 10, 15, 9, 0, tzinfo=APP_TIMEZONE)
 
     def setUp(self):
+        allow_business_test_requests(self, app)
         self.user = uuid4()
         self.now = self.T0
         self.batches = []  # (user_id, FeedBatch)
@@ -609,6 +611,7 @@ class FeedCacheTests(unittest.TestCase):
 
 class EndpointTests(unittest.TestCase):
     def setUp(self):
+        allow_business_test_requests(self, app)
         # 모든 엔드포인트 테스트가 '환자 1명인 간병인'을 기본으로 쓴다.
         self.caregiver_one = seed_user_id(self, SEED_EMAIL_ONE_PATIENT, expected_patients=1)
         self.client = TestClient(app)

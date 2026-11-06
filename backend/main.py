@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import papers, recommendations, users
+from app.api import auth, chat, papers, recommendations, users
 from app.config import settings
 
 logger = logging.getLogger("uvicorn.error")
@@ -66,5 +66,7 @@ def health() -> dict:
 # 팀원 라우터는 아래에 등록한다. app/api/ 에 파일을 만들고 한 줄씩 추가.
 # (예: from app.api import users → app.include_router(users.router))
 app.include_router(papers.router)
+app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(recommendations.router)
+app.include_router(chat.router)

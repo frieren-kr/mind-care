@@ -311,6 +311,17 @@ def check_medications(c: Checker, ctx: dict[str, Any]) -> None:
     c.ok("update_medication: updated_at 갱신", stopped.updated_at > m1.updated_at)
     c.raises("update_medication: 종료일이 기존 시작일보다 빠름", uf.update_medication, m1.id,
              {"end_date": day(-91)}, contains="빠를 수 없습니다")
+    c.raises("update_medication: 복용 중단 기록의 종료일을 미래로 → 거부", uf.update_medication, m1.id,
+             {"end_date": day(7)}, contains="복용 중단")
+    m3 = uf.create_medication({
+        "patient_id": p1, "drug_name": "항생제", "start_date": day(0), "end_date": day(14),
+    })
+    c.ok("create_medication: 복용 중 + 미래 종료일 허용", m3.is_taking is True and m3.end_date is not None)
+    c.raises("update_medication: 미래 종료일인 약을 복용 중단으로 → 거부", uf.update_medication, m3.id,
+             {"is_taking": False}, contains="복용 중단")
+    c.raises("create_medication: 복용 중단인데 종료일이 미래", uf.create_medication,
+             {"patient_id": p1, "drug_name": "x", "is_taking": False, "end_date": day(1)},
+             contains="복용 중단")
 
     c.raises("create_medication: 종료일이 시작일보다 빠름", uf.create_medication,
              {"patient_id": p1, "drug_name": "x", "start_date": day(0), "end_date": day(-1)},
@@ -454,10 +465,16 @@ def check_profile_context(c: Checker, ctx: dict[str, Any]) -> None:
 
 
 def check_api(c: Checker, ctx: dict[str, Any]) -> None:
+    from fastapi import FastAPI
     from fastapi.testclient import TestClient  # 점검할 때만 앱을 띄운다
 
-    from main import app
+    from app.api.users import router
+    from app.auth.dependencies import require_user_access
 
+    # 업무 계약 점검 전용 앱. 실제 인증은 tests.test_auth_*에서 검증한다.
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_user_access] = lambda: None
     client = TestClient(app)
     a, b, p1 = ctx["user_a"], ctx["user_b"], ctx["patient_1"]
 

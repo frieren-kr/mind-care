@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.users import router
 from app.db import user_functions
 from app.user_schemas import APP_TIMEZONE
+from tests.auth_helpers import allow_business_test_requests
 
 
 class FeedSettingsTests(unittest.TestCase):
@@ -44,6 +45,7 @@ class FeedSettingsTests(unittest.TestCase):
             self.addCleanup(p.stop)
         app = FastAPI()
         app.include_router(router)
+        allow_business_test_requests(self, app)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
         self.url = f"/users/{self.user_id}/feed-settings"

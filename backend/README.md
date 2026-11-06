@@ -77,6 +77,14 @@ python -m app.collectors.pubmed --days-back 7 --max-results 20             # 수
 uvicorn main:app --reload     # http://127.0.0.1:8000, 문서: /docs
 ```
 
+## 로그인 기능 테스트
+
+- [AUTH_CHECK.md](AUTH_CHECK.md): 인증 테이블·테스트 계정·서명 키 준비, Swagger 및 터미널 점검, 자동 테스트 실행 방법.
+- [AUTH_TEST_REPORT.md](AUTH_TEST_REPORT.md): 테스트 재현 방법, 만료 시간 설정, 자동 테스트와 실제 서버 점검 결과.
+
+서버와 테스트 계정 준비 후 `python -m scripts.check_auth --base-url http://127.0.0.1:8000`으로 점검한다.
+개인화 API에는 로그인 토큰이 필요하며, 기본 15분 후에는 다시 로그인한다.
+
 ## 구조
 
 - `main.py` — FastAPI 앱 진입점
