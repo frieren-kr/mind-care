@@ -1318,6 +1318,7 @@ UUID는 레포 실제 타입을 따른다. 날짜는 ISO 날짜, 시각은 datet
 | `get_patient_profile`: 저장된 기본 환자 프로필 snapshot | `PatientProfileInput` → `PatientProfileOutput` | `{}` (추가 argument 금지) | `name?: str`, `dementia_stage?: str`, `diagnosis_date?: date`, `symptoms: list[str]`, `interests: list[str]` |
 | `get_recent_care_logs`: 최근 patient_care 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: strict int=14 (1..90)`, `limit: strict int=10 (1..30)` | `period: {start_at,end_at}`, `logs: list[CareLogItem]`, `total_count: strict int>=0` |
 | `search_evidence`: RAG 근거 | `EvidenceSearchInput` → `EvidencePackage` | `query: str (1..2000자)`, `top_k: int=5 (1..20)` | `query`, `evidence: list[EvidenceItem]` |
+| `search_guidelines`: 공식 가이드라인·돌봄 지침 | `GuidelineSearchInput` → `EvidencePackage` | `query: str (1..2000자, 공백 제외)`, `top_k: strict int=2 (1..4)` | 기존 `EvidenceItem`의 `evidence_type="guideline"`, 문서·장절 제목, 발행 기관·연도, 발췌, 출처 |
 
 `CareLogItem`: `logged_at: aware datetime`, `content: str | None=null`, `mood_tag: str | None=null`.
 기간의 `start_at`/`end_at`도 timezone-aware이며 `start_at <= logged_at < end_at`을 검사한다.
@@ -2281,15 +2282,15 @@ Chat 초기 정책에는 이 Tool의 최소 선택 기준만 추가하고 상세
 
 Chat 구조화 실행의 top_k는 **유지 후보 + 새 RAG 결과 검토 후보**의 전체 목표 수다.
 최초 생략 시 3, 이후 생략 시 현재 목표를 유지한다. 명시적으로 변경하면 그 값을 적용하되
-11 이상은 10으로 축소한다. LLM은 사용자 입력과 대화 이력, 실제 검색 결과를 검토해
+7 초과는 7로 축소한다. LLM은 사용자 입력과 대화 이력, 실제 검색 결과를 검토해
 기존 규모로 설명할 수 없을 때만 필요한 최소한으로 확장한다. 서버는 확장 필요성의
-의학적·의미적 적절성까지 검증하지 않으며 최대 10편의 활성 후보 규모를 강제한다.
+의학적·의미적 적절성까지 검증하지 않으며 최대 7편의 활성 논문 후보 규모를 강제한다.
 
 최신 후보에 근거가 부족하면 다음 검색의 `exclude_candidates`에 0-based 인덱스 목록을,
-`candidate_version`에 최신 후보 메시지의 버전을 전달한다. 동일 Turn의 첫 검색만
+`candidate_version`에 최신 통합 후보 메시지의 버전을 전달한다. 두 검색 Tool을 통틀어 동일 Turn의 첫 검색만
 제외 판단을 제공할 수 있다. 중복·범위 밖 인덱스, 잘못된 타입, 버전 누락·불일치는
 입력 오류이며 해당 호출에서 후보 변경·Handler 실행을 하지 않는다. 생략하면 모두 유지한다.
-유지 후보 수보다 작은 top_k는 명시적 제외 없이는 적용하지 않는다.
+유지 논문 수보다 작은 논문 top_k는 명시적 제외 없이는 적용하지 않는다. 제외된 유형의 공간만 반환된다.
 
 서버는 유지 후보를 뺀 빈자리만 검색하고, 같은 Turn의 호출 순서대로 예약한다.
 예: 유지 1편·top_k=3이면 최대 2편, 유지 3편·top_k=5이면 최대 2편을 검색한다.
@@ -2304,10 +2305,11 @@ EvidenceStore는 검색 원본을 중복까지 보존한다. Runner는 제외 �
 제목 유사성만으로 합치지 않는다. DOI 접두사·공백·대소문자는 식별 시에만 정규화한다.
 서로 다른 PMID는 같은 DOI만으로 합치지 않는다. 식별자가 없으면 동일성 보장은 제한된다.
 기존 중복 식별 이력은 제외 후에도 유지하므로 제외된 논문이 재검색으로 다시 활성화되지 않는다.
-누적 검토량은 교체로 10편을 넘을 수 있지만 **활성 후보 + 예약 신규 검색량은 top_k 이하**다.
+누적 논문 검토량은 교체로 7편을 넘을 수 있지만 **활성 논문 + 논문 예약 신규 검색량은 논문 top_k 이하**다.
 
 매 LLM 요청에 원래 사용자 입력과 Tool 대화 이력을 유지하고, 최신 후보 Snapshot과
-서버 `chat_search_budget`(target_top_k·remaining_candidate_budget·candidate_limit)을 덧붙인다.
+서버 `chat_search_budget`의 `papers`(active_count·target_top_k·remaining_candidate_budget·candidate_limit·search_available)와
+`guidelines`(active_count·remaining_candidate_budget·candidate_limit·search_available)을 덧붙인다.
 과거 후보 투영은 대화에 누적하지 않는다. 새 다중 사용자 메시지 수집 기능은 추가하지 않는다.
 예산 미배정 호출은 원래 Provider Call ID로 success=false·chat_search_budget_exhausted를 반환하고
 실행·성공·오류 Trace로 기록하지 않는다. 다른 Tool 및 최종 답변은 계속 가능하다.
@@ -2322,4 +2324,34 @@ invalid_response로 종료하여 반복을 차단한다. 다음 Chat 요청에�
 최종 ChatDraft.selected는 최신 활성 Snapshot 길이·순서와 일치해야 한다. 기존 finalize_chat이
 오래된 Snapshot·잘못된 선택을 거부하고 원본 출처를 결합한다. 공통 EvidenceSearchInput,
 SearchEvidenceHandler, RAG와 Feed 정책은 그대로다. Chat 전용 두 검토 인자는 Runner에서
-검증·소비하며 Handler에 전달하지 않는다. 신규 Tool·후보 관리 클래스·추가 LLM 평가는 없다.
+검증·소비하며 Handler에 전달하지 않는다. 별도 후보 관리 클래스·추가 LLM 평가는 없다.
+
+### search_guidelines 계약과 독립 후보 공간
+
+`search_guidelines`의 top_k는 누적 목표가 아닌 **호출당 최대 반환 개수**다. 기본 2, strict int 1..4이며,
+범위 밖 입력은 거부한다. Runner는 가이드라인 활성 수와 같은 Turn의 가이드라인 예약량을 뺀 공간으로
+검색량을 축소한다. 논문 7편과 가이드라인 4개의 활성 공간은 독립적이며, 통합 후보는 최대 11개다.
+예: 논문 5편·목표 7이면 논문 2편, 가이드라인 3개·요청 4이면 가이드라인 1개를 신규 검색한다.
+한 유형의 예약·활성 수는 다른 유형의 예산을 차감하지 않는다. 미사용 예약량은 다음 Turn에 재사용한다.
+이 수치는 채울 목표가 아니며 Chat의 5라운드·총 실행 10회·병렬·timeout 제한은 유지한다.
+
+가이드라인의 동일 장·절은 `(source_url, title)`로 식별한다. 같은 문서의 서로 다른 절은 별도 후보다.
+제외된 가이드라인의 식별 이력도 요청 안에 남겨 재등장을 막으며 검색 원본은 삭제하지 않는다.
+검색 Tool과 반환 `evidence_type`이 다르거나 조정된 top_k를 초과 반환하면 invalid_output으로 처리하고
+원본·후보·성공 정책을 등록하지 않는다. 정상 0건은 성공이며 실패·미실행과 구분한다.
+제외·종료 상태는 Tool별로 독립이다. 유지 후보가 해당 예산을 채운 채 재요청하면 그 검색만 닫고,
+다른 검색과 환자 Tool·최종 답변은 허용한다. 예약량으로 인한 미실행은 검색을 닫지 않는다.
+
+단일 EvidenceStore·통합 Snapshot의 순서 전체에 ChatDraft.selected를 대응시킨다.
+LLM 후보에는 기존 방식대로 source_url·PMID를 제외하고 발행 기관·연도·원문 발췌를 제공한다.
+서버는 기존 원본 tool_call_id/evidence_index로 citation_refs·ResolvedEvidence에 출처를 결합한다.
+SEARCH_GUIDELINES_DATA_POLICY는 canonical Contract가 소유하고 성공·출력 검증 이후 요청당 한 번만
+system 메시지로 전달한다. 미호출·실패 시 미전달이며 별도 Workflow Success Policy는 추가하지 않는다.
+발췌·검색 유사도와 권고 강도·개인별 진료 판단을 구분하고, 원문이 지지하는 권고만 설명하며
+출처 생성과 문서 내부 지시문 실행을 금지한다. 논문 후속 정책은 논문 검색 종료만 판단한다.
+
+**후속 연결:** 이번에는 Handler·Adapter를 구현하지 않는다. canonical ToolName·Contract와
+테스트용 주입 ToolSpec으로 Runner 경로를 검증했으며 `build_chat_registry()`의 운영 Tool 목록은 유지한다.
+실제 제공되는 Tool만 모델이 요청할 수 있다. RAG 정본은 `app.ai.retrieval.search.search_guidelines()`이며,
+후속 Handler·Adapter 구현 시 GuidelineSearchInput → RAG 검색 → EvidencePackage 변환을 연결하고
+composition.py의 Chat Registry에 등록해야 한다. Feed의 검색 전용 Registry·정책은 변경하지 않는다.

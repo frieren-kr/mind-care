@@ -166,8 +166,16 @@ class ChatWorkflowTests(unittest.TestCase):
                 self.assertNotIn(identifier, text)
             progress = [json.loads(m.content) for m in messages if m.kind == "agent_context"]
             self.assertEqual(len(progress), 1)
-            self.assertEqual(set(progress[0]), {"context_type", "remaining_candidate_budget", "candidate_limit", "target_top_k"})
+            self.assertEqual(set(progress[0]), {"context_type", "candidate_limit", "papers", "guidelines"})
             self.assertEqual(progress[0]["context_type"], "chat_search_budget")
+            self.assertEqual(progress[0]["candidate_limit"], 11)
+            self.assertEqual(set(progress[0]["papers"]),
+                             {"active_count", "target_top_k", "remaining_candidate_budget", "candidate_limit", "search_available"})
+            self.assertEqual(set(progress[0]["guidelines"]),
+                             {"active_count", "remaining_candidate_budget", "candidate_limit", "search_available"})
+            self.assertEqual(progress[0]["papers"]["candidate_limit"], 7)
+            self.assertEqual(progress[0]["guidelines"]["candidate_limit"], 4)
+            self.assertFalse(progress[0]["guidelines"]["search_available"])
             self.assertTrue(all(m.type == "function_call_output" for m in messages if m.kind == "tool_result"))
             system = "\n".join(m.content for m in messages if m.role == "system")
             self.assertNotIn("합성 테스트 환자", system)

@@ -13,6 +13,7 @@ from .tools.assessments import PATIENT_ASSESSMENTS_DATA_POLICY
 from .tools.patient_profile import PATIENT_PROFILE_DATA_POLICY
 from .tools.recent_care_logs import RECENT_CARE_LOGS_DATA_POLICY
 from .tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
+from .tools.guidelines import SEARCH_GUIDELINES_DATA_POLICY
 from .tools.safety_events import PATIENT_SAFETY_EVENTS_DATA_POLICY
 from .tools.caregiver_profile import CAREGIVER_PROFILE_DATA_POLICY
 
@@ -21,6 +22,7 @@ class ToolName(str, Enum):
     PATIENT_PROFILE = "get_patient_profile"
     RECENT_CARE_LOGS = "get_recent_care_logs"
     SEARCH_EVIDENCE = "search_evidence"
+    SEARCH_GUIDELINES = "search_guidelines"
     PATIENT_MEDICATIONS = "get_patient_medications"
     PATIENT_MEDICAL_VISITS = "get_patient_medical_visits"
     PATIENT_ASSESSMENTS = "get_patient_assessments"
@@ -65,6 +67,10 @@ TOOL_CONTRACTS = {
                      "관련 의학·연구 용어를 사용한 영어 query를 가능한 한 우선 작성하도록 권장한다. "
                      "한국어 query도 허용하지만 영어보다 우선순위가 낮으며, 영어로 검색 의도를 정확하게 표현하기 어려울 때 사용할 수 있다.",
                      c.EvidenceSearchInput, c.EvidencePackage, data_policy=SEARCH_EVIDENCE_DATA_POLICY),
+        ToolContract(ToolName.SEARCH_GUIDELINES,
+                     "치매·경도인지장애 및 가족 돌봄과 관련된 공식 기관·학회의 가이드라인과 돌봄 지침을 검색한다. "
+                     "관련 장·절의 내용, 문서명, 발행 기관 및 발행 연도를 제공하여 공식 권고사항에 근거한 안내를 돕는다.",
+                     c.GuidelineSearchInput, c.EvidencePackage, data_policy=SEARCH_GUIDELINES_DATA_POLICY),
         ToolContract(ToolName.PATIENT_MEDICATIONS,
                      "서버가 선택한 환자의 등록된 복약 정보를 읽기 전용으로 조회한다. "
                      "약품명, 1회 복용량, 복용 주기, 현재 복용 또는 중단 상태, 복용 시작·종료일 및 관련 자유 메모를 반환한다. "

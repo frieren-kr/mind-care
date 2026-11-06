@@ -18,32 +18,44 @@ from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvid
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
 from .registry import ToolRegistry
 from .schemas import AgentContext, AgentError, AgentResult, AgentState, Message, ModelTurn, ToolOutcome, ToolTrace
-from .tools.contracts import EvidencePackage, EvidenceSearchInput
+from .tools.contracts import EvidencePackage, EvidenceSearchInput, GuidelineSearchInput
 
 
 CHAT_DEFAULT_TOP_K = 3
-MAX_CHAT_CANDIDATES = 10
+MAX_CHAT_PAPERS = 7
+MAX_CHAT_GUIDELINES = 4
+MAX_CHAT_CANDIDATES = MAX_CHAT_PAPERS + MAX_CHAT_GUIDELINES
+_CHAT_SEARCH_TYPES = {"search_evidence": "new_research", "search_guidelines": "guideline"}
 
 
-def _prepare_chat_searches(calls, snapshot, store, target):
+def _chat_candidate_counts(keys, store):
+    counts = {"new_research": 0, "guideline": 0}
+    for key in keys:
+        counts[store.item(key).evidence_type] += 1
+    return counts
+
+
+def _prepare_chat_searches(calls, snapshot, store, target, search_tools):
     """Plan one Chat turn against the last disclosed snapshot, in call order.
 
-    top_k is the total candidate target, not the number of extra papers.
+    Paper top_k is a total target; guideline top_k is a per-call count.
     Chat-only review fields never reach the common search Handler.
     """
     store.validate_snapshot(snapshot)
     active_keys = list(snapshot.keys)
     prepared, skipped = [], {}
-    reserved, search_index = 0, 0
-    close_search = False
+    reserved, search_index = {"new_research": 0, "guideline": 0}, 0
+    close_search = set()
     for call in calls:
-        if call.name != "search_evidence":
+        if call.name not in search_tools:
             prepared.append(call)
             continue
-        if close_search:
+        kind = _CHAT_SEARCH_TYPES[call.name]
+        label = "논문" if kind == "new_research" else "가이드라인"
+        if call.name in close_search:
             skipped[call.id] = ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
                 error=AgentError(code="chat_search_budget_exhausted",
-                    message="이번 요청의 논문 검색을 종료하여 이 검색은 실행하지 않았습니다. 확보한 근거와 한계를 설명하세요."))
+                    message=f"이번 요청의 {label} 검색을 종료하여 이 검색은 실행하지 않았습니다. 확보한 근거와 한계를 설명하세요."))
             continue
         first_search = search_index == 0
         search_index += 1
@@ -65,41 +77,63 @@ def _prepare_chat_searches(calls, snapshot, store, target):
                 raise ValueError("Candidate exclusion requires the disclosed version")
             if version_present and (type(version) is not int or version != snapshot.version):
                 raise ValueError("Stale candidate version")
-            requested = args.get("top_k", target)
-            if type(requested) is not int or requested < 1:
-                raise ValueError("Invalid Chat top_k")
-            requested = min(requested, MAX_CHAT_CANDIDATES)
-            args["top_k"] = requested
-            validated = EvidenceSearchInput.model_validate(args)
+            if kind == "new_research":
+                requested = args.get("top_k", target)
+                if type(requested) is not int or requested < 1:
+                    raise ValueError("Invalid Chat top_k")
+                requested = min(requested, MAX_CHAT_PAPERS)
+                args["top_k"] = requested
+                validated = EvidenceSearchInput.model_validate(args)
+            else:
+                validated = GuidelineSearchInput.model_validate(args)
+                requested = validated.top_k
             kept = [key for i, key in enumerate(active_keys) if i not in excluded]
-            if len(kept) + reserved > requested:
+            active_count = _chat_candidate_counts(kept, store)[kind]
+            if kind == "new_research" and active_count + reserved[kind] > requested:
                 raise ValueError("top_k is smaller than retained and reserved candidates")
         except (ValueError, TypeError):
             skipped[call.id] = ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
                 error=AgentError(code="invalid_arguments",
                     message="Chat 검색 입력·제외 인덱스·후보 버전 또는 top_k가 현재 후보와 일치하지 않습니다."))
             continue
-        active_keys, target = kept, requested
-        remaining = target - len(active_keys) - reserved
+        own_excluded = any(store.item(snapshot.keys[i]).evidence_type == kind for i in excluded)
+        active_keys = kept
+        if kind == "new_research":
+            target = requested
+            remaining = min(target - active_count - reserved[kind], MAX_CHAT_PAPERS - active_count - reserved[kind])
+        else:
+            remaining = min(requested, MAX_CHAT_GUIDELINES - active_count - reserved[kind])
         if remaining == 0:
             # Only real retained candidates close search, never same-turn reservations.
-            close_search = bool(snapshot.keys) and not excluded and reserved == 0 and active_keys == list(snapshot.keys)
+            closes = active_count > 0 and not own_excluded and reserved[kind] == 0
+            if closes:
+                close_search.add(call.name)
             skipped[call.id] = ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
                 error=AgentError(code="chat_search_budget_exhausted",
-                    message=("유지 후보가 top_k를 채웠는데 제외·확장 없이 재요청하여 이번 요청의 논문 검색을 종료했습니다. 확보한 근거와 한계를 설명하세요."
-                             if close_search else "현재 top_k의 후보·검색 예약 예산이 채워져 이 검색은 실행하지 않았습니다.")))
+                    message=(f"유지 {label} 후보가 예산을 채웠는데 제외·확장 없이 재요청하여 이번 요청의 {label} 검색을 종료했습니다. 확보한 근거와 한계를 설명하세요."
+                             if closes else f"현재 {label} 후보·검색 예약 예산이 채워져 이 검색은 실행하지 않았습니다.")))
             continue
         args = validated.model_dump()
         args["top_k"] = remaining
-        reserved += remaining
+        reserved[kind] += remaining
         prepared.append(call.model_copy(update={"arguments": args}))
     return prepared, skipped, active_keys, target, close_search
 
 
-def _add_chat_candidates(candidates, active_keys, pmids, dois):
+def _add_chat_candidates(candidates, active_keys, pmids, dois, guidelines, store):
     """Keep first occurrences; DOI supplements PMID, titles never identify papers."""
+    counts = _chat_candidate_counts(active_keys, store)
     for candidate in candidates:
         item = candidate.evidence
+        if item.evidence_type == "guideline":
+            identity = (item.source_url, item.title)
+            if identity not in guidelines:
+                if counts["guideline"] >= MAX_CHAT_GUIDELINES or len(active_keys) >= MAX_CHAT_CANDIDATES:
+                    raise ValueError("Chat guideline budget exceeded")
+                active_keys.append(candidate.key)
+                counts["guideline"] += 1
+            guidelines.add(identity)
+            continue
         pmid = (item.pmid or "").strip()
         doi = (item.doi or "").strip().casefold()
         for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
@@ -109,9 +143,10 @@ def _add_chat_candidates(candidates, active_keys, pmids, dois):
         duplicate = bool(pmid and pmid in pmids) or bool(
             doi and doi in dois and (not pmid or not dois[doi] or pmid in dois[doi]))
         if not duplicate:
-            if len(active_keys) >= MAX_CHAT_CANDIDATES:
+            if counts["new_research"] >= MAX_CHAT_PAPERS or len(active_keys) >= MAX_CHAT_CANDIDATES:
                 raise ValueError("Chat candidate budget exceeded")
             active_keys.append(candidate.key)
+            counts["new_research"] += 1
         if pmid:
             pmids.add(pmid)
         if doi:
@@ -206,9 +241,9 @@ class AgentLoopRunner:
         state = AgentState(request_id=context.request_id)
         conversation = Conversation()
         evidence = EvidenceStore()
-        chat_keys, chat_pmids, chat_dois = [], set(), {}
+        chat_keys, chat_pmids, chat_dois, chat_guidelines = [], set(), {}, set()
         chat_target = CHAT_DEFAULT_TOP_K
-        chat_search_closed = False
+        chat_search_closed = set()
         feed_candidates = (FeedCandidates(evidence, previously_recommended_pmids=previously_recommended_pmids)
                            if output_model is FeedAnswerV2 else None)
         feed_retrieval_used = 0
@@ -286,9 +321,15 @@ class AgentLoopRunner:
                 if output_model is ChatAnswerV1 and evidence.call_ids:
                     messages.append(bounded_call(lambda: evidence.chat_message(selection_snapshot)))
                 if output_model is ChatAnswerV1:
+                    counts = _chat_candidate_counts(chat_keys, evidence)
                     messages.append(Message(role="system", kind="agent_context", content=json.dumps({
-                        "context_type": "chat_search_budget", "remaining_candidate_budget": chat_target - len(chat_keys),
-                        "candidate_limit": MAX_CHAT_CANDIDATES, "target_top_k": chat_target})))
+                        "context_type": "chat_search_budget", "candidate_limit": MAX_CHAT_CANDIDATES,
+                        "papers": {"active_count": counts["new_research"], "target_top_k": chat_target,
+                            "candidate_limit": MAX_CHAT_PAPERS, "remaining_candidate_budget": chat_target - counts["new_research"],
+                            "search_available": self.registry.get("search_evidence") is not None and "search_evidence" not in chat_search_closed},
+                        "guidelines": {"active_count": counts["guideline"], "candidate_limit": MAX_CHAT_GUIDELINES,
+                            "remaining_candidate_budget": MAX_CHAT_GUIDELINES - counts["guideline"],
+                            "search_available": self.registry.get("search_guidelines") is not None and "search_guidelines" not in chat_search_closed}})))
                 stage = "registry_error"
                 definitions = bounded_call(self.registry.definitions)
                 if feed_candidates is not None:
@@ -296,12 +337,13 @@ class AgentLoopRunner:
                 elif output_model is ChatAnswerV1:
                     definitions = deepcopy(definitions)
                     if chat_search_closed:
-                        definitions = [definition for definition in definitions if definition["name"] != "search_evidence"]
+                        definitions = [definition for definition in definitions if definition["name"] not in chat_search_closed]
                     for definition in definitions:
                         if definition["name"] == "search_evidence":
                             definition["parameters"]["properties"]["top_k"].update(
-                                default=chat_target, maximum=MAX_CHAT_CANDIDATES,
-                                description="목표 전체 후보 수(유지 후보+신규 검색 결과). 최초 생략 시 3, 이후 생략 시 현재 목표 유지. 필요한 만큼만 확장하며 10을 초과하면 서버가 10으로 축소한다.")
+                                default=chat_target, maximum=MAX_CHAT_PAPERS,
+                                description="논문 목표 전체 후보 수(유지 논문+신규 논문). 최초 생략 시 3, 이후 생략 시 현재 목표 유지. 필요한 만큼만 확장하며 7을 초과하면 서버가 7로 축소한다.")
+                        if definition["name"] in _CHAT_SEARCH_TYPES:
                             definition["parameters"]["properties"].update(
                                 exclude_candidates={"type": "array", "items": {"type": "integer", "minimum": 0},
                                     "uniqueItems": True, "description": "근거가 부족해 제외할 최신 후보의 0-based 인덱스. 생략 시 모두 유지. 같은 Turn 첫 검색에만 제공한다."},
@@ -366,14 +408,17 @@ class AgentLoopRunner:
                     return finish("completed")
                 calls, skipped = turn.tool_calls, {}
                 kept_chat_keys, next_chat_target = chat_keys, chat_target
-                close_chat_search = False
+                close_chat_search = set()
                 if output_model is ChatAnswerV1:
-                    if chat_search_closed and any(call.name == "search_evidence" for call in calls):
+                    disabled = next((call.name for call in calls if call.name in chat_search_closed), None)
+                    if disabled is not None:
                         state.errors.append(AgentError(code="chat_search_disabled",
-                            message="Invalid tool request: Cannot use 'search evidence'"))
+                            message=("Invalid tool request: Cannot use 'search evidence'" if disabled == "search_evidence"
+                                     else "Invalid tool request: Cannot use 'search guidelines'")))
                         return finish("invalid_response")
                     calls, skipped, kept_chat_keys, next_chat_target, close_chat_search = bounded_call(lambda: _prepare_chat_searches(
-                        turn.tool_calls, selection_snapshot, evidence, chat_target))
+                        turn.tool_calls, selection_snapshot, evidence, chat_target,
+                        set(self.registry.names()).intersection(_CHAT_SEARCH_TYPES)))
                 attempted_calls = len(calls) + sum(outcome.error.code != "chat_search_budget_exhausted"
                     for outcome in skipped.values())
                 if attempted_calls and (state.tool_round >= (min(MAX_FEED_SEARCH_ROUNDS, self.max_tool_rounds) if feed_candidates is not None else self.max_tool_rounds) or
@@ -410,7 +455,7 @@ class AgentLoopRunner:
                     feed_query_keys.update(search_plan.query_keys)
                 if output_model is ChatAnswerV1:
                     chat_target = next_chat_target
-                    chat_search_closed = chat_search_closed or close_chat_search
+                    chat_search_closed.update(close_chat_search)
                     if kept_chat_keys != chat_keys:
                         chat_keys = kept_chat_keys
                         bounded_call(lambda: evidence.snapshot("chat", chat_keys))
@@ -457,10 +502,11 @@ class AgentLoopRunner:
                     # sequential call before starting the next dependent call.
                     outcomes = []
                     for call, outcome, trace in results:
-                        if (output_model is ChatAnswerV1 and call.name == "search_evidence" and outcome.success
-                                and len(outcome.data["evidence"]) > call.arguments["top_k"]):
+                        if (output_model is ChatAnswerV1 and call.name in _CHAT_SEARCH_TYPES and outcome.success
+                                and (len(outcome.data["evidence"]) > call.arguments["top_k"]
+                                     or any(item["evidence_type"] != _CHAT_SEARCH_TYPES[call.name] for item in outcome.data["evidence"]))):
                             outcome = ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
-                                error=AgentError(code="invalid_output", message="검색 결과가 허용된 반환 개수를 초과했습니다."))
+                                error=AgentError(code="invalid_output", message="검색 결과의 자료 유형 또는 반환 개수가 계약과 일치하지 않습니다."))
                             trace = trace.model_copy(update={"success": False, "error_type": "invalid_output", "result_count": None})
                         outcomes.append(outcome)
                         if trace is None:
@@ -482,7 +528,7 @@ class AgentLoopRunner:
                             package = bounded_call(lambda: EvidencePackage.model_validate(outcome.data))
                             candidates = bounded_call(lambda: evidence.add_search_result(call.id, package))
                             if output_model is ChatAnswerV1:
-                                bounded_call(lambda: _add_chat_candidates(candidates, chat_keys, chat_pmids, chat_dois))
+                                bounded_call(lambda: _add_chat_candidates(candidates, chat_keys, chat_pmids, chat_dois, chat_guidelines, evidence))
                                 bounded_call(lambda: evidence.snapshot("chat", chat_keys))
                         stage = "executor_error"
                 stage = "conversation_error"

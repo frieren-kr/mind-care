@@ -36,7 +36,7 @@ def projection(messages):
 
 
 def budget(messages):
-    return next(json.loads(m.content)['remaining_candidate_budget'] for m in messages
+    return next(json.loads(m.content)['papers']['remaining_candidate_budget'] for m in messages
                 if m.kind == 'agent_context' and 'chat_search_budget' in m.content)
 
 
@@ -76,7 +76,7 @@ class ChatSearchBudgetTests(unittest.TestCase):
         self.assertEqual(budget(client.requests[0][0]), 3)
         self.assertEqual(budget(client.requests[1][0]), 0)
         schema = client.requests[0][1][0]['parameters']['properties']['top_k']
-        self.assertEqual((schema['default'], schema['minimum'], schema['maximum']), (3, 1, 10))
+        self.assertEqual((schema['default'], schema['minimum'], schema['maximum']), (3, 1, 7))
         self.assertEqual(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE].definition(), original)
         self.assertEqual(EvidenceSearchInput(query='q').top_k, 5)
         self.assertEqual(EvidenceSearchInput(query='q', top_k=20).top_k, 20)
@@ -86,11 +86,11 @@ class ChatSearchBudgetTests(unittest.TestCase):
             with self.subTest(requested=requested):
                 handler = Mock(side_effect=self.fresh)
                 result, client = self.execute([ModelTurn(tool_calls=[search('first', requested)]),
-                    chat_final(selected=[True]*10)], handler)
+                    chat_final(selected=[True]*7)], handler)
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertEqual(result.execution.errors, [])
-                self.assertEqual(handler.call_args.args[1].top_k, 10)
-                self.assertEqual(projection(client.requests[1][0])['candidate_count'], 10)
+                self.assertEqual(handler.call_args.args[1].top_k, 7)
+                self.assertEqual(projection(client.requests[1][0])['candidate_count'], 7)
 
     def test_invalid_types_and_arguments_do_not_reach_handler_or_deliver_policy(self):
         arguments = [{'query':'q', 'top_k':v} for v in ('3', 3.0, True, False, 0, -1)]
@@ -107,23 +107,23 @@ class ChatSearchBudgetTests(unittest.TestCase):
 
     def test_accumulation_remaining_clamp_and_exhausted_calls_keep_chat_running(self):
         handler = Mock(side_effect=self.fresh)
-        turns = [ModelTurn(tool_calls=[search('a',3)]), ModelTurn(tool_calls=[search('b',7)]),
+        turns = [ModelTurn(tool_calls=[search('a',3)]), ModelTurn(tool_calls=[search('b',5)]),
                  ModelTurn(tool_calls=[search('c',20)]), ModelTurn(tool_calls=[search('skipped')]),
-                 chat_final(selected=[True]*10)]
+                 chat_final(selected=[True]*7)]
         result, client = self.execute(turns, handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(result.execution.errors, [])
-        self.assertEqual([c.args[1].top_k for c in handler.call_args_list], [3,4,3])
+        self.assertEqual([c.args[1].top_k for c in handler.call_args_list], [3,2,2])
         self.assertEqual(result.execution.total_tool_calls, 3)
         self.assertEqual(len(result.execution.called_tools), 3)
         self.assertEqual([budget(r[0]) for r in client.requests], [3,0,0,0,0])
-        self.assertEqual([projection(r[0])['candidate_count'] for r in client.requests[1:]], [3,7,10,10])
+        self.assertEqual([projection(r[0])['candidate_count'] for r in client.requests[1:]], [3,5,7,7])
         outputs = [m for m in client.requests[-1][0] if m.type == 'function_call_output']
         self.assertEqual([m.call_id for m in outputs], ['a','b','c','skipped'])
         skipped = json.loads(outputs[-1].content)
         self.assertFalse(skipped['success'])
         self.assertEqual(skipped['error']['code'], 'chat_search_budget_exhausted')
-        self.assertEqual(len(result.sources), 10)
+        self.assertEqual(len(result.sources), 7)
 
     def test_parallel_reservations_and_commit_order_ignore_completion_order(self):
         barrier, second_done = Barrier(2), Event()
@@ -144,12 +144,18 @@ class ChatSearchBudgetTests(unittest.TestCase):
 
     def test_exhaustion_after_ten_executions_does_not_trigger_generic_call_limit(self):
         handler = Mock(side_effect=self.fresh)
-        result, client = self.execute([ModelTurn(tool_calls=[search(str(i),i+1) for i in range(10)]),
-            ModelTurn(tool_calls=[search('skip')]), chat_final(selected=[False]*10)], handler)
+        profile = TOOL_CONTRACTS[ToolName.PATIENT_PROFILE]
+        profile_handler = Mock(return_value={'name':None,'dementia_stage':None,'diagnosis_date':None,'symptoms':[],'interests':[]})
+        specs = (ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],handler), ToolSpec(profile,profile_handler))
+        calls = [search(str(i),i+1) for i in range(10)]
+        calls += [ToolCall(id='profile'+str(i),name=profile.name.value,arguments={}) for i in range(3)]
+        result, client = self.execute([ModelTurn(tool_calls=calls),
+            ModelTurn(tool_calls=[search('skip')]), chat_final(selected=[False]*7)], handler,specs=specs)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(result.execution.errors, [])
         self.assertEqual(result.execution.total_tool_calls, 10)
-        self.assertEqual(handler.call_count, 10)
+        self.assertEqual(handler.call_count, 7)
+        self.assertEqual(profile_handler.call_count, 3)
         last = [m for m in client.requests[-1][0] if m.type == 'function_call_output'][-1]
         self.assertEqual(last.call_id, 'skip')
         self.assertEqual(json.loads(last.content)['error']['code'], 'chat_search_budget_exhausted')
@@ -163,19 +169,19 @@ class ChatSearchBudgetTests(unittest.TestCase):
             ModelTurn(tool_calls=[search('good',1)]), chat_final(selected=[True])], handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual([e.code for e in result.execution.errors], ['tool_exception'])
-        self.assertEqual(budget(client.requests[1][0]), 10)
+        self.assertEqual(budget(client.requests[1][0]), 7)
         self.assertFalse(any(m.content in (SEARCH_EVIDENCE_DATA_POLICY, CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY)
                              for m in client.requests[1][0]))
         self.assertEqual([s.source_ref.tool_call_id for s in result.sources], ['good'])
 
     def test_unused_reservation_is_available_next_turn_without_automatic_search(self):
-        returned = {'a':package(['A','B','C']), 'b':package(['B','C','D','E']), 'c':package(['F','G','H','I','J'])}
+        returned = {'a':package(['A','B','C']), 'b':package(['B','C','D','E']), 'c':package(['F','G'])}
         handler = Mock(side_effect=lambda c,a: returned[a.query])
         result, client = self.execute([ModelTurn(tool_calls=[search('a',3)]), ModelTurn(tool_calls=[search('b',7)]),
-            ModelTurn(tool_calls=[search('c',10)]), chat_final(selected=[True]*10)], handler)
+            ModelTurn(tool_calls=[search('c',10)]), chat_final(selected=[True]*7)], handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual([budget(r[0]) for r in client.requests], [3,0,2,0])
-        self.assertEqual([c.args[1].top_k for c in handler.call_args_list], [3,4,5])
+        self.assertEqual([c.args[1].top_k for c in handler.call_args_list], [3,4,2])
         self.assertEqual(len(handler.call_args_list), 3)
 
     def test_originals_survive_dedup_and_citations_keep_first_original_positions(self):
@@ -249,7 +255,7 @@ class ChatSearchBudgetTests(unittest.TestCase):
                  ToolSpec(profile, profile_handler, parallel_safe=True))
         result, client = self.execute([ModelTurn(tool_calls=[search('a',10)]),
             ModelTurn(tool_calls=[search('skip'), ToolCall(id='profile',name=profile.name.value,arguments={})]),
-            chat_final(selected=[False]*10)], self.fresh, specs=specs)
+            chat_final(selected=[False]*7)], self.fresh, specs=specs)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(result.execution.errors, [])
         profile_handler.assert_called_once()
@@ -257,7 +263,7 @@ class ChatSearchBudgetTests(unittest.TestCase):
         self.assertEqual(sum(m.content==profile.data_policy for m in client.requests[-1][0]), 1)
 
     def test_reused_execution_resets_candidates_and_budget(self):
-        client = FakeLLMClient([ModelTurn(tool_calls=[search('a',10)]), chat_final(selected=[False]*10),
+        client = FakeLLMClient([ModelTurn(tool_calls=[search('a',10)]), chat_final(selected=[False]*7),
                                ModelTurn(tool_calls=[search('b')]), chat_final(selected=[True]*3)])
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],self.fresh),))
         execution = ChatExecutionV1(client, lambda c:registry)
@@ -271,10 +277,10 @@ class ChatSearchBudgetTests(unittest.TestCase):
         profile = TOOL_CONTRACTS[ToolName.PATIENT_PROFILE]
         handler = Mock(return_value={'name':None,'dementia_stage':None,'diagnosis_date':None,'symptoms':[],'interests':[]})
         specs = (ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], self.fresh), ToolSpec(profile, handler))
-        turns = [ModelTurn(tool_calls=[search(str(i), k)]) for i, k in enumerate((3,6,9,10))]
+        turns = [ModelTurn(tool_calls=[search(str(i), k)]) for i, k in enumerate((2,4,6,7))]
         turns += [ModelTurn(tool_calls=[search('skip')]),
                   ModelTurn(tool_calls=[ToolCall(id='profile',name=profile.name.value,arguments={})]),
-                  chat_final(selected=[False]*10)]
+                  chat_final(selected=[False]*7)]
         result, _ = self.execute(turns, self.fresh, specs=specs)
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual(result.execution.errors, [])
@@ -299,22 +305,22 @@ class ChatSearchBudgetTests(unittest.TestCase):
         for call in handler.call_args_list:
             self.assertEqual(set(call.args[1].model_dump()), {'query','top_k'})
 
-    def test_all_ten_can_be_replaced_while_originals_and_stale_snapshot_rejection_remain(self):
+    def test_all_seven_can_be_replaced_while_originals_and_stale_snapshot_rejection_remain(self):
         store = EvidenceStore()
-        review = search('replace',10)
-        review.arguments.update(exclude_candidates=list(range(10)), candidate_version='latest')
+        review = search('replace',7)
+        review.arguments.update(exclude_candidates=list(range(7)), candidate_version='latest')
         old = []
         def handler(context, args):
             if args.query == 'replace':
                 old.append(store.current('chat'))
             return self.fresh(context,args)
-        client = ReviewLLM([ModelTurn(tool_calls=[search('first',10)]), ModelTurn(tool_calls=[review]),
-                           chat_final(selected=[True]*10)])
+        client = ReviewLLM([ModelTurn(tool_calls=[search('first',7)]), ModelTurn(tool_calls=[review]),
+                           chat_final(selected=[True]*7)])
         with patch('app.ai.agent.agent_loop_runner.EvidenceStore',return_value=store):
             result, _ = self.execute([],handler,client=client)
         self.assertEqual(result.execution.status,'completed')
-        self.assertEqual(sum(len(p.evidence) for p in store.packages()),20)
-        self.assertEqual(len(store.current('chat').keys),10)
+        self.assertEqual(sum(len(p.evidence) for p in store.packages()),14)
+        self.assertEqual(len(store.current('chat').keys),7)
         self.assertTrue(all(s.source_ref.tool_call_id=='replace' for s in result.sources))
         with self.assertRaises(ValueError):
             store.finalize_chat(chat_final(selected=[]).text,old[0])
@@ -333,8 +339,8 @@ class ChatSearchBudgetTests(unittest.TestCase):
         self.assertEqual(projection(client.requests[2][0])['candidate_count'],2)
         self.assertEqual(budget(client.requests[2][0]),1)
 
-    def test_followup_expansion_is_total_target_and_server_caps_it_at_ten(self):
-        for target, new_count in ((5,2),(10,7),(11,7),(20,7)):
+    def test_followup_expansion_is_total_target_and_server_caps_it_at_seven(self):
+        for target, new_count in ((5,2),(7,4),(8,4),(20,4)):
             with self.subTest(target=target):
                 handler = Mock(side_effect=self.fresh)
                 result,client = self.execute([ModelTurn(tool_calls=[search('first',3)]),
@@ -389,7 +395,7 @@ class ChatSearchBudgetTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources],['first0','a0','a1'])
 
     def test_full_retained_candidates_close_search_without_consuming_execution_budget(self):
-        for initial, requested in ((1,1),(10,11)):
+        for initial, requested in ((1,1),(7,8)):
             with self.subTest(initial=initial,requested=requested):
                 handler=Mock(side_effect=self.fresh)
                 result,client=self.execute([ModelTurn(tool_calls=[search('first',initial)]),
@@ -489,7 +495,7 @@ class ChatSearchBudgetTests(unittest.TestCase):
         wire = []
         turns = [response([{**function('a','{"query":"a","top_k":20}'),'name':'search_evidence'},
                            {**function('b','{"query":"b"}'),'name':'search_evidence'}]),
-                 response_fixture({'text':chat_final(selected=[True]*10).text})]
+                 response_fixture({'text':chat_final(selected=[True]*7).text})]
         def transport(request):
             wire.append(json.loads(request.content))
             return httpx.Response(200,json=turns[len(wire)-1])

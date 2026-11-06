@@ -108,6 +108,18 @@ class EvidenceSearchInput(AgentModel):
         return value
 
 
+class GuidelineSearchInput(AgentModel):
+    query: str = Field(min_length=1, max_length=2000, description="공식 가이드라인·돌봄 권고사항 검색어. 불필요한 직접 식별정보는 포함하지 않는다.")
+    top_k: StrictInt = Field(default=2, ge=1, le=4, description="해당 호출의 최대 반환 개수. 누적 목표 수가 아니며 남은 가이드라인 공간에 맞춰 축소될 수 있다.")
+
+    @field_validator("query")
+    @classmethod
+    def reject_blank_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Guideline search query must not be blank")
+        return value
+
+
 class EvidenceItem(AgentModel):
     evidence_type: Literal["new_research", "guideline"]
     pmid: str | None = Field(default=None, description="RAG가 제공한 PMID. 없으면 null이며 추정하지 않는다.")

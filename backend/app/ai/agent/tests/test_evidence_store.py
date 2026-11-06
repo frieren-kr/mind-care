@@ -143,7 +143,7 @@ class EvidenceStoreTests(unittest.TestCase):
         for iteration in range(100):
             ids = [f'{iteration}:{i}:' + ''.join(rng.choices('Ab9_-:/한글☃',k=35)) for i in range(2)]
             data = [package(['same',None]), package(['same','other'])]
-            data[0].evidence[1].evidence_type='guideline'
+            # Missing paper identifiers must not lose the original source position.
             data[0].evidence[0].doi=f'original-doi-{iteration}'
             data[1].evidence[0].doi=f'later-doi-{iteration}'
             tools=ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],lambda c,a:data[int(a.query)]),))

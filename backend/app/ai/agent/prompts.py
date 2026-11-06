@@ -27,7 +27,8 @@ Tool 선택/추가 호출은 기존 방식으로 계속하고, Tool Call이 없�
 markdown fence, 숨겨진 reasoning, UI 디자인, disclaimer, follow_up 필드는 만들지 않는다.
 최종 text는 ChatDraft의 answer와 selected만 출력한다. selected는 인용할 검색 후보를 나타내는 Boolean 배열이다.
 후보 목록이 아직 제공되지 않았거나 최신 untrusted_chat_candidates.candidate_count가 0일 때만 selected=[]이다.
-검색 후보가 있으면 후속 판단 정책과 최신 후보 목록의 개수·순서를 따른다.
+검색 후보가 있으면 논문·가이드라인을 합한 최신 후보 목록과 같은 개수·순서로 selected를 작성한다.
+답변에 실제로 활용한 후보만 true로 선택하며, 인용 없이 직접 답하면 현재 후보 수만큼 false를 작성한다.
 Provider Call ID, evidence_index, citation_refs, PMID, DOI, URL, DB UUID와 출처 metadata는 출력하지 않는다.
 원본 참조와 metadata는 서버가 보존하고 최종 ChatAnswerV1 및 sources에 결합한다. 근거 없는 citation을 만들지 않는다.
 환자 기록에 없는 사실을 사실처럼 추가하지 않는다.

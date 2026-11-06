@@ -168,25 +168,29 @@ class SearchEvidenceIntegrationTests(TestCase):
         self.assertIsNone(result.output)
 
     def test_chat_uses_same_registry_via_request_factory_with_none_scope(self):
-        search = Mock(return_value=package())
+        papers = package()
+        papers.evidence = papers.evidence[:1]  # RAG search() defaults to papers; guidelines use their own Tool.
+        search = Mock(return_value=papers)
         supplied = self.registry(search)
         factory = Mock(return_value=supplied)
-        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), chat_final(selected=[False,True])])
+        client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), chat_final(selected=[True])])
         execution = ChatExecutionV1(client, factory)
         result = execution(self.context, prepare_chat_input(self.context, "Synthetic question"))
         factory.assert_called_once_with(self.context)
         self.assertEqual(result.execution.status, "completed")
         self.assertIsInstance(result.output, ChatAnswerV1)
-        self.assertEqual(result.sources[0].evidence_type, "guideline")
-        self.assertIsNone(result.sources[0].pmid)
+        self.assertEqual(result.sources[0].evidence_type, "new_research")
+        self.assertEqual(result.sources[0].pmid, "SYNTHETIC-PMID")
         self.assertEqual(supplied.mode, "production")
         self.assertEqual(len(supplied.definitions()), 1)
 
     def test_chat_factory_can_compose_shared_handler_with_another_allowed_tool(self):
-        shared = self.registry(Mock(return_value=package())).get("search_evidence")
+        papers = package()
+        papers.evidence = papers.evidence[:1]
+        shared = self.registry(Mock(return_value=papers)).get("search_evidence")
         profile = Mock(return_value={"symptoms": ["Synthetic stored signal"]})
         supplied = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_PROFILE], profile), shared))
-        client = FakeLLMClient([ModelTurn(tool_calls=[call(), search_call()]), chat_final(selected=[True,False])])
+        client = FakeLLMClient([ModelTurn(tool_calls=[call(), search_call()]), chat_final(selected=[True])])
         result = ChatExecutionV1(client, lambda context: supplied)(
             CONTEXT, prepare_chat_input(CONTEXT, "Synthetic question"))
         self.assertEqual(result.execution.status, "completed")

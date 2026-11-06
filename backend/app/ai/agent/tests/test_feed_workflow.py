@@ -396,7 +396,7 @@ class FeedArchitectureTests(unittest.TestCase):
         self.assertEqual({name.value for name in ToolName},
                          {"get_patient_profile", "get_recent_care_logs", "search_evidence", "get_patient_medications",
                           "get_patient_medical_visits", "get_patient_assessments", "get_patient_safety_events",
-                          "get_caregiver_profile"})
+                          "get_caregiver_profile", "search_guidelines"})
         self.assertNotIn("workflow_type", inspect.getsource(agent_loop_runner))
 
     def test_test_query_hook_precedes_each_search_and_rejection_skips_handler(self):

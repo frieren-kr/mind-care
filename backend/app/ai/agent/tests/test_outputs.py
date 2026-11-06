@@ -466,7 +466,10 @@ class StructuredWorkflowTests(TestCase):
     def test_multiple_search_rounds_preserve_full_tool_evidence_without_aggregate(self):
         packages = {"first": package("[FAKE] first"), "second": package("[FAKE] second")}
         packages["second"].evidence[0].pmid = "FAKE-SECOND-PMID"
-        packages["second"].evidence.append(package("[FAKE] second index 1", "guideline").evidence[0])
+        # Identifier-less paper remains a distinct Chat candidate, but is ineligible for Feed.
+        unidentified = package("[FAKE] second index 1").evidence[0]
+        unidentified.pmid = None
+        packages["second"].evidence.append(unidentified)
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
                                           lambda context, args: packages[args.query]),))
         preceding = [tool_turn(call(ToolName.SEARCH_EVIDENCE, {"query": "first"}, identifier="search_1")),
