@@ -64,6 +64,9 @@ class ChatApiTests(unittest.TestCase):
             patcher = patch(target, **options)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = patch.object(chat.chat_store, "save_chat_turn")
+        self.save = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def post(self, body, execution=None, user_id=USER_ID, login_as=USER_ID):
         """login_as = 로그인한 사용자 (None이면 토큰 없이 보낸다)."""
@@ -83,12 +86,28 @@ class ChatApiTests(unittest.TestCase):
         context, prepared = self.calls[0]
         self.assertEqual((context.user_id, context.patient_id), (USER_ID, PATIENT_ID))
         self.assertIn("잠을 못 자요", prepared)
+        self.save.assert_called_once_with(USER_ID, PATIENT_ID, "잠을 못 자요", "답변입니다.", [EVIDENCE[1], EVIDENCE[0]])
 
     def test_no_sources_and_no_patient(self):
         res = self.post({"message": "안녕하세요"}, fake_execution([], self.calls))
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["sources"], [])
         self.assertIsNone(self.calls[0][0].patient_id)
+
+    def test_save_failure_still_returns_answer(self):
+        self.save.side_effect = RuntimeError("PRIVATE db failure")
+        with self.assertLogs(chat.logger, "WARNING") as logs:
+            res = self.post({"message": "PRIVATE 질문"}, fake_execution([0], self.calls))
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["answer"], "답변입니다.")
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))  # 질문·오류 원문은 로그에 남기지 않는다
+
+    def test_not_saved_when_no_answer(self):
+        self.post({"message": "질문"}, None)                                    # 503
+        self.post({"message": "질문"}, failing_execution)                       # 503
+        self.post({"message": "질문", "patient_id": str(uuid4())}, fake_execution([], self.calls))  # 404
+        self.post({"message": ""}, fake_execution([], self.calls))              # 422
+        self.save.assert_not_called()
 
     def test_no_token_401(self):
         with patch("app.api.chat.user_functions.get_user_profile_context") as lookup:
@@ -97,6 +116,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(res.headers.get("WWW-Authenticate"), "Bearer")
         lookup.assert_not_called()
         self.assertEqual(self.calls, [])
+        self.save.assert_not_called()
 
     def test_other_users_path_403(self):
         other = uuid4()

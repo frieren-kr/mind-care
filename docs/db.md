@@ -28,6 +28,7 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
     사용자 요청으로 010에 트리거를 추가했으므로 기존 적용 DB도 재실행한다. 기존 갱신 주기는 유지하며, 상세 정책은 [`users.md`](users.md) 참고.
   + `011_authentication.sql`(이메일 정규화 유일 인덱스, `user_credentials`, `auth_sessions`, `auth_refresh_tokens`).
     기존 사용자의 인증 정보를 자동 생성하지 않는다. 이번 최소 로그인 구현은 자격 증명·세션만 사용한다.
+  + `012_chat_history.sql`(001의 `chat_messages`에 `patient_id`·`sources`(jsonb)·role 제약 추가 + `chat_daily_summaries`, 2026-11-06).
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -57,6 +58,24 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 로그아웃 후 보호 요청은 거부된다. 이미 인증 검사를 통과해 실행 중인 요청을 취소하지는 않는다.
 갱신 토큰은 이번 범위에서 발급하지 않는다. 기존 011 파일은 수정하지 않았다.
 검증은 `python -m unittest tests.test_auth_db`. 적용·API 확인은 [`AUTH_CHECK.md`](../backend/AUTH_CHECK.md).
+
+### 챗봇 대화 저장 (2026-11-06, 박주현)
+
+`app/db/chat_store.py`. 팀 결정: 원문은 7일만 보관, 그 뒤에는 하루 요약만 남긴다. "하루"는 한국 날짜(KST).
+`patient_id=None`은 환자를 고르지 않은 대화이며 조회도 None끼리만 묶는다. 반환 `ChatMessage(role, content, sources, created_at, patient_id)`.
+
+| 함수 | 하는 일 |
+|---|---|
+| `save_chat_turn(user_id, patient_id, question, answer, sources)` | 질문·답변 두 행을 한 문장(트랜잭션)으로 저장. `sources`는 `ChatSource.model_dump()` 목록 |
+| `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 limit개를 오래된 것부터 ("이전 대화 기억"용, 아직 안 씀) |
+| `list_chat_threads_for_day(day)` | 그날 대화가 있었던 `(user_id, patient_id)` 목록 (요약 배치용) |
+| `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부, 시간순 (요약 배치용) |
+| `save_daily_summary(user_id, patient_id, day, summary, model)` | 사용자·환자·날짜당 한 행, 다시 저장하면 덮어씀 |
+| `delete_old_chat_messages(days=7)` | 7일 지난 원문 삭제, 지운 행 수 반환. 요약은 남는다 |
+
+`POST /chat`은 답변 성공 시 저장하고, 저장이 실패해도 답변은 그대로 준다(로그만).
+매일 `python -m scripts.summarize_chats`(기본 어제, `--date`, `--dry-run`)가 요약 → 저장 → 7일 지난 원문 삭제를 한다.
+검증은 `python -m unittest tests.test_chat_store_db tests.test_summarize_chats tests.test_chat`.
 
 ### 기존 데이터 함수
 

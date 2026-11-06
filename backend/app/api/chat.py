@@ -10,7 +10,8 @@ POST /chat/{user_id}   본문 {"message": "...", "patient_id": null}
   ③ 실행기가 없거나 실패하면 503 (검색 대체 응답은 없다)
 
 도구는 지금 search_evidence 하나다. 환자 도구(프로필·돌봄 기록)는 웅 님 작업(11/8) 후 붙인다.
-대화 저장은 아직 하지 않는다 (요약 저장 형식은 웅 님과 정한 뒤 따로).
+답변에 성공하면 질문·답변을 chat_store.save_chat_turn()으로 저장한다 (7일 보관 → 하루 요약, scripts/summarize_chats.py).
+저장이 실패해도 답변은 그대로 돌려주고 로그만 남긴다. 저장한 대화를 답변에 다시 쓰는 일(이전 대화 기억)은 아직 없다.
 라우터 공통 의존성(require_user_access)이 로그인·본인 확인을 실행기 조립과 데이터 조회보다 먼저 한다
 (api/users.py·recommendations.py와 같은 방식). 토큰 없음·만료 401, 남의 user_id 403, 남의 환자 404.
 """
@@ -32,7 +33,7 @@ from app.ai.agent.workflows.chat_context_prepare import prepare_chat_input
 from app.ai.agent.workflows.chat_execution import ChatExecutionV1
 from app.auth.dependencies import require_user_access
 from app.config import settings
-from app.db import user_functions
+from app.db import chat_store, user_functions
 from app.schemas import ChatRequest, ChatResponse, ChatSource
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,7 @@ def post_chat(
     - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
     - 없는 사용자는 404. 질문이 비었거나 4000자를 넘으면 422.
     - AI를 쓸 수 없거나 실패하면 503. 최대 약 80초 걸릴 수 있다.
-    - 대화는 아직 저장하지 않는다 (이전 대화를 기억하지 않는다).
+    - 답한 대화는 7일 동안 저장된다 (아직 이전 대화를 기억해 답하지는 않는다).
     """
     profile = user_functions.get_user_profile_context(user_id)
     if profile is None:
@@ -125,7 +126,7 @@ def post_chat(
 
     context = AgentContext(request_id=str(uuid4()), user_id=user_id, patient_id=body.patient_id)
     try:
-        return ChatWorkflow(
+        response = ChatWorkflow(
             context_prepare=prepare_chat_input,
             chat_execution=chat_execution,
             backend_handoff=backend_handoff,
@@ -137,3 +138,14 @@ def post_chat(
         # 원래 예외 종류는 __context__에서 읽는다 (메시지는 남기지 않는다).
         logger.warning("챗봇 AI 실패 → 503 (stage=%s, %s)", exc.stage, type(exc.__context__).__name__)
         raise HTTPException(status_code=503, detail=_UNAVAILABLE) from None
+    _save_turn(user_id, body.patient_id, body.message, response)
+    return response
+
+
+def _save_turn(user_id: UUID, patient_id: Optional[UUID], question: str, response: ChatResponse) -> None:
+    """대화 저장. 실패해도 답변은 이미 만들어졌으므로 사용자에게 오류를 내지 않는다 (질문 원문은 로그에 남기지 않는다)."""
+    try:
+        chat_store.save_chat_turn(user_id, patient_id, question, response.answer,
+                                  [source.model_dump() for source in response.sources])
+    except Exception as exc:
+        logger.warning("챗봇 대화 저장 실패 — 답변은 그대로 보냄 (%s)", type(exc).__name__)
