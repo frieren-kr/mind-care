@@ -11,7 +11,8 @@ POST /chat/{user_id}   본문 {"message": "...", "patient_id": null}
 
 도구는 지금 search_evidence 하나다. 환자 도구(프로필·돌봄 기록)는 웅 님 작업(11/8) 후 붙인다.
 대화 저장은 아직 하지 않는다 (요약 저장 형식은 웅 님과 정한 뒤 따로).
-로그인이 아직 없어서 user_id를 경로로 받는다 (api/users.py와 같은 방식).
+라우터 공통 의존성(require_user_access)이 로그인·본인 확인을 실행기 조립과 데이터 조회보다 먼저 한다
+(api/users.py·recommendations.py와 같은 방식). 토큰 없음·만료 401, 남의 user_id 403, 남의 환자 404.
 """
 import logging
 from contextlib import suppress
@@ -29,13 +30,14 @@ from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.chat import ChatWorkflow, ChatWorkflowError
 from app.ai.agent.workflows.chat_context_prepare import prepare_chat_input
 from app.ai.agent.workflows.chat_execution import ChatExecutionV1
+from app.auth.dependencies import require_user_access
 from app.config import settings
 from app.db import user_functions
 from app.schemas import ChatRequest, ChatResponse, ChatSource
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/chat", tags=["chat"])
+router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_user_access)])
 
 _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."
@@ -106,6 +108,7 @@ def post_chat(
 ) -> ChatResponse:
     """간병인의 질문에 답하고, 답에 쓴 근거 자료를 `sources`로 돌려준다.
 
+    - `Authorization: Bearer <access_token>` 필요. 없거나 만료면 401, 경로가 본인 user_id가 아니면 403.
     - `sources`는 답변이 인용한 순서 그대로다. 근거 없이 답하면 빈 목록이다.
     - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
     - 없는 사용자는 404. 질문이 비었거나 4000자를 넘으면 422.

@@ -1,5 +1,8 @@
 """/chat 테스트. DB·실제 LLM 없이 가짜 실행기와 Mock 사용자 조회로 돌린다.
 
+로그인은 get_current_user만 바꿔 끼운다 (토큰·세션 검증은 test_auth_*). 본인 확인(require_user_access)은
+실제 의존성 그대로 돌아서 403을 여기서 확인한다.
+
 실행 (backend/ 에서):  python -m unittest tests.test_chat
 """
 import unittest
@@ -11,6 +14,8 @@ from fastapi.testclient import TestClient
 
 from app.ai.agent.outputs import StructuredAgentResult
 from app.api import chat
+from app.auth.dependencies import get_current_user
+from app.auth_schemas import AuthUser
 from main import app
 
 USER_ID = uuid4()
@@ -60,8 +65,12 @@ class ChatApiTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def post(self, body, execution=None, user_id=USER_ID):
+    def post(self, body, execution=None, user_id=USER_ID, login_as=USER_ID):
+        """login_as = 로그인한 사용자 (None이면 토큰 없이 보낸다)."""
         app.dependency_overrides[chat.get_chat_execution] = lambda: execution
+        if login_as is not None:
+            user = AuthUser(id=login_as, name="간병인", email="a@example.com", feed_refresh_days=3)
+            app.dependency_overrides[get_current_user] = lambda: user
         return self.client.post(f"/chat/{user_id}", json=body)
 
     def test_answer_and_sources_in_citation_order(self):
@@ -81,8 +90,26 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(res.json()["sources"], [])
         self.assertIsNone(self.calls[0][0].patient_id)
 
+    def test_no_token_401(self):
+        with patch("app.api.chat.user_functions.get_user_profile_context") as lookup:
+            res = self.post({"message": "질문"}, fake_execution([], self.calls), login_as=None)
+        self.assertEqual(res.status_code, 401)
+        self.assertEqual(res.headers.get("WWW-Authenticate"), "Bearer")
+        lookup.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_other_users_path_403(self):
+        other = uuid4()
+        with patch("app.api.chat.user_functions.get_user_profile_context") as lookup:
+            res = self.post({"message": "질문"}, fake_execution([], self.calls), user_id=other)
+        self.assertEqual(res.status_code, 403)
+        lookup.assert_not_called()
+        self.assertEqual(self.calls, [])
+
     def test_unknown_user_404(self):
-        res = self.post({"message": "질문"}, fake_execution([], self.calls), user_id=uuid4())
+        # 로그인은 됐지만 프로필이 없는 경우 (확인과 조회 사이에 삭제 등)
+        missing = uuid4()
+        res = self.post({"message": "질문"}, fake_execution([], self.calls), user_id=missing, login_as=missing)
         self.assertEqual(res.status_code, 404)
         self.assertEqual(self.calls, [])
 
