@@ -25,7 +25,7 @@ from ..workflows.chat_context_prepare import prepare_chat_input
 from ..workflows.chat_execution import ChatExecutionV1, _finalize_chat_answer
 from ..workflows.chat_prompts import (
     CHAT_DATA_POLICY, CHAT_DIALOGUE_POLICY, CHAT_EVIDENCE_POLICY, CHAT_TOOL_POLICY,
-    CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY,
+    CHAT_SEARCH_EVIDENCE_SUCCESS_POLICY, CHAT_HISTORY_POLICY,
     ChatPromptBuilder,
 )
 from ..workflows.feed_execution import FeedExecutionV1
@@ -52,7 +52,7 @@ class ChatDialoguePolicyTests(unittest.TestCase):
         text = ChatPromptBuilder().build_system_prompt(CONTEXT)
         self.assertEqual(text, '\n\n'.join((
             DefaultPromptBuilder().build_system_prompt(CONTEXT), CHAT_DIALOGUE_POLICY,
-            CHAT_TOOL_POLICY, CHAT_EVIDENCE_POLICY, CHAT_DATA_POLICY)))
+            CHAT_TOOL_POLICY, CHAT_EVIDENCE_POLICY, CHAT_DATA_POLICY, CHAT_HISTORY_POLICY)))
         self.assertIn('추가 질문은 사용자의 요청을 해결하는 데 실제로 필요한 경우에만 한다.', text)
         self.assertIn('핵심 질문 하나로 충분하다면 하나만 묻는다.', text)
         self.assertIn('서로 관련된 여러 정보가 필요하다면 사용자의 답변 부담을 고려하여\n'

@@ -1,5 +1,6 @@
 """Request-local Chat assembly over the unchanged shared AgentLoopRunner."""
 import re
+import json
 from typing import Callable
 
 from .._execution import positive_seconds
@@ -36,6 +37,17 @@ def _finalize_chat_answer(result: StructuredAgentResult, prepared_input: str) ->
             or not result.output.citation_refs):
         return result
     answer = result.output.answer
+    current_question = prepared_input
+    try:
+        payload = json.loads(prepared_input)
+    except (ValueError, TypeError):
+        pass
+    else:
+        # Recognize the prepared envelope by its question and server scope flag.
+        # Other JSON is a direct question; envelope history never protects markers.
+        if (isinstance(payload, dict) and isinstance(payload.get('user_message'), str)
+                and type(payload.get('patient_scope_available')) is bool):
+            current_question = payload['user_message']
     protected = [match.span() for pattern in (
         _PROTECTED_TEXT, _URL_TEXT, _BLOCKQUOTE_TEXT, _IDENTIFIER_TEXT)
         for match in pattern.finditer(answer)]
@@ -43,7 +55,7 @@ def _finalize_chat_answer(result: StructuredAgentResult, prepared_input: str) ->
     def remove(match):
         markers = re.findall(r'\[([1-9][0-9]*)\]', match.group())
         if (any(start < match.end() and match.start() < end for start, end in protected)
-                or any(f'[{number}]' in prepared_input for number in markers)
+                or any(f'[{number}]' in current_question for number in markers)
                 or any(number not in valid_numbers for number in markers)):
             return match.group()
         return ''

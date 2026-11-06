@@ -351,19 +351,89 @@ Tool Selection Policy는 현재 `get_patient_profile`, `get_recent_care_logs`, `
 
 이는 후속 점검 목록이며 이번 정책 작업에서는 Contract·Handler·Adapter를 수정하지 않는다.
 
-### 향후 대화 이력 연결
+### Chat 대화 이력 Context (Agent 경로 구현, 실제 DB 연결 후속)
 
-현재 Chat 입력은 요청별 사용자 질문과 환자 선택 여부를 전달하며, 과거 대화 이력 연결은 아직
-완성되지 않았다. 명확화 질문을 생성할 수 있다는 사실이 다중 턴 이력 기능의 구현을 뜻하지 않는다.
-권한 검증된 이력을 연결할 때 다음을 다시 확인한다.
+`prepare_chat_input(context, message, history_reader=reader)`를 기존 ChatWorkflow의 Stage 1에
+주입한다. 기존 두 인자 호출은 그대로 동작하며 이력을 읽지 않는다. 현재 API의 기본 조립은 아직
+두 인자 경로이므로 실제 이력이 자동 활성화된 상태가 아니다. Backend는 인증·환자 소속 확인 후
+아래 Reader를 바인딩한 `functools.partial(prepare_chat_input, history_reader=reader, ...)`를
+Stage 1에 공급하면 된다. API·DB 코드와 공용 Workflow·Runner·Conversation은 변경하지 않았다.
 
-- 이전·현재 사용자 발화의 문맥과 AI의 명확화 질문·사용자의 후속 답변 연결.
-- 이미 확인한 내용의 반복 질문 방지와 이전 환자·현재 선택 환자의 혼동 방지.
-- 오래된 정보와 현재 정보의 구분, 이력의 신뢰 경계와 개인정보 보호.
-- 이력 제공 범위 및 요약·잘림으로 인한 불확실성.
-- Dialogue Policy의 문맥 사용 규칙과 복수 턴 상담의 실제 LLM 행동.
+현재 질문 검증을 먼저 수행하고 성공한 경우에만 Reader를 요청당 1회 호출한다. 조회·DTO 검증·
+토큰 계산 실패나 기본 2초(history_timeout_seconds) 대기 초과는 고정된 경고만 기록하고 이력을
+제외한 현재 질문으로 계속한다. 지연 결과는 반영하지 않는다. 이를 Stage 1 입력 오류로 다시
+던지지 않으므로 DB 장애가 사용자 입력 오류 422로 바뀌지 않는다. 실제 잘못된 질문은 기존대로 거부한다.
 
-대화 연속성은 후속 개발 항목이다. Memory Manager, 대화 저장소·요약기·새 이력 DTO는 이번에 추가하지 않았다.
+JSON에는 기존 `user_message`, `patient_scope_available`을 보존하고, 성공한 조회에만
+`previous_chat_context.recent_turns`와 `daily_summaries`를 추가한다. 정상 0건은 빈 배열이며
+조회 실패는 이력 필드 없이 진행한다. server-only user_id/patient_id와 Snapshot 자체를
+Provider에 직렬화하지 않는다. 과거 role은 JSON 내부 참고 필드이며 네이티브 assistant/system
+또는 현재 Tool Result로 재생하지 않는다. 원래 사용자 입력 메시지는 첫 LLM 호출부터 모든 후속
+Tool 라운드까지 기존 Conversation이 유지한다. 과거 답변은 현재 검증된 사실·출처가 아니며,
+생략한 내용을 기억한 것처럼 답하지 않는다. 인용 표식 후처리는 현재 user_message만 확인한다.
+
+**선택과 발췌:** 최근 완료 턴 최대 5개를 최신순으로 검토하고 최종 전달은 시간순이다.
+최근 1~2턴의 질문·답변은 원문 그대로다. 3~5턴은 각 메시지가 600자 이하면 원문을 유지하고,
+초과하면 600자 안에서 끝맺음 문장부호가 있는 연속된 첫 문단만 발췌한다. 문장 내부·목록·수식의
+임의 절단, 재서술, 임상적 중요도 분류는 하지 않는다. 안전하게 발췌할 수 없는 턴만 제외한다.
+예산을 초과한 턴에서는 중단하고 더 오래된 턴도 선택하지 않는다. `verbatim_excerpt`로 불완전한 원문임을 표시한다.
+이 규칙이 의료적으로 중요한 모든 조건을 보존한다는 보장은 없으며 실제 모델 품질 평가는 후속이다.
+일별 요약은 완료된 KST 날짜만 최신순으로 선택하고, 초과한 요약부터 더 오래된 요약도 제외한다.
+
+**원문·요약 중복 방지:** 조회된 최대 5개 원문 턴이 걸치는 한국 날짜 전체에서 원문을 우선한다.
+원문이 예산·발췌 제한으로 빠졌어도 그 날짜의 요약은 주입하지 않는다. 자정에 걸친 턴은 질문
+시작일부터 답변 완료일까지의 모든 날짜 요약을 제외한다. 이를 위한 선택적 `started_at`이 없다면
+원문은 사용하되 해당 요청의 요약은 보수적으로 모두 제외한다. 완료 시각만으로 질문 날짜를
+추정하지 않는다. 원문이 없으면 저장된 과거 날짜 요약만 독립적으로 사용할 수 있다.
+
+**토큰 예산:** 최근 원문/발췌 5,500, 일별 요약 1,500, 전체 이력 7,000 이하를 검사한다.
+텍스트뿐 아니라 실제 주입 형식의 날짜·role·representation·배열·JSON 구문과
+previous_chat_context 래퍼 전체를 직렬화한 결과를 측정한다. 각 부분에도 공통 래퍼와 빈 반대
+배열 비용을 포함해 보수적으로 계상하고, 결합한 전체도 다시 검사한다. 현재 질문·기존 시스템
+정책·Tool 정의는 이력 자체의 예산과 별개다. 최종 입력과 동일한 JSON 직렬화 함수를 사용한다.
+기본 계산기는 `tiktoken==0.14.0`이며 실행 모델을 tiktoken의 모델→인코딩 정본으로 매핑한다.
+`model`을 명시하지 않으면 현재 Backend Chat과 동일하게 openai_agent_model → openai_summary_model
+순서로 설정을 사용한다. 별도 모델로 실행기를 조립하면 Stage 1에도 같은 `model=client.model`을
+주입해야 한다. `count_tokens(serialized_text) -> positive int`를 명시하면 그 계산기가 우선한다.
+특수 토큰처럼 보이는 이력 문자열도 encode_ordinary로 일반 데이터로 계산한다.
+모델 미설정(model_unconfigured), 미지원 모델(model_unsupported), 인코딩 파일 로딩 실패
+(encoding_unavailable)는 각각 구분해 경고하고 UTF-8 바이트 기반 보수적 상한으로 fallback한다.
+미지원 모델에 임의의 알려진 모델 인코딩을 대신 적용하지 않는다. 설치 단계에서 사용할 인코딩
+파일을 미리 캐시해야 한다. 공식 다운로드 호스트는 openaipublic.blob.core.windows.net이며,
+현재 클라우드에서는 해당 파일 다운로드가 프록시 403으로 막혀 실제 인코딩 검증은 제한된다.
+fallback 값은 실측 모델 토큰이나 Provider 사용량이 아니다. tiktoken 계산 역시 전체 Provider
+사용량(시스템·Tool·메시지 포맷 포함)과는 별개이며 허용된 실제 평가에서 교차 확인해야 한다.
+요청 중 요약용 LLM 호출은 없다.
+
+#### DB/Backend 담당자에게 필요한 후속 조회 계약
+
+Agent의 `ChatHistoryReader.read_history(*, user_id, patient_id, reference_time, max_recent_turns=5)`
+인터페이스는 다음 `ChatHistorySnapshot`을 한 번 반환해야 한다. 실제 DB 함수명·SQL·DB DTO는
+확정하지 않았고 Adapter나 DB 조회 구현을 임의로 추가하지 않았다.
+
+| 데이터 | Agent 입력 |
+|---|---|
+| 요청 범위 확인용 (서버 전용) | user_id, patient_id (환자 없음은 명시적 None) |
+| recent_turns | 완료된 쌍만: user_message, assistant_message, aware completed_at, 선택적 aware started_at |
+| daily_summaries | summary_date(KST 날짜), 저장된 summary 원문 |
+
+조회는 인증된 동일 사용자·현재 선택 환자 조건을 양쪽 목록에 동일하게 적용하고 최신순으로
+정렬한다. 같은 완료 시각은 DB가 결정적인 순서로 반환해야 한다. reference_time 이전에 완료된
+쌍만 최대 5개 제공하고, 일별 요약은 현재 KST 날짜보다 이전의 저장된 요약만 제공한다.
+오류를 정상 빈 목록으로 위장하지 않으며 메시지·요약의 출처 범위와 조회 일관성을 보장해야 한다.
+현재 질문은 실행 후 저장되므로 조회에 포함하지 않는다. 텍스트가 같다는 이유로 실제 과거의
+동일 질문을 삭제하지는 않는다. 기존 저장·7일 원문 삭제·요약 저장 정책은 변경하지 않는다.
+
+현재 `chat_store.get_recent_chat_messages()`는 메시지 단위이며 일별 요약 조회도 없다.
+질문/답변의 완료 대응 관계를 단순 인접 메시지나 동일 시각이라고 추측해서는 안 된다.
+원문 저장 스키마에는 turn_id가 없으므로 완료 쌍 판정 방법은 DB 담당자와 별도 확인해야 한다.
+또한 012의 원문 patient_id는 환자 삭제 시 NULL이 된다. 기존 NULL 범위 조회를 그대로 연결하면
+삭제된 환자의 대화와 원래 환자 미선택 대화가 섞일 수 있다. 이 혼입을 막을 출처 보장 방안 역시
+DB 담당 영역의 미해결 연결 조건이다. Agent의 Snapshot ID 비교나 Fake 테스트가 실제 DB 권한·
+완료 쌍·삭제 환자 격리를 보장하는 것은 아니다. 필요한 DB 설계 변경은 이번에 수행하지 않는다.
+
+`create_daily_chat_summary` 구현 및 배치 연결도 별도 작업이다. 저장된 요약이 없는 경우에도
+원문과 현재 질문으로 정상 실행한다. 저장은 기존 api/chat.py의 _save_turn()만 사용하고 중복 추가하지 않는다.
 
 ### 후속 실제 LLM 행동 평가
 
