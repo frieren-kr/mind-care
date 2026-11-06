@@ -7,10 +7,12 @@ from .adapters.patient_assessments import PatientAssessmentsAdapter
 from .adapters.patient_safety_events import PatientSafetyEventsAdapter
 from .adapters.recent_care_logs import RecentCareLogsAdapter
 from .adapters.rag_evidence import RagEvidenceRetriever
+from .adapters.rag_guidelines import RagGuidelineRetriever
 from .registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from .schemas import AgentContext
 from .tools.caregiver_profile import CaregiverProfileHandler, CaregiverProfileReader
 from .tools.evidence_tools import EvidenceRetriever
+from .tools.guidelines import GuidelineRetriever, SearchGuidelinesHandler
 from .tools.patient_profile import PatientProfileHandler, PatientProfileReader
 from .tools.medications import PatientMedicationsHandler, PatientMedicationsReader
 from .tools.medical_visits import PatientMedicalVisitsHandler, PatientMedicalVisitsReader
@@ -33,6 +35,7 @@ def build_evidence_registry(*, retriever: EvidenceRetriever | None = None,
 
 
 def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever | None = None,
+                        guidelines_retriever: GuidelineRetriever | None = None,
                         patient_reader: PatientProfileReader | None = None,
                         caregiver_reader: CaregiverProfileReader | None = None,
                         care_logs_reader: RecentCareLogsReader | None = None,
@@ -41,7 +44,7 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
                         assessments_reader: PatientAssessmentsReader | None = None,
                         safety_events_reader: PatientSafetyEventsReader | None = None,
                         parallel_safe: bool = True) -> ToolRegistry:
-    """Chat registry_factory: search/user profile plus selected patient read Tools.
+    """Chat registry_factory: paper/guideline search and scoped profile/read Tools.
 
     Backend owns authentication and endpoint wiring. Injected readers must be
     read-only and safe for concurrent calls when parallel_safe is True.
@@ -49,6 +52,9 @@ def build_chat_registry(context: AgentContext, *, retriever: EvidenceRetriever |
     """
     search_registry = build_evidence_registry(retriever=retriever, parallel_safe=parallel_safe)
     specs = [search_registry.get(ToolName.SEARCH_EVIDENCE.value)]
+    guidelines = RagGuidelineRetriever() if guidelines_retriever is None else guidelines_retriever
+    specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_GUIDELINES],
+        SearchGuidelinesHandler(guidelines), parallel_safe=parallel_safe))
     if context.patient_id is not None:
         reader = PatientProfileAdapter() if patient_reader is None else patient_reader
         specs.append(ToolSpec(TOOL_CONTRACTS[ToolName.PATIENT_PROFILE],

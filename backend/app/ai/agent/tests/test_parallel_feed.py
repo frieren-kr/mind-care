@@ -180,7 +180,7 @@ class ParallelFeedTests(unittest.TestCase):
 
     def test_workflow_opt_out_unsafe_spec_or_low_cap_preserve_sequential_execution(self):
         for safe, options in ((True, {'allow_parallel_tools':False}), (False, {}),
-                              (True, {'max_parallel_calls':1}), (True, {'max_parallel_calls':2})):
+                              (True, {'max_parallel_calls':1})):
             order = []
             def handler(context, args):
                 order.append(args.query)
@@ -188,6 +188,40 @@ class ParallelFeedTests(unittest.TestCase):
             result, _ = self.run_feed(handler, safe=safe, **options)
             self.assertEqual(result.execution.status, 'completed')
             self.assertEqual(order, [f'topic {i}' for i in range(3)])
+
+    def test_two_worker_cap_preserves_result_and_source_order(self):
+        barrier, second_done, lock = Barrier(2), Event(), Lock()
+        active, peak, finished = 0, 0, []
+        def handler(context, args):
+            nonlocal active, peak
+            index = int(args.query[-1])
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                self.assertLessEqual(active, 2)
+            try:
+                if index < 2:
+                    barrier.wait(2)
+                    if index == 0:
+                        self.assertTrue(second_done.wait(2))
+                result = package([f'{args.query}-{i}' for i in range(args.top_k)])
+                with lock: finished.append(index)
+                if index == 1: second_done.set()
+                return result
+            finally:
+                with lock: active -= 1
+        result, client = self.run_feed(handler, max_parallel_calls=2)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual(result.execution.errors, [])
+        self.assertEqual((active, peak), (0, 2))
+        self.assertEqual(finished, [1, 0, 2])
+        self.assertEqual([s.pmid for s in result.sources],
+                         ['topic 0-0', 'topic 1-0', 'topic 2-0', 'topic 0-1', 'topic 1-1'])
+        refs = [(s.source_ref.tool_call_id, s.source_ref.evidence_index) for s in result.sources]
+        self.assertEqual(refs, [('opaque_0', 0), ('opaque_1', 0), ('opaque_2', 0), ('opaque_0', 1), ('opaque_1', 1)])
+        self.assertEqual([item.source_ref for item in result.output.items], [s.source_ref for s in result.sources])
+        self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == 'function_call_output'],
+                         ['opaque_0', 'opaque_1', 'opaque_2'])
 
     def test_default_chat_is_sequential_even_with_parallel_safe_tool(self):
         order = []

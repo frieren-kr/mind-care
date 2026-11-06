@@ -59,7 +59,7 @@ class CaregiverProfileHandlerTests(TestCase):
     def test_canonical_caregiver_spec_is_always_registered_without_mutating_search_factory(self):
         for context in (CONTEXT,USER_CONTEXT):
             tools = build_chat_registry(context)
-            expected = {'search_evidence','get_caregiver_profile'}
+            expected = {'search_evidence','search_guidelines','get_caregiver_profile'}
             if context.patient_id is not None: expected.update({'get_patient_profile','get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
             self.assertEqual(set(tools.names()),expected)
             self.assertEqual(tools.mode,'production')

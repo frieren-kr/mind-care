@@ -51,7 +51,7 @@ class PatientProfileHandlerTests(TestCase):
     def test_chat_factory_uses_canonical_production_specs_and_keeps_search_only_factory(self):
         tools = build_chat_registry(CONTEXT)
         self.assertEqual(tools.mode, 'production')
-        self.assertEqual(set(tools.names()), {'search_evidence', 'get_patient_profile', 'get_caregiver_profile', 'get_recent_care_logs', 'get_patient_medications', 'get_patient_medical_visits', 'get_patient_assessments', 'get_patient_safety_events'})
+        self.assertEqual(set(tools.names()), {'search_evidence', 'search_guidelines', 'get_patient_profile', 'get_caregiver_profile', 'get_recent_care_logs', 'get_patient_medications', 'get_patient_medical_visits', 'get_patient_assessments', 'get_patient_safety_events'})
         for name in (ToolName.PATIENT_PROFILE, ToolName.SEARCH_EVIDENCE):
             spec = tools.get(name.value)
             self.assertIs(spec.contract, TOOL_CONTRACTS[name])
@@ -75,11 +75,11 @@ class PatientProfileHandlerTests(TestCase):
         retriever = Mock(spec=EvidenceRetriever)
         factory = partial(build_chat_registry, retriever=retriever, patient_reader=reader)
         tools = factory(context)
-        self.assertEqual(tools.names(), ('search_evidence', 'get_caregiver_profile'))
+        self.assertEqual(tools.names(), ('search_evidence', 'search_guidelines', 'get_caregiver_profile'))
         client = FakeLLMClient([chat_final('일반 설명')])
         result = ChatExecutionV1(client, factory)(context, prepare_chat_input(context, '일반 질문'))
         self.assertEqual(result.execution.status, 'completed')
-        self.assertEqual([d['name'] for d in client.requests[0][1]], ['search_evidence','get_caregiver_profile'])
+        self.assertEqual([d['name'] for d in client.requests[0][1]], ['search_evidence','search_guidelines','get_caregiver_profile'])
         lookup.assert_not_called()
         retriever.search_evidence.assert_not_called()
 
@@ -143,7 +143,7 @@ class PatientProfileHandlerTests(TestCase):
                 self.assertEqual(result.execution.status, 'completed')
                 self.assertEqual(result.execution.errors, [])
                 self.assertEqual(result.sources, [])
-                self.assertEqual({d['name'] for d in wire[0]['tools']}, {'search_evidence','get_patient_profile','get_caregiver_profile','get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
+                self.assertEqual({d['name'] for d in wire[0]['tools']}, {'search_evidence','search_guidelines','get_patient_profile','get_caregiver_profile','get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
                 self.assertFalse(any(m.get('content') == PATIENT_PROFILE_DATA_POLICY for m in wire[0]['input']))
                 messages = wire[1]['input']
                 output = next(m for m in messages if m.get('type') == 'function_call_output' and m['call_id'] == 'profile')

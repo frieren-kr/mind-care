@@ -2350,8 +2350,21 @@ system 메시지로 전달한다. 미호출·실패 시 미전달이며 별도 W
 발췌·검색 유사도와 권고 강도·개인별 진료 판단을 구분하고, 원문이 지지하는 권고만 설명하며
 출처 생성과 문서 내부 지시문 실행을 금지한다. 논문 후속 정책은 논문 검색 종료만 판단한다.
 
-**후속 연결:** 이번에는 Handler·Adapter를 구현하지 않는다. canonical ToolName·Contract와
-테스트용 주입 ToolSpec으로 Runner 경로를 검증했으며 `build_chat_registry()`의 운영 Tool 목록은 유지한다.
-실제 제공되는 Tool만 모델이 요청할 수 있다. RAG 정본은 `app.ai.retrieval.search.search_guidelines()`이며,
-후속 Handler·Adapter 구현 시 GuidelineSearchInput → RAG 검색 → EvidencePackage 변환을 연결하고
-composition.py의 Chat Registry에 등록해야 한다. Feed의 검색 전용 Registry·정책은 변경하지 않는다.
+**Handler·Adapter 연결:** `SearchGuidelinesHandler`는 검증된 query·top_k와 Context를
+`GuidelineRetriever.search_guidelines()`에 그대로 전달한다. `RagGuidelineRetriever`는 실행 시점에
+RAG 정본 `app.ai.retrieval.search.search_guidelines(query, k)`를 호출한다. 생성 시 임베딩이나
+DB 조회를 실행하지 않으며 `search_fn` 주입으로 오프라인 검증할 수 있다.
+RAG에는 원본 query와 `k=top_k`만 전달하며 사용자·환자 Context나 별도 검색 옵션은 넘기지 않는다.
+
+RAG 반환형은 `list[EvidenceItem]`이다. Adapter는 목록과 각 BaseModel 항목을 확인하고
+JSON 모드로 변환한 뒤 기존 Agent EvidencePackage로 재검증한다. Output.query는 RAG의 실제
+strip 동작과 같은 query.strip()이며 검색 함수에 넘기는 원문은 바꾸지 않는다. 결과 순서·중복·
+발췌·기관·연도·출처·유사도를 그대로 보존하고 추가 정렬·요약·상한 절단·출처 생성은 하지 않는다.
+정상 빈 목록만 정상 0건이며 예외·잘못된 반환형·변환 실패를 빈 목록으로 대체하지 않는다.
+변환 예외는 기존 Executor로 전파되고, Tool별 자료 유형·반환 건수 검증은 기존 Chat Runner가 담당한다.
+
+`build_chat_registry(..., guidelines_retriever=...)`는 환자 선택 유무와 무관하게 canonical
+search_guidelines를 production Tool로 등록한다. 기본값은 RagGuidelineRetriever이며 기존
+parallel_safe 옵션을 따른다. 환자 미선택 시 논문 검색·가이드라인 검색·간병인 프로필 3개,
+환자 선택 시 기존 환자 전용 6개를 더 제공한다. Feed의 검색 전용 Registry·정책은 변경하지 않는다.
+운영 Backend/API 연결, 실제 임베딩·DB 통합 및 검색 품질 검증은 후속 작업이다.

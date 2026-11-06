@@ -1,4 +1,4 @@
-"""Guideline declaration only; no production Handler, Adapter or retrieval I/O."""
+"""Guideline contract and production declaration; no live retrieval I/O."""
 import json
 from unittest import TestCase
 
@@ -24,7 +24,7 @@ class GuidelineContractTests(TestCase):
         for key in ('patient_id','user_id','source_url','exclude_candidates','candidate_version'):
             with self.assertRaises(ValidationError):GuidelineSearchInput.model_validate({'query':'q',key:'untrusted'})
 
-    def test_canonical_contract_definition_and_deferred_production_binding(self):
+    def test_canonical_contract_definition_and_production_binding(self):
         spec = TOOL_CONTRACTS[ToolName.SEARCH_GUIDELINES]
         self.assertIs(spec.input_model,GuidelineSearchInput)
         self.assertIs(spec.output_model,EvidencePackage)
@@ -36,7 +36,7 @@ class GuidelineContractTests(TestCase):
         definition = spec.definition()
         self.assertEqual(definition['parameters'],GuidelineSearchInput.model_json_schema())
         self.assertNotIn(SEARCH_GUIDELINES_DATA_POLICY,json.dumps(definition,ensure_ascii=False))
-        self.assertIsNone(build_chat_registry(CONTEXT).get('search_guidelines'))
+        self.assertIs(build_chat_registry(CONTEXT).get('search_guidelines').contract,spec)
         self.assertEqual(production_registry().names(),())
         self.assertEqual(EvidenceSearchInput(query='q').top_k,5)
         self.assertEqual(EvidenceSearchInput(query='q',top_k=20).top_k,20)

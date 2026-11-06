@@ -81,7 +81,7 @@ class PatientMedicalVisitsHandlerTests(TestCase):
     def test_factory_registers_canonical_selected_patient_tool_and_preserves_search_only(self):
         reader = Mock(spec=PatientMedicalVisitsReader)
         registry = build_chat_registry(CONTEXT, visits_reader=reader)
-        self.assertEqual(set(registry.names()), {'search_evidence','get_patient_profile','get_caregiver_profile',
+        self.assertEqual(set(registry.names()), {'search_evidence','search_guidelines','get_patient_profile','get_caregiver_profile',
             'get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
         spec = registry.get('get_patient_medical_visits')
         self.assertIs(spec.contract,TOOL_CONTRACTS[ToolName.PATIENT_MEDICAL_VISITS])
@@ -93,7 +93,7 @@ class PatientMedicalVisitsHandlerTests(TestCase):
         self.assertIsNone(default.upcoming_query_fn)
         self.assertFalse(build_chat_registry(CONTEXT,parallel_safe=False).get('get_patient_medical_visits').parallel_safe)
         self.assertEqual(set(build_chat_registry(CONTEXT.model_copy(update={'patient_id':None})).names()),
-                         {'search_evidence','get_caregiver_profile'})
+                         {'search_evidence','search_guidelines','get_caregiver_profile'})
         self.assertEqual(build_evidence_registry().names(),('search_evidence',))
         self.assertIn('일반적인 진료·검사 설명에는 불필요하게 호출하지 않는다',CHAT_TOOL_POLICY)
 

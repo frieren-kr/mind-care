@@ -62,7 +62,7 @@ class PatientMedicationsHandlerTests(TestCase):
     def test_factory_uses_canonical_patient_only_tool_and_keeps_search_factory(self):
         reader = Mock(spec=PatientMedicationsReader)
         registry = build_chat_registry(CONTEXT, medications_reader=reader)
-        self.assertEqual(set(registry.names()), {'search_evidence','get_patient_profile','get_caregiver_profile',
+        self.assertEqual(set(registry.names()), {'search_evidence','search_guidelines','get_patient_profile','get_caregiver_profile',
                                                 'get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
         spec = registry.get('get_patient_medications')
         self.assertIs(spec.contract, TOOL_CONTRACTS[ToolName.PATIENT_MEDICATIONS])
@@ -73,7 +73,7 @@ class PatientMedicationsHandlerTests(TestCase):
                               PatientMedicationsAdapter)
         self.assertFalse(build_chat_registry(CONTEXT, parallel_safe=False).get('get_patient_medications').parallel_safe)
         self.assertEqual(set(build_chat_registry(CONTEXT.model_copy(update={'patient_id':None})).names()),
-                         {'search_evidence','get_caregiver_profile'})
+                         {'search_evidence','search_guidelines','get_caregiver_profile'})
         self.assertEqual(build_evidence_registry().names(), ('search_evidence',))
         self.assertIn('일반적인 약물 정보 설명에는 불필요하게 호출하지 않는다', CHAT_TOOL_POLICY)
 

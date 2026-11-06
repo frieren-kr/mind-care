@@ -134,7 +134,7 @@ class PatientSafetyEventsHandlerTests(TestCase):
     def test_factory_registers_canonical_patient_only_safety_and_keeps_existing_tools(self):
         reader = Mock(spec=PatientSafetyEventsReader)
         tools = build_chat_registry(CONTEXT,safety_events_reader=reader)
-        self.assertEqual(set(tools.names()),{'search_evidence','get_patient_profile','get_caregiver_profile',
+        self.assertEqual(set(tools.names()),{'search_evidence','search_guidelines','get_patient_profile','get_caregiver_profile',
             'get_recent_care_logs','get_patient_medications','get_patient_medical_visits','get_patient_assessments','get_patient_safety_events'})
         spec = tools.get('get_patient_safety_events')
         self.assertIs(spec.contract,TOOL_CONTRACTS[ToolName.PATIENT_SAFETY_EVENTS])
@@ -143,7 +143,7 @@ class PatientSafetyEventsHandlerTests(TestCase):
         self.assertFalse(spec.test_only)
         self.assertIsInstance(build_chat_registry(CONTEXT).get('get_patient_safety_events').handler.reader,PatientSafetyEventsAdapter)
         self.assertFalse(build_chat_registry(CONTEXT,parallel_safe=False).get('get_patient_safety_events').parallel_safe)
-        self.assertEqual(set(build_chat_registry(CONTEXT.model_copy(update={'patient_id':None})).names()),{'search_evidence','get_caregiver_profile'})
+        self.assertEqual(set(build_chat_registry(CONTEXT.model_copy(update={'patient_id':None})).names()),{'search_evidence','search_guidelines','get_caregiver_profile'})
         self.assertEqual(build_evidence_registry().names(),('search_evidence',))
         self.assertIn('긴급한 안전 대응이 필요한 상황에서는 조회보다 즉각적인 안전 안내를 우선한다',CHAT_TOOL_POLICY)
 
