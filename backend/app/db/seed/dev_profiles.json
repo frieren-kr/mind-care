@@ -119,10 +119,10 @@
     {
       "type": "환자 2명을 돌보는 간병인",
       "user": {"name": "예시 간병인4", "email": "dev-seed-4@example.com"},
-      "caregiver_profile": {"relationship": "며느리", "burden_score": 40, "mood_score": 9, "lifestyle_tags": ["다중 돌봄", "육아병행"]},
+      "caregiver_profile": {"relationship": "자녀", "burden_score": 40, "mood_score": 9, "lifestyle_tags": ["다중 돌봄", "육아병행"]},
       "patients": [
         {
-          "name": "시어머니",
+          "name": "어머니",
           "dementia_stage": "경도",
           "diagnosis_days_ago": 300,
           "symptoms": ["기억력 저하", "약 복용 잊음"],
@@ -142,7 +142,7 @@
           ]
         },
         {
-          "name": "시아버지",
+          "name": "아버지",
           "dementia_stage": "중증",
           "diagnosis_days_ago": 2200,
           "symptoms": ["거동 불편", "삼킴 곤란", "낙상 위험", "공격성"],
