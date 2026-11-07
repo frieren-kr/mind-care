@@ -1,15 +1,18 @@
-import { router } from 'expo-router';
+import { router, type Href } from 'expo-router';
+import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useCallback } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
 import { currentUserId, getRecommendations, getUserProfile } from '@/api';
 import { PaperCard } from '@/components/paper-card';
 import { SkeletonPaperCard } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, ErrorView, Screen, SectionLabel } from '@/components/ui';
-import { Spacing } from '@/constants/theme';
+import { DoubleRule, ErrorView, Screen, SectionLabel } from '@/components/ui';
+import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
+import { useTheme } from '@/hooks/use-theme';
 import type { UserProfileContext } from '@/types';
+import { formatDate, todayLabel } from '@/utils/date';
 import { feedCaption } from '@/utils/feed';
 
 /** 관리 환자 전체에서 가장 가까운 진료 예약 (visit_date는 'YYYY-MM-DD'라 문자열 비교로 정렬된다) */
@@ -20,7 +23,70 @@ function nextVisit(profile: UserProfileContext) {
   return visits.sort((a, b) => a.visit.visit_date.localeCompare(b.visit.visit_date))[0] ?? null;
 }
 
+type Shortcut = {
+  label: string;
+  caption: string;
+  icon: SymbolViewProps['name'];
+  href?: Href;
+};
+
+// 아이콘: iOS는 SF Symbols, Android·웹은 Material Symbols 이름 (탭바와 같다)
+const shortcuts: Shortcut[] = [
+  {
+    label: '자가점검',
+    caption: '15문항 · 5분',
+    icon: { ios: 'brain.head.profile', android: 'psychology', web: 'psychology' },
+    href: '/check',
+  },
+  {
+    label: '챗봇에게 묻기',
+    caption: '논문·지침 근거로 답해요',
+    icon: { ios: 'bubble.left.and.bubble.right', android: 'chat', web: 'chat' },
+    href: '/chat',
+  },
+  // 돌봄 기록 화면은 아직 없다
+  { label: '돌봄 기록', caption: '준비 중', icon: { ios: 'list.bullet.rectangle', android: 'edit_note', web: 'edit_note' } },
+  {
+    label: '내 정보',
+    caption: '돌보는 분 관리',
+    icon: { ios: 'person.crop.circle', android: 'person', web: 'person' },
+    href: '/my',
+  },
+];
+
+/** 2×2 바로가기 한 칸. 상자 대신 가는 선으로 나눈다 */
+function ShortcutTile({ item, index }: { item: Shortcut; index: number }) {
+  const theme = useTheme();
+  const left = index % 2 === 0;
+  const top = index < 2;
+  const { href } = item;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${item.label}, ${item.caption}`}
+      accessibilityState={{ disabled: !href }}
+      disabled={!href}
+      onPress={() => href && router.navigate(href)}
+      style={({ pressed }) => [
+        styles.tile,
+        left ? styles.tileLeft : styles.tileRight,
+        { borderColor: theme.border },
+        left && { borderRightWidth: StyleSheet.hairlineWidth },
+        top && { borderBottomWidth: StyleSheet.hairlineWidth },
+        pressed && { backgroundColor: theme.backgroundSelected },
+        !href && { opacity: 0.55 },
+      ]}>
+      <SymbolView name={item.icon} tintColor={theme.text} size={26} />
+      <ThemedText type="bold">{item.label}</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary">
+        {item.caption}
+      </ThemedText>
+    </Pressable>
+  );
+}
+
 export default function HomeScreen() {
+  const theme = useTheme();
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const profile = useApi(loadProfile);
   // 피드 탭과 같은 추천. AI 결과는 서버에 저장돼 있어(기본 3일) 다시 만들지 않는다
@@ -35,10 +101,24 @@ export default function HomeScreen() {
   const me = profile.data;
   const top = feed.data?.items[0];
   const visit = me ? nextVisit(me) : null;
+  const count = feed.data?.items.length ?? 0;
 
   return (
     <Screen refreshing={(profile.loading && me !== null) || (feed.loading && feed.data !== null)} onRefresh={reloadAll}>
-      <ThemedText type="title">{me ? `안녕하세요, ${me.name}님` : '안녕하세요'}</ThemedText>
+      {/* 신문 1면 머리말: 날짜 + 이중선 */}
+      <View style={styles.masthead}>
+        <ThemedText type="small" themeColor="textSecondary">
+          {todayLabel()}
+        </ThemedText>
+        <DoubleRule />
+      </View>
+
+      <View style={styles.greeting}>
+        <ThemedText type="title">{me ? `안녕하세요, ${me.name}님` : '안녕하세요'}</ThemedText>
+        {count > 0 ? (
+          <ThemedText themeColor="textSecondary">돌보시는 분께 맞춘 새 연구 {count}편이 있어요.</ThemedText>
+        ) : null}
+      </View>
       {profile.error ? <ErrorView message={profile.error.message} onRetry={() => profile.reload()} /> : null}
 
       <View style={styles.section}>
@@ -53,64 +133,102 @@ export default function HomeScreen() {
           <ErrorView message={feed.error.message} onRetry={() => feed.reload()} />
         ) : null}
         {top ? <PaperCard item={top} /> : null}
-        {feed.data && feed.data.items.length === 0 ? (
+        {feed.data && count === 0 ? (
           <ThemedText themeColor="textSecondary">아직 추천할 연구를 찾지 못했어요</ThemedText>
         ) : null}
-        {feed.data && feed.data.items.length > 1 ? (
-          <Button
-            label={`추천 연구 ${feed.data.items.length}편 모두 보기`}
+        {count > 1 ? (
+          <Pressable
+            accessibilityRole="button"
             onPress={() => router.navigate('/feed')}
-          />
+            style={({ pressed }) => [
+              styles.moreRow,
+              { borderColor: theme.rule },
+              pressed && { backgroundColor: theme.backgroundSelected },
+            ]}>
+            <ThemedText type="bold">추천 연구 {count}편 모두 보기</ThemedText>
+            <ThemedText type="bold" aria-hidden>
+              ›
+            </ThemedText>
+          </Pressable>
         ) : null}
       </View>
 
       {me ? (
-        <Card>
-          <ThemedText type="subtitle">돌보는 분</ThemedText>
+        <View style={styles.section}>
+          <SectionLabel>돌보는 분</SectionLabel>
           {me.patients.length === 0 ? (
             <ThemedText themeColor="textSecondary">아직 등록된 분이 없어요.</ThemedText>
           ) : (
             me.patients.map(({ patient }, index) => (
-              <ThemedText key={patient.id}>
-                {patient.name || `환자 ${index + 1}`}
-                {patient.dementia_stage ? ` · ${patient.dementia_stage}` : ''}
-              </ThemedText>
+              <View key={patient.id} style={[styles.patientRow, { borderBottomColor: theme.border }]}>
+                <ThemedText type="bold">{patient.name || `환자 ${index + 1}`}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.patientMeta}>
+                  {[patient.dementia_stage, patient.symptoms.slice(0, 2).join(', ')].filter(Boolean).join(' · ')}
+                </ThemedText>
+              </View>
             ))
           )}
           {visit ? (
-            <ThemedText themeColor="textSecondary">
-              다음 진료: {visit.visit.visit_date} {visit.name}
+            <ThemedText type="small" themeColor="textSecondary">
+              다음 진료: {formatDate(visit.visit.visit_date)} {visit.name}
               {visit.visit.hospital_name ? ` · ${visit.visit.hospital_name}` : ''}
             </ThemedText>
           ) : null}
-          <Button label="내 정보 보기" variant="secondary" onPress={() => router.navigate('/my')} />
-        </Card>
+        </View>
       ) : null}
 
-      <Card>
-        <ThemedText type="subtitle">인지기능 자가점검</ThemedText>
-        {/* 점검 결과는 아직 저장하지 않아(저장 API 미구현) 최근 결과는 보여 주지 않는다 */}
-        <ThemedText themeColor="textSecondary">기억력과 생활 변화를 15개 문항으로 점검해 보세요.</ThemedText>
-        <Button label="점검하기" variant="secondary" onPress={() => router.navigate('/check')} />
-      </Card>
-
-      <Card>
-        <ThemedText type="subtitle">오늘의 돌봄 기록</ThemedText>
-        <ThemedText themeColor="textSecondary">오늘 돌보시는 분의 상태를 기록해 보세요.</ThemedText>
-        {/* 돌봄 기록 화면은 아직 없다 */}
-        <Button label="기록하기 (준비 중)" variant="secondary" disabled />
-      </Card>
-
-      <Card>
-        <ThemedText type="subtitle">궁금한 점을 물어보세요</ThemedText>
-        <Button label="챗봇에게 묻기" variant="secondary" onPress={() => router.navigate('/chat')} />
-      </Card>
+      <View style={[styles.grid, { borderTopColor: theme.rule }]}>
+        {shortcuts.map((item, index) => (
+          <ShortcutTile key={item.label} item={item} index={index} />
+        ))}
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  masthead: {
+    gap: Spacing.one,
+  },
+  greeting: {
+    gap: Spacing.one,
+  },
   section: {
     gap: Spacing.two,
+  },
+  moreRow: {
+    minHeight: MinTouch,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+  },
+  patientRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  patientMeta: {
+    flex: 1,
+    textAlign: 'right',
+  },
+  grid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    borderTopWidth: 1,
+  },
+  tile: {
+    width: '50%',
+    gap: Spacing.two,
+    paddingVertical: Spacing.three,
+  },
+  tileLeft: {
+    paddingRight: Spacing.three,
+  },
+  tileRight: {
+    paddingLeft: Spacing.three,
   },
 });

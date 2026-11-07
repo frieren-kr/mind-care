@@ -114,7 +114,7 @@ export default function SelfCheckScreen() {
             styles.result,
             {
               backgroundColor: suspected ? theme.highlight : theme.backgroundElement,
-              borderLeftColor: suspected ? theme.accent : theme.primary,
+              borderTopColor: suspected ? theme.accent : theme.rule,
             },
           ]}>
           <ThemedText type="title">
@@ -214,7 +214,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   result: {
-    borderLeftWidth: 4,
+    borderTopWidth: 3,
     padding: Spacing.three,
     gap: Spacing.two,
   },

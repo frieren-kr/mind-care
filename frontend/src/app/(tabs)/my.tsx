@@ -1,21 +1,91 @@
 import { router, useFocusEffect } from 'expo-router';
+import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useCallback, useRef, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, Switch, View } from 'react-native';
 
 import { NAME_MAX_LENGTH, currentUserId, getUserProfile, logout, updateFeedSettings, updateUserName } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, Chip, ErrorView, LoadingView, Screen, TextField } from '@/components/ui';
-import { Spacing } from '@/constants/theme';
+import { Button, Card, Chip, ErrorView, LoadingView, Screen, Select, TextField } from '@/components/ui';
+import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useAuth } from '@/hooks/use-auth';
 import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
+import { useResolvedColorScheme, useThemeMode } from '@/hooks/use-theme-mode';
 import { useTheme } from '@/hooks/use-theme';
 import type { PatientContext } from '@/types';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
-const refreshDayOptions = [1, 2, 3, 4, 5, 6, 7];
 const DEFAULT_REFRESH_DAYS = 3;
+const refreshDayOptions = [1, 2, 3, 4, 5, 6, 7].map((days) => ({
+  value: days,
+  label: days === DEFAULT_REFRESH_DAYS ? `${days}일마다 (기본)` : `${days}일마다`,
+}));
+
+const schemeOptions: { value: 'light' | 'dark'; label: string; icon: SymbolViewProps['name'] }[] = [
+  { value: 'light', label: '밝게', icon: { ios: 'sun.max', android: 'light_mode', web: 'light_mode' } },
+  { value: 'dark', label: '어둡게', icon: { ios: 'moon', android: 'dark_mode', web: 'dark_mode' } },
+];
+
+/**
+ * 화면 모드: '자동(휴대폰 설정 따르기)' 스위치 + 해·달 아이콘 버튼.
+ * 자동이 켜져 있으면 지금 적용된 쪽이 표시되고, 아이콘을 누르면 자동이 꺼지고 그 모드로 고정된다.
+ */
+function ThemeModeCard() {
+  const theme = useTheme();
+  const { mode, setMode } = useThemeMode();
+  const resolved = useResolvedColorScheme();
+  const auto = mode === 'system';
+
+  return (
+    <Card>
+      <ThemedText type="subtitle">화면 모드</ThemedText>
+      <View style={styles.headerRow}>
+        <View style={styles.flex}>
+          <ThemedText type="bold">자동</ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            휴대폰의 밝게·어둡게 설정을 따라가요
+          </ThemedText>
+        </View>
+        <Switch
+          accessibilityLabel="화면 모드 자동"
+          value={auto}
+          onValueChange={(on) => setMode(on ? 'system' : resolved)}
+          trackColor={{ true: theme.primary, false: theme.border }}
+          thumbColor={theme.backgroundElement}
+          // 웹에서 켜진 상태의 손잡이 색
+          {...({ activeThumbColor: theme.backgroundElement } as object)}
+        />
+      </View>
+      <View style={styles.headerRow}>
+        {schemeOptions.map((o) => {
+          const selected = resolved === o.value;
+          return (
+            <Pressable
+              key={o.value}
+              accessibilityRole="button"
+              accessibilityLabel={`${o.label}${auto ? ' (누르면 자동이 꺼져요)' : ''}`}
+              accessibilityState={{ selected }}
+              onPress={() => setMode(o.value)}
+              style={({ pressed }) => [
+                styles.schemeButton,
+                {
+                  borderColor: selected ? theme.rule : theme.border,
+                  borderWidth: selected ? 2 : 1,
+                  backgroundColor: pressed ? theme.backgroundSelected : 'transparent',
+                },
+              ]}>
+              <SymbolView name={o.icon} tintColor={selected ? theme.text : theme.textSecondary} size={30} />
+              <ThemedText type={selected ? 'bold' : 'default'} themeColor={selected ? 'text' : 'textSecondary'}>
+                {o.label}
+              </ThemedText>
+            </Pressable>
+          );
+        })}
+      </View>
+    </Card>
+  );
+}
 
 function PatientCard({ context, index }: { context: PatientContext; index: number }) {
   const { patient, current_medications, upcoming_visits } = context;
@@ -202,16 +272,13 @@ export default function MyScreen() {
             <ThemedText themeColor="textSecondary">
               맞춤 추천을 며칠마다 새로 만들지 골라 주세요. 바꾼 주기는 다음에 피드를 열 때부터 적용돼요.
             </ThemedText>
-            <View style={styles.wrapRow}>
-              {refreshDayOptions.map((days) => (
-                <Chip
-                  key={days}
-                  label={days === DEFAULT_REFRESH_DAYS ? `${days}일 (기본)` : `${days}일`}
-                  selected={(savingDays ?? refreshDays) === days}
-                  onPress={() => saveRefreshDays(days)}
-                />
-              ))}
-            </View>
+            <Select
+              label="새 연구 추천 주기"
+              value={savingDays ?? refreshDays}
+              options={refreshDayOptions}
+              onChange={saveRefreshDays}
+              disabled={savingDays !== null}
+            />
             {savingDays !== null ? (
               <ThemedText type="small" themeColor="textSecondary">
                 저장하고 있어요…
@@ -239,6 +306,9 @@ export default function MyScreen() {
         </View>
         <ThemedText themeColor="textSecondary">이 크기로 연구 소식을 보여 드려요.</ThemedText>
       </Card>
+
+      {/* 화면 모드도 이 폰에만 저장한다. 고르면 바로 바뀐다 */}
+      <ThemeModeCard />
 
       {/* '어떤 설명이 편하세요? (쉽게/자세하게)'는 난이도별 요약을 만들지 정해질 때까지 숨긴다 (10/26) */}
       <Card>
@@ -279,5 +349,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: Spacing.two,
+  },
+  schemeButton: {
+    flex: 1,
+    minHeight: MinTouch * 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.one,
   },
 });

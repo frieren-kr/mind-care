@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { ScrollView, StyleSheet } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { currentUserId, getRecommendations, getUserProfile } from '@/api';
 import { PaperCard } from '@/components/paper-card';
@@ -7,7 +7,7 @@ import { SkeletonPaperList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
 import { Chip, ErrorView, Screen } from '@/components/ui';
 import { CategoryLabel } from '@/constants/labels';
-import { Spacing } from '@/constants/theme';
+import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useTheme } from '@/hooks/use-theme';
 import type { Category } from '@/types';
@@ -65,12 +65,25 @@ export default function FeedScreen() {
       )}
 
       {categories.length > 1 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          <Chip label="전체" selected={activeFilter === 'all'} onPress={() => setFilter('all')} />
-          {categories.map((c) => (
-            <Chip key={c} label={CategoryLabel[c]} selected={activeFilter === c} onPress={() => setFilter(c)} />
-          ))}
-        </ScrollView>
+        // 카테고리는 신문 섹션처럼 밑줄 탭 (돌보는 분 선택은 위의 둥근 칩)
+        <View style={[styles.tabs, { borderBottomColor: theme.rule }]} accessibilityRole="tablist">
+          {(['all', ...categories] as const).map((c) => {
+            const selected = activeFilter === c;
+            const n = c === 'all' ? data?.items.length : data?.items.filter((i) => i.category === c).length;
+            return (
+              <Pressable
+                key={c}
+                accessibilityRole="tab"
+                accessibilityState={{ selected }}
+                onPress={() => setFilter(c)}
+                style={[styles.tab, selected && { borderBottomColor: theme.rule }]}>
+                <ThemedText type={selected ? 'bold' : 'default'} themeColor={selected ? 'text' : 'textSecondary'}>
+                  {c === 'all' ? '전체' : CategoryLabel[c]} {n}
+                </ThemedText>
+              </Pressable>
+            );
+          })}
+        </View>
       )}
 
       {/* 피드 대기 문구 (10/14 회의): AI 피드는 최대 15초, 서버를 켠 뒤 첫 검색은 30초까지 걸린다 */}
@@ -92,7 +105,7 @@ export default function FeedScreen() {
 
       {/* AI가 5편보다 적게 고른 경우 (최대 5편, 관련성이 낮은 논문으로 채우지 않는다) */}
       {notice ? (
-        <ThemedText type="small" style={[styles.notice, { borderLeftColor: theme.primary }]}>
+        <ThemedText type="small" themeColor="accent">
           {notice}
         </ThemedText>
       ) : null}
@@ -111,8 +124,17 @@ const styles = StyleSheet.create({
   chips: {
     gap: Spacing.two,
   },
-  notice: {
-    borderLeftWidth: 3,
-    paddingLeft: Spacing.two,
+  tabs: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    columnGap: Spacing.four,
+    borderBottomWidth: 1,
+  },
+  tab: {
+    minHeight: MinTouch,
+    justifyContent: 'center',
+    borderBottomWidth: 3,
+    borderBottomColor: 'transparent',
+    marginBottom: -1,
   },
 });

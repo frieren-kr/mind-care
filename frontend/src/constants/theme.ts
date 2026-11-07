@@ -10,31 +10,41 @@ import { Platform } from 'react-native';
 
 import type { EvidenceLevel } from '@/types';
 
+/**
+ * "신문 지면" 테마 (11/7, 시안 A안). 따뜻한 종이색 바탕 + 먹색 글자, 카드 대신 선으로 나눈다.
+ * 강조색(버튼·선택)은 남색 대신 먹색 — 남색 배경은 "AI 앱" 느낌이 나서 뺐다.
+ * 포인트는 적갈색(accent) 한 가지: 섹션 머리말, "우리 상황에서", 요약 번호.
+ */
 export const Colors = {
   light: {
-    text: '#1A1C1E',
-    background: '#F7F8FA',
-    backgroundElement: '#FFFFFF',
-    backgroundSelected: '#E3ECF7',
-    textSecondary: '#4F5560',
-    primary: '#1F5FAD',
+    text: '#1E1C18',
+    background: '#F5F1E8',
+    /** 입력칸·등급 설명처럼 바탕보다 살짝 떠 보여야 하는 면 */
+    backgroundElement: '#FBF9F4',
+    backgroundSelected: '#EDE6D6',
+    textSecondary: '#5E5A52',
+    primary: '#1E1C18',
     onPrimary: '#FFFFFF',
-    border: '#D8DCE2',
-    highlight: '#FFF6DB',
-    /** "우리 상황에서는?" 같은 개인화 설명의 강조 띠 */
-    accent: '#9A5B00',
+    /** 얇은 구분선 */
+    border: '#D9D2C3',
+    /** 굵은 구분선 (머리말 이중선, 탭바 위, 섹션 시작) */
+    rule: '#1E1C18',
+    /** "우리 상황에서" 블록 바탕 */
+    highlight: '#EDE6D6',
+    accent: '#A4471C',
   },
   dark: {
-    text: '#F1F3F5',
-    background: '#121416',
-    backgroundElement: '#1E2124',
-    backgroundSelected: '#22344A',
-    textSecondary: '#B4BAC2',
-    primary: '#7DB2F0',
-    onPrimary: '#0B1F36',
-    border: '#353A40',
-    highlight: '#3A3220',
-    accent: '#F0B550',
+    text: '#EDE8DE',
+    background: '#171614',
+    backgroundElement: '#211F1C',
+    backgroundSelected: '#2C2822',
+    textSecondary: '#B5AE9F',
+    primary: '#EDE8DE',
+    onPrimary: '#171614',
+    border: '#3A362F',
+    rule: '#EDE8DE',
+    highlight: '#2C2822',
+    accent: '#E39A6E',
   },
 } as const;
 
@@ -55,6 +65,8 @@ export const FontSize = {
   body: 18,
   subtitle: 21,
   title: 26,
+  /** 명조 기사 제목. 명조는 같은 크기에서 고딕보다 작아 보여 한 단계 키운다 */
+  headline: 23,
 } as const;
 
 export const Fonts = Platform.select({
@@ -97,22 +109,27 @@ export const Spacing = {
  * 포인트(근거 배지·선택 칩)와 챗봇 말풍선만 둥글게 한다.
  */
 export const Radius = {
-  card: 4,
+  card: 2,
   bubble: 18,
   pill: 999,
 } as const;
 
-/** 앱 글꼴 Pretendard (assets/fonts, SIL OFL 1.1). 굵기마다 파일이 달라서 fontWeight 대신 이름으로 고른다 */
+/**
+ * 앱 글꼴 Pretendard (assets/fonts, SIL OFL 1.1). 굵기마다 파일이 달라서 fontWeight 대신 이름으로 고른다.
+ * serif = 나눔명조 Bold (SIL OFL 1.1) — 논문 제목·머리말 같은 '기사 제목'에만 쓴다. 본문은 Pretendard.
+ */
 export const FontFamily = {
   regular: 'Pretendard-Regular',
   semibold: 'Pretendard-SemiBold',
   bold: 'Pretendard-Bold',
+  serif: 'NanumMyeongjo-Bold',
 } as const;
 
 export const FontAssets = {
   [FontFamily.regular]: require('@/assets/fonts/Pretendard-Regular.otf'),
   [FontFamily.semibold]: require('@/assets/fonts/Pretendard-SemiBold.otf'),
   [FontFamily.bold]: require('@/assets/fonts/Pretendard-Bold.otf'),
+  [FontFamily.serif]: require('@/assets/fonts/NanumMyeongjo-Bold.ttf'),
 };
 
 /** 버튼·탭 등 터치 영역 최소 높이 */

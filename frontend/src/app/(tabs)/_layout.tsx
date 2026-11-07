@@ -23,15 +23,21 @@ export default function TabLayout() {
         tabBarLabelStyle: { fontSize: 13, lineHeight: 18, fontFamily: FontFamily.bold },
         // 기본 높이에는 26px 아이콘 + 13px 글자가 다 들어가지 않아 글자 아래쪽이 잘린다.
         // 높이를 직접 주면 하단 시스템 영역(insets.bottom)이 빠지므로 같이 더한다
+        // 신문 지면 테마: 탭바·머리글도 종이색 바탕, 탭바 위는 먹색 선
         tabBarStyle: {
-          backgroundColor: theme.backgroundElement,
+          backgroundColor: theme.background,
+          borderTopColor: theme.rule,
+          borderTopWidth: 1,
           height: 64 + insets.bottom,
           paddingTop: Spacing.one,
           paddingBottom: Spacing.two + insets.bottom,
         },
-        headerStyle: { backgroundColor: theme.backgroundElement },
+        headerStyle: { backgroundColor: theme.background },
+        headerShadowVisible: false,
         headerTintColor: theme.text,
+        // 화면 이름은 '논문 상세' 같은 다른 화면 머리글과 같은 Pretendard Bold (명조는 기사 제목에만)
         headerTitleStyle: { fontSize: 20, fontFamily: FontFamily.bold },
+        sceneStyle: { backgroundColor: theme.background },
       }}>
       <Tabs.Screen
         name="index"

@@ -6,7 +6,8 @@ import { useTextScale } from '@/hooks/use-text-scale';
 import { useTheme } from '@/hooks/use-theme';
 
 export type ThemedTextProps = TextProps & {
-  type?: 'default' | 'bold' | 'title' | 'subtitle' | 'small' | 'smallBold' | 'link';
+  /** headline = 명조 '기사 제목' (논문 제목·화면 머리말). 나머지는 Pretendard */
+  type?: 'default' | 'bold' | 'title' | 'headline' | 'subtitle' | 'small' | 'smallBold' | 'link';
   themeColor?: ThemeColor;
 };
 
@@ -61,6 +62,13 @@ const textStyles = {
     fontSize: FontSize.title,
     lineHeight: 36,
     fontFamily: FontFamily.bold,
+    letterSpacing: -0.4,
+  },
+  headline: {
+    fontSize: FontSize.headline,
+    lineHeight: 32,
+    fontFamily: FontFamily.serif,
+    letterSpacing: -0.4,
   },
   subtitle: {
     fontSize: FontSize.subtitle,

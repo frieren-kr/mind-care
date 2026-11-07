@@ -4,11 +4,9 @@
  */
 
 import { Colors } from '@/constants/theme';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useResolvedColorScheme } from '@/hooks/use-theme-mode';
 
+/** 현재 색 구성. 내 정보 > 화면 모드 설정(휴대폰 설정 따르기 / 밝게 / 어둡게)을 따른다 */
 export function useTheme() {
-  const scheme = useColorScheme();
-  const theme = scheme === 'unspecified' ? 'light' : scheme;
-
-  return Colors[theme];
+  return Colors[useResolvedColorScheme()];
 }
