@@ -5,15 +5,25 @@
 
 실행 (backend/ 에서):  python -m unittest tests.test_chat
 """
+import json
 import unittest
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.ai.agent.composition import build_chat_registry
 from app.ai.agent.outputs import StructuredAgentResult
+from app.ai.agent.registry import ToolName
+from app.ai.agent.schemas import ModelTurn
+from app.ai.agent.testing.chat_workflow_fakes import chat_call, chat_final
+from app.ai.agent.testing.fake_llm import FakeLLMClient
+from app.ai.agent.workflows.chat_execution import ChatExecutionV1
 from app.api import chat
+from app.api.chat_history import ChatStoreHistoryReader
+from app.db.chat_store import ChatDailySummary, ChatTurn
 from app.auth.dependencies import get_current_user
 from app.auth_schemas import AuthUser
 from main import app
@@ -67,6 +77,12 @@ class ChatApiTests(unittest.TestCase):
         patcher = patch.object(chat.chat_store, "save_chat_turn")
         self.save = patcher.start()
         self.addCleanup(patcher.stop)
+        # 이전 대화 조회는 기본으로 빈 결과. 모델 ""이면 tiktoken 대신 UTF-8 상한으로 센다 (내려받기 없음).
+        for name, target, value in (("history", chat.chat_store, "read_chat_history"),
+                                    ("model", chat, "chat_model")):
+            patcher = patch.object(target, value, return_value=([], []) if name == "history" else "")
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
 
     def post(self, body, execution=None, user_id=USER_ID, login_as=USER_ID):
         """login_as = 로그인한 사용자 (None이면 토큰 없이 보낸다)."""
@@ -155,6 +171,83 @@ class ChatApiTests(unittest.TestCase):
             res = self.post({"message": "질문"}, failing_execution)
         self.assertEqual(res.status_code, 503)
         self.assertNotIn("PRIVATE", res.text + "\n".join(logs.output))
+
+    def test_previous_chat_is_read_in_scope_and_passed_to_llm_input(self):
+        now = datetime.now(timezone.utc)
+        self.history.return_value = (
+            [ChatTurn("어제 밤에 잠을 못 잤어요", "낮잠을 줄여 보세요.", now - timedelta(hours=2), now - timedelta(hours=1))],
+            [ChatDailySummary(date(2026, 1, 2), "수면 상담")])
+        res = self.post({"message": "오늘은요?", "patient_id": str(PATIENT_ID)}, fake_execution([], self.calls))
+        self.assertEqual(res.status_code, 200)
+        user_id, patient_id, reference, max_turns = self.history.call_args.args
+        self.assertEqual((user_id, patient_id, max_turns), (USER_ID, PATIENT_ID, 5))
+        self.assertIsNotNone(reference.tzinfo)
+        prepared = json.loads(self.calls[0][1])
+        self.assertEqual(prepared["user_message"], "오늘은요?")
+        history = prepared["previous_chat_context"]
+        self.assertEqual(history["recent_turns"][0]["messages"][0]["content"], "어제 밤에 잠을 못 잤어요")
+        # 원문 턴과 다른 날짜의 요약이라 함께 들어간다 (같은 날짜면 Agent가 요약을 뺀다)
+        self.assertEqual([s["summary"] for s in history["daily_summaries"]], ["수면 상담"])
+        self.assertNotIn(str(USER_ID), self.calls[0][1])  # 서버 전용 id는 LLM 입력에 넣지 않는다
+
+    def test_history_without_patient_reads_none_scope(self):
+        self.post({"message": "안녕하세요"}, fake_execution([], self.calls))
+        self.assertIsNone(self.history.call_args.args[1])
+
+    def test_history_failure_still_answers_without_history(self):
+        self.history.side_effect = RuntimeError("PRIVATE db failure")
+        with self.assertLogs("app.ai.agent.workflows.chat_context_prepare", "WARNING") as logs:
+            res = self.post({"message": "질문"}, fake_execution([], self.calls))
+        self.assertEqual(res.status_code, 200)
+        self.assertNotIn("previous_chat_context", json.loads(self.calls[0][1]))
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))
+        self.save.assert_called_once()
+
+    def test_reader_builds_agent_snapshot(self):
+        now = datetime.now(timezone.utc)
+        self.history.return_value = ([ChatTurn("q", "a", now - timedelta(minutes=2), now - timedelta(minutes=1))],
+                                     [ChatDailySummary(date(2026, 1, 2), "요약")])
+        snap = ChatStoreHistoryReader().read_history(user_id=USER_ID, patient_id=None, reference_time=now,
+                                                     max_recent_turns=5)
+        self.history.assert_called_once_with(USER_ID, None, now, 5)
+        self.assertEqual((snap.user_id, snap.patient_id), (USER_ID, None))
+        self.assertEqual((snap.recent_turns[0].user_message, snap.recent_turns[0].assistant_message), ("q", "a"))
+        self.assertEqual(snap.daily_summaries[0].summary, "요약")
+
+    def real_execution(self, turns):
+        """실제 ChatExecutionV1 + 운영과 같은 build_chat_registry. LLM만 가짜."""
+        self.llm = FakeLLMClient(turns)
+        return ChatExecutionV1(self.llm, build_chat_registry)
+
+    def tool_names(self, request_index=0):
+        return sorted(tool["name"] for tool in self.llm.requests[request_index][1])
+
+    def test_registry_is_per_request_and_patient_tools_need_patient(self):
+        execution = self.real_execution([chat_final("일반 답"), chat_final("환자 답")])
+        self.assertEqual(self.post({"message": "안녕"}, execution).status_code, 200)
+        self.assertEqual(self.tool_names(0), sorted(["search_evidence", "search_guidelines", "get_caregiver_profile"]))
+        self.assertEqual(self.post({"message": "안녕", "patient_id": str(PATIENT_ID)}, execution).status_code, 200)
+        self.assertEqual(self.tool_names(1), sorted(name.value for name in ToolName))
+
+    def test_unbound_db_tools_fail_alone_and_answer_still_returns(self):
+        # 돌봄 기록 조회·다가오는 진료 조회는 아직 DB 함수가 없다 (NotImplementedError).
+        # 그 Tool만 오류 결과가 되고, LLM은 다음 라운드에서 답을 만든다.
+        patient = SimpleNamespace(id=PATIENT_ID, caregiver_id=USER_ID)
+        execution = self.real_execution([
+            ModelTurn(tool_calls=[chat_call(ToolName.RECENT_CARE_LOGS, identifier="logs_1"),
+                                  chat_call(ToolName.PATIENT_MEDICAL_VISITS, identifier="visits_1",
+                                            args={"status": "upcoming"})]),
+            chat_final("기록을 확인하지 못했지만 일반적인 방법을 알려드릴게요."),
+        ])
+        with patch("app.db.user_functions.get_patient", return_value=patient):
+            res = self.post({"message": "최근 상태는요?", "patient_id": str(PATIENT_ID)}, execution)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["answer"], "기록을 확인하지 못했지만 일반적인 방법을 알려드릴게요.")
+        outputs = [item for item in self.llm.requests[1][0] if item.type == "function_call_output"]
+        self.assertEqual(sorted(o.call_id for o in outputs), ["logs_1", "visits_1"])
+        for output in outputs:
+            self.assertEqual(json.loads(output.content)["error"]["code"], "tool_exception")
+        self.save.assert_called_once()
 
     def test_missing_key_gives_no_execution(self):
         chat.get_chat_execution.cache_clear()

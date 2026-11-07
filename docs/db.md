@@ -29,6 +29,8 @@ PubMed(주1회 배치) → papers 테이블 → AI 파이프라인(근거분류/
   + `011_authentication.sql`(이메일 정규화 유일 인덱스, `user_credentials`, `auth_sessions`, `auth_refresh_tokens`).
     기존 사용자의 인증 정보를 자동 생성하지 않는다. 이번 최소 로그인 구현은 자격 증명·세션만 사용한다.
   + `012_chat_history.sql`(001의 `chat_messages`에 `patient_id`·`sources`(jsonb)·role 제약 추가 + `chat_daily_summaries`, 2026-11-06).
+  + `013_chat_turns.sql`(`chat_messages.turn_id` + `(turn_id, role)` 유일 인덱스, `patient_id` 외래키 `SET NULL` → `CASCADE`, 2026-11-07).
+    012 다음에 적용한다. 기존 행의 `turn_id`는 NULL로 남고 이전 대화 조회에서 빠진다 (7일 뒤 자동 삭제).
 - 함수 입출력 스키마(pydantic)는 `backend/app/schemas.py`가 단일 출처다.
 
 ## 주요 경로
@@ -62,12 +64,18 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 ### 챗봇 대화 저장 (2026-11-06, 박주현)
 
 `app/db/chat_store.py`. 팀 결정: 원문은 7일만 보관, 그 뒤에는 하루 요약만 남긴다. "하루"는 한국 날짜(KST).
-`patient_id=None`은 환자를 고르지 않은 대화이며 조회도 None끼리만 묶는다. 반환 `ChatMessage(role, content, sources, created_at, patient_id)`.
+`patient_id=None`은 환자를 고르지 않은 대화이며 조회도 None끼리만 묶는다(`IS NOT DISTINCT FROM`).
+환자를 지우면 그 환자의 대화 원문·요약도 지워진다(013, CASCADE). 그래서 NULL은 "원래 환자 미선택"뿐이다.
+질문·답변 두 행은 `turn_id`로 한 쌍이 된다(013). 반환 `ChatMessage(role, content, sources, created_at, patient_id)`,
+`ChatTurn(question, answer, started_at, completed_at)`(질문 행 시각·답변 행 시각), `ChatDailySummary(summary_date, summary)`.
 
 | 함수 | 하는 일 |
 |---|---|
-| `save_chat_turn(user_id, patient_id, question, answer, sources)` | 질문·답변 두 행을 한 문장(트랜잭션)으로 저장. `sources`는 `ChatSource.model_dump()` 목록 |
-| `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 limit개를 오래된 것부터 ("이전 대화 기억"용, 아직 안 씀) |
+| `save_chat_turn(user_id, patient_id, question, answer, sources)` | 질문·답변 두 행을 한 문장(트랜잭션)으로 저장, 같은 `turn_id`(uuid4). `sources`는 `ChatSource.model_dump()` 목록 |
+| `get_recent_chat_turns(user_id, patient_id, reference_time, limit=5, *, conn=None)` | `reference_time`(시간대 필수) 전에 완료된 질문·답변 쌍 `ChatTurn`, 최신순. `turn_id` self-join이라 옛 행·짝 없는 행은 빠진다. 같은 완료 시각은 `turn_id` 순 |
+| `get_daily_summaries_before(user_id, patient_id, before_day, limit=7, *, conn=None)` | `before_day`(한국 날짜)보다 이전 하루 요약 `ChatDailySummary`, 최신 날짜부터 |
+| `read_chat_history(user_id, patient_id, reference_time, max_turns=5)` | 위 두 조회를 커넥션·트랜잭션 하나로. 요약은 `reference_time`의 KST 오늘 이전만. `(turns, summaries)` 반환, 오류는 그대로 올린다. `/chat`의 이전 대화 Reader(`app/api/chat_history.py`)가 쓴다 |
+| `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 메시지 limit개를 오래된 것부터 (메시지 단위. `/chat`은 위의 턴 단위 조회를 쓴다) |
 | `list_chat_threads_for_day(day)` | 그날 대화가 있었던 `(user_id, patient_id)` 목록 (요약 배치용) |
 | `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부, 시간순 (요약 배치용) |
 | `save_daily_summary(user_id, patient_id, day, summary, model)` | 사용자·환자·날짜당 한 행, 다시 저장하면 덮어씀 |

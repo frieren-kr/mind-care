@@ -108,13 +108,22 @@
 
 - `/chat`(담당: 박주현, ★2026-10-28 첫 버전) — 허웅 님 `ChatWorkflow` 3단계를 `/recommendations`와 같은 구조로 조립한다.
   - 사용자·환자 확인(404)은 `user_functions.get_user_profile_context(user_id)`. 그다음
-    `AgentContext(request_id=uuid4, user_id, patient_id)` → `prepare_chat_input` → `chat_execution`(LLM + `search_evidence`) → `backend_handoff()`.
+    `AgentContext(request_id=uuid4, user_id, patient_id)` → `prepare_chat_input`(질문 + 이전 대화) → `chat_execution`(LLM + Tool) → `backend_handoff()`.
   - **AI 연결: `get_chat_execution()`** — `get_feed_execution()`과 같은 설정(`OPENAI_API_KEY`, `OPENAI_AGENT_MODEL`, 없으면 `OPENAI_SUMMARY_MODEL`).
     없거나 조립이 실패하면 `None` → **503** `"지금은 답변을 만들 수 없어요. …"`. 검색 대체 응답은 없다.
     전체 실행 상한 80초, LLM 1회 30초 (화면 대기 시간 90초 안).
-  - 도구는 지금 `search_evidence` 하나. 환자 도구(프로필·돌봄 기록)는 허웅 님 작업 후 붙인다.
-    그때까지 `patient_id`는 소속 확인(404)에만 쓰이고 답변 내용에는 반영되지 않는다.
-  - **대화는 저장하지 않는다** (이전 대화를 기억하지 않음). 저장 형식은 허웅 님과 정한 뒤 추가.
+  - **Tool은 요청마다** `build_chat_registry(context)`로 만든다.
+    항상 `search_evidence`·`search_guidelines`·`get_caregiver_profile`, `patient_id`를 고른 요청에만 환자 Tool
+    (`get_patient_profile`·`get_recent_care_logs`·`get_patient_medications`·`get_patient_medical_visits`·
+    `get_patient_assessments`·`get_patient_safety_events`)이 붙는다.
+  - 아직 DB 함수가 없는 경로 — `get_recent_care_logs`(돌봄 기록 조회), `get_patient_medical_visits`의 `status=upcoming`
+    (다가오는 예약, 한슬 님 담당) — 는 부르면 **그 Tool만 실패 결과**가 되고 LLM이 나머지로 답한다(200). 챗봇 전체가 503이 되지는 않는다.
+  - **이전 대화 기억**: 답한 대화는 `chat_store.save_chat_turn()`으로 저장(7일 보관 → 하루 요약)하고,
+    다음 질문 때 `app/api/chat_history.py`의 Reader가 같은 사용자·같은 환자 범위(`patient_id` 없음은 없음끼리)의
+    최근 완료 턴 5개와 오늘(KST) 이전 하루 요약을 읽어 `prepare_chat_input`에 넘긴다. 고르기·토큰 예산·원문/요약 겹침은 Agent가 정한다.
+    조회 실패나 2초 초과면 이전 대화 없이 답한다(경고 로그만, 422/503 아님). 저장 실패도 답변은 그대로 준다.
+  - 토큰 계산 모델은 실행기와 같은 `chat_model()`(`OPENAI_AGENT_MODEL` → `OPENAI_SUMMARY_MODEL`).
+    tiktoken 인코딩은 `get_chat_execution()`에서 한 번 미리 읽는다(캐시가 없으면 처음 한 번 내려받기).
   - 요청/응답 예시:
     ```json
     // POST /chat/{user_id}
@@ -125,7 +134,8 @@
                   "journal": "…", "publication_year": 2025, "study_type": "rct", "organization": null,
                   "source_url": null, "full_text_available": false}]}
     ```
-  - 테스트: `backend/`에서 `python -m unittest tests.test_chat` (DB·실제 LLM 없이 가짜 실행기).
+  - 테스트: `backend/`에서 `python -m unittest tests.test_chat` (DB·실제 LLM 없이 가짜 실행기·가짜 LLM),
+    DB 쪽은 `tests.test_chat_store_db`(실 DB, 012·013 적용 확인).
 
 - 요약(`paper_analysis`)이 아직 없는 논문은 요약 쪽 필드가 `null`로 나온다.
 - `evidence_level`은 DB에 저장된 값(`'1'`~`'6'` 또는 `null`)을 그대로 내보내고, 화면 표시용 `'A'`~`'D'`는
