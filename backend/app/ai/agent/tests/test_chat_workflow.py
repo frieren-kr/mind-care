@@ -104,7 +104,7 @@ class ChatWorkflowTests(unittest.TestCase):
 
     def test_search_and_resolved_citation_work_without_patient_scope(self):
         context = CONTEXT.model_copy(update={"patient_id": None})
-        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(refs=[reference()])])
+        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(selected=[True])])
         self.assertIs(deps.workflow().run(context, "최근 연구를 알려줘"), deps.receipt)
         self.assertEqual([d["name"] for d in deps.client.requests[0][1]], ["search_evidence"])
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
@@ -113,7 +113,7 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_same_turn_three_tools_execute_once_before_one_followup_llm_call(self):
         calls = [chat_call(identifier="profile_1"),
                  chat_call(ToolName.RECENT_CARE_LOGS, identifier="logs_1"), search()]
-        deps = FakeChatDependencies([ModelTurn(tool_calls=calls), chat_final(refs=[reference()])])
+        deps = FakeChatDependencies([ModelTurn(tool_calls=calls), chat_final(selected=[True])])
         self.assertIs(deps.workflow().run(CONTEXT, "저장 정보와 연구를 알려줘"), deps.receipt)
         self.assertEqual(deps.events, list(STAGES))
         self.assertEqual([e[0] for e in deps.tool_events], [c.name for c in calls])
@@ -126,7 +126,7 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertTrue(all(value["success"] for _, value in entries))
         self.assertIn("symptoms", entries[0][1]["data"])
         self.assertIn("logs", entries[1][1]["data"])
-        self.assertEqual(entries[2][1]["data"]["evidence"][0]["pmid"], "FAKE-PMID")
+        self.assertEqual(entries[2][1]["data"]["returned_evidence_count"], 1)
         result = deps.saved[0]
         self.assertEqual((result.execution.tool_rounds, result.execution.total_tool_calls), (1, 3))
         self.assertEqual(result.sources[0].source_ref.tool_call_id, "search_1")
@@ -142,7 +142,7 @@ class ChatWorkflowTests(unittest.TestCase):
                     self.turns.append(ModelTurn(tool_calls=[search(query="Dementia sleep changes research")]))
                 elif len(self.requests) == 2:
                     test.assertEqual([m.call_id for m in messages if m.type == "function_call_output"], ["profile_1", "search_1"])
-                    self.turns.append(chat_final(refs=[reference()]))
+                    self.turns.append(chat_final(selected=[True]))
                 return super().generate(request)
         deps = FakeChatDependencies(client=ProfileDrivenFake([ModelTurn(tool_calls=[chat_call()])]))
         self.assertIs(deps.workflow().run(CONTEXT, "상태에 맞는 연구를 알려줘"), deps.receipt)
@@ -152,19 +152,30 @@ class ChatWorkflowTests(unittest.TestCase):
         self.assertEqual((deps.agent_result.execution.tool_rounds, deps.agent_result.execution.total_tool_calls), (2, 2))
 
     def test_initial_context_minimization_and_tool_results_are_never_system_policy(self):
-        deps = FakeChatDependencies([ModelTurn(tool_calls=[chat_call(), search()]), chat_final(refs=[reference()])])
+        deps = FakeChatDependencies([ModelTurn(tool_calls=[chat_call(), search()]), chat_final(selected=[True])])
         question = "  PRIVATE user question \n"
         deps.workflow().run(CONTEXT, question)
         initial = deps.client.requests[0][0]
         self.assertEqual([(m.role, m.kind) for m in initial],
-                         [("system", "policy"), ("system", "policy"), ("user", "user_input")])
-        self.assertEqual(json.loads(initial[-1].content), {"user_message": question, "patient_scope_available": True})
+                         [("system", "policy"), ("system", "policy"), ("user", "user_input"), ("system", "agent_context")])
+        self.assertEqual(json.loads(next(m.content for m in initial if m.kind == "user_input")), {"user_message": question, "patient_scope_available": True})
         self.assertFalse(any(m.kind == "tool_result" for m in initial))
         for messages, _ in deps.client.requests:
             text = json.dumps([m.model_dump(mode="json") for m in messages], ensure_ascii=False)
             for identifier in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id)):
                 self.assertNotIn(identifier, text)
-            self.assertFalse(any(m.kind == "agent_context" for m in messages))
+            progress = [json.loads(m.content) for m in messages if m.kind == "agent_context"]
+            self.assertEqual(len(progress), 1)
+            self.assertEqual(set(progress[0]), {"context_type", "candidate_limit", "papers", "guidelines"})
+            self.assertEqual(progress[0]["context_type"], "chat_search_budget")
+            self.assertEqual(progress[0]["candidate_limit"], 11)
+            self.assertEqual(set(progress[0]["papers"]),
+                             {"active_count", "target_top_k", "remaining_candidate_budget", "candidate_limit", "search_available"})
+            self.assertEqual(set(progress[0]["guidelines"]),
+                             {"active_count", "remaining_candidate_budget", "candidate_limit", "search_available"})
+            self.assertEqual(progress[0]["papers"]["candidate_limit"], 7)
+            self.assertEqual(progress[0]["guidelines"]["candidate_limit"], 4)
+            self.assertFalse(progress[0]["guidelines"]["search_available"])
             self.assertTrue(all(m.type == "function_call_output" for m in messages if m.kind == "tool_result"))
             system = "\n".join(m.content for m in messages if m.role == "system")
             self.assertNotIn("합성 테스트 환자", system)
@@ -325,9 +336,9 @@ class ChatWorkflowTests(unittest.TestCase):
     def test_invalid_structured_output_or_evidence_reference_never_reaches_handoff(self):
         cases = ([ModelTurn(text="PRIVATE not JSON")],
                  [ModelTurn(text='{"schema_version":"2","response_type":"feed","items":[]}')],
-                 [chat_final(answer=" ")], [chat_final(refs=[reference("missing")])],
-                 [ModelTurn(tool_calls=[search()]), chat_final(refs=[reference(index=1)])],
-                 [ModelTurn(tool_calls=[chat_call()]), chat_final(refs=[reference("profile_1")])],
+                 [chat_final(answer=" ")], [chat_final(selected=[True])],
+                 [ModelTurn(tool_calls=[search()]), chat_final(selected=[False, True])],
+                 [ModelTurn(tool_calls=[chat_call()]), chat_final(selected=[True])],
                  [RuntimeError("PRIVATE provider credential")])
         for turns in cases:
             deps = FakeChatDependencies(turns)
@@ -338,7 +349,7 @@ class ChatWorkflowTests(unittest.TestCase):
             self.assertEqual(deps.events, list(STAGES[:2]))
 
     def test_failed_search_cannot_be_cited(self):
-        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(refs=[reference()])],
+        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(selected=[True])],
             handlers={ToolName.SEARCH_EVIDENCE: Mock(side_effect=RuntimeError("PRIVATE"))})
         result = self.assert_stopped(deps)
         self.assertEqual(result.execution.status, "invalid_response")
@@ -355,7 +366,7 @@ class ChatWorkflowTests(unittest.TestCase):
             lambda r: setattr(r.sources[0], "full_text_available", "bad bool"),
         )
         for mutate in mutations:
-            deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(refs=[reference()])])
+            deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(selected=[True])])
             workflow = deps.workflow()
             def altered(context, prepared):
                 result = deps.run_chat(context, prepared)
@@ -391,7 +402,7 @@ class ChatWorkflowTests(unittest.TestCase):
             self.assertEqual(deps.saved, [])
 
     def test_handoff_nested_mutation_cannot_change_original_runner_result(self):
-        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(refs=[reference()])])
+        deps = FakeChatDependencies([ModelTurn(tool_calls=[search()]), chat_final(selected=[True])])
         workflow = deps.workflow()
         def handoff(context, result):
             before = deps.agent_result.model_dump()

@@ -20,6 +20,7 @@ redis==5.1.1
 
 # ---- AI: LLM API + Embedding + RAG ----
 openai==1.109.1
+tiktoken==0.14.0
 google-generativeai==0.8.3
 sentence-transformers>=3.0,<4   # bge-m3 임베딩 (app/ai/retrieval/embedding.py). torch는 자동 설치
 

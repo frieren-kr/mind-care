@@ -1,14 +1,71 @@
 """Request-local Chat assembly over the unchanged shared AgentLoopRunner."""
+import re
+import json
 from typing import Callable
 
 from .._execution import positive_seconds
 from ..agent_loop_runner import AgentLoopRunner
 from ..clients.base import LLMClient
 from ..outputs import ChatAnswerV1, StructuredAgentResult
-from ..registry import ToolName, ToolRegistry
+from ..registry import ToolRegistry
 from ..schemas import AgentContext
 from .chat_context_prepare import _validated_context
 from .chat_prompts import ChatPromptBuilder
+
+
+# Sentence-attached numeric suffixes are candidates, not sufficient evidence.
+# Standalone/list/array/index notation and whitespace-separated markers stay.
+_CITATION_SUFFIX = re.compile(r"(?<=[.!?。！？])(?:\[[1-9][0-9]*\])+(?=$|\s|[.!?。！？])")
+_PROTECTED_TEXT = re.compile(
+    r'```[\s\S]*?(?:```|$)|`[^`]*(?:`|$)|"(?:\\.|[^"\\])*(?:"|$)|'
+    r"'(?:\\.|[^'\\])*(?:'|$)|"
+    r'“[^”]*(?:”|$)|‘[^’]*(?:’|$)|\$\$[\s\S]*?(?:\$\$|$)|\$[^$\n]*(?:\$|$)|'
+    r'\\\([\s\S]*?(?:\\\)|$)|\\\[[\s\S]*?(?:\\\]|$)')
+# Keep separate context scans so protection does not depend on regex ordering.
+_URL_TEXT = re.compile(r'https?://[^\s<>`"\']+', re.IGNORECASE)
+_BLOCKQUOTE_TEXT = re.compile(r'^[ \t]*>[^\n]*(?:\n(?![ \t]*\r?$)[^\n]+)*', re.MULTILINE)
+_IDENTIFIER_TEXT = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_./:+#@%~-]*\.(?:\[[1-9][0-9]*\])+')
+
+
+def _finalize_chat_answer(result: StructuredAgentResult, prepared_input: str) -> StructuredAgentResult:
+    """Presentation only, after Runner JSON/citation validation; never repair sources.
+
+    Keep ambiguous text and user-mentioned literals. Numeric suffixes have no
+    authority: only the validated citation_refs/sources identify actual evidence.
+    """
+    if (result.execution.status != 'completed' or not isinstance(result.output, ChatAnswerV1)
+            or not result.output.citation_refs):
+        return result
+    answer = result.output.answer
+    current_question = prepared_input
+    try:
+        payload = json.loads(prepared_input)
+    except (ValueError, TypeError):
+        pass
+    else:
+        # Recognize the prepared envelope by its question and server scope flag.
+        # Other JSON is a direct question; envelope history never protects markers.
+        if (isinstance(payload, dict) and isinstance(payload.get('user_message'), str)
+                and type(payload.get('patient_scope_available')) is bool):
+            current_question = payload['user_message']
+    protected = [match.span() for pattern in (
+        _PROTECTED_TEXT, _URL_TEXT, _BLOCKQUOTE_TEXT, _IDENTIFIER_TEXT)
+        for match in pattern.finditer(answer)]
+    valid_numbers = {str(number) for number in range(1, len(result.output.citation_refs) + 1)}
+    def remove(match):
+        markers = re.findall(r'\[([1-9][0-9]*)\]', match.group())
+        if (any(start < match.end() and match.start() < end for start, end in protected)
+                or any(f'[{number}]' in current_question for number in markers)
+                or any(number not in valid_numbers for number in markers)):
+            return match.group()
+        return ''
+    cleaned = _CITATION_SUFFIX.sub(remove, answer)
+    if cleaned == answer or not cleaned.strip():
+        return result
+    payload = result.model_dump(warnings=False)
+    payload['output']['answer'] = cleaned
+    payload['execution']['final_answer'] = cleaned
+    return StructuredAgentResult.model_validate(payload)
 
 
 class ChatExecutionError(RuntimeError):
@@ -49,14 +106,14 @@ class ChatExecutionV1:
             # reused factory registry cannot share its mutable mapping with a run.
             specs = tuple(supplied.get(name) for name in supplied.names())
             registry = ToolRegistry(specs, mode=supplied.mode)
-            if context.patient_id is None and any(registry.get(name.value) is not None for name in (
-                    ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS)):
+            if context.patient_id is None and any(spec.contract.patient_scoped for spec in specs):
                 raise ValueError("Patient Tools require a selected patient")
             runner = AgentLoopRunner(self.client, registry, prompt_builder=ChatPromptBuilder(),
                 max_tool_rounds=5, max_total_tool_calls=10,
                 allow_parallel_tools=True, max_parallel_calls=3,
                 tool_timeout_seconds=self.tool_timeout_seconds,
                 request_timeout_seconds=self.request_timeout_seconds)
-            return runner.run_structured(prepared_input, context, output_model=ChatAnswerV1)
+            result = runner.run_structured(prepared_input, context, output_model=ChatAnswerV1)
+            return _finalize_chat_answer(result, prepared_input)
         except Exception:
             raise ChatExecutionError() from None

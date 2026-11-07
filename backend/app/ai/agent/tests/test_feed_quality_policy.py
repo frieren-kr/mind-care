@@ -14,6 +14,7 @@ from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import AgentResult, ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceItem, EvidencePackage
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from ..workflows.feed_execution import FeedExecutionV1
 from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_workflows import CONTEXT
@@ -64,7 +65,8 @@ class FeedQualityPolicyTests(unittest.TestCase):
                      'caregiver/family를 불필요하게 섞지 않는다','별도 독립 주제','미충족 환자 증상',
                      '모든 증상마다 논문 1편을 강제하지 않는다','사용자마다 실제로 다른 신호','caregiver_all'):
             self.assertIn(rule,initial)
-        self.assertIn('실제 연구한 증상·결과의 대상이 누구인지',final)
+        self.assertIn('연구 대상·목적·실제 결과와 Context의 연결',final)
+        self.assertIn('환자에 관한 연구와 보호자에 관한 연구를 혼동하지 않는다', SEARCH_EVIDENCE_DATA_POLICY)
         self.assertIn('표현만 감춰 관련성 부족을 숨기지 않는다',final)
         for phrase in ('기록되지는 않았지만','직접 일치하는 내용은 제한적','구체적인 관련성은 없지만'):
             self.assertIn(phrase,final)
@@ -80,7 +82,8 @@ class FeedQualityPolicyTests(unittest.TestCase):
         self.assertEqual(result.output.items[0].source_ref.evidence_index,1)
         self.assertEqual(result.output.items[0].personal_reason,reason)
         final_policy=next(m.content for m in client.requests[1][0] if m.role=='system' and 'FeedDecisionDraft' in (m.content or ''))
-        self.assertIn('환자 수면/배회/넘어짐을 보호자의 수면/경험 연구로 치환하지 않는다',final_policy)
+        self.assertIn('MCI 환자의 낮잠 증가만으로 보호자의 불면증 치료 연구를 환자 수면 근거로 추천하지 않는다',final_policy)
+        self.assertEqual(sum(m.content == SEARCH_EVIDENCE_DATA_POLICY for m in client.requests[1][0]), 1)
 
     def test_scripted_wandering_and_falls_have_priority_and_original_round_robin_sources(self):
         queries=['wandering behavior management in dementia','fall prevention in people with dementia']
@@ -128,10 +131,13 @@ class FeedQualityPolicyTests(unittest.TestCase):
         self.assertEqual(projection['candidate_count'],2)
         self.assertNotIn('Protocol for a sleep intervention trial',str(projection['candidates']))
         self.assertNotIn('evidence_level',EvidenceItem.model_fields)
-        self.assertTrue(all(set(row)=={'candidate_index','status','title','study_type','derived_evidence_grade','evidence_excerpt'} for row in projection['candidates']))
+        self.assertTrue(all(set(row)=={'status','title','study_type','derived_evidence_grade','evidence_excerpt'} for row in projection['candidates']))
         policy=build_feed_decision_policy().content
-        for term in ('other는 분류 미확인','프로토콜을 완료된 효과 검증 연구보다 우선하지 않는다','실제 DB evidence_level/화면 표시 등급이 아니며'):
+        for term in ('미분류 후보를 유형만으로 자동 제외하지 않는다','프로토콜을 완료된 효과 검증 연구보다 우선하지 않는다','실제 DB evidence_level/화면 표시 등급이 아니며'):
             self.assertIn(term,policy)
+        for term in ('other 또는 null', '연구 가치가 없거나 효과가 없다는 의미가 아니다',
+                     'Protocol은 연구 계획이며 완료된 효과 검증 결과가 아니다'):
+            self.assertIn(term, SEARCH_EVIDENCE_DATA_POLICY)
 
     def test_counts_distinguish_raw_merged_and_selected_without_filling_to_five(self):
         result,_,projection=self.scripted([

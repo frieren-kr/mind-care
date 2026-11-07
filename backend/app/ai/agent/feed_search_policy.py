@@ -20,7 +20,7 @@ MAX_FEED_RETRIEVAL = MAX_FEED_SEARCHES * FEED_SEARCH_TOP_K
 
 class FeedSearchInput(AgentModel):
     review: FeedReview | None = Field(default=None, description=(
-        "후속 검색에는 최신 candidate_revision과 유지할 후보의 index/이유/category를 전달한다. "
+        "후속 검색에는 현재 후보 전체 순서에 대응하는 decisions 배열을 전달한다. include=true인 유지 후보에는 이유/category를 작성한다. "
         "유지하지 않는 현재 후보는 검토 완료로 처리한다. 첫 검색에는 생략한다."))
     queries: list[Annotated[StrictStr, Field(min_length=1, max_length=2000)]] = Field(
         min_length=1, max_length=3, description=(
@@ -76,6 +76,12 @@ class FeedSearchPlan:
     @property
     def searches(self) -> list[ToolCall]:
         return [search for _, searches in self.batches for search in searches]
+
+    def provider_call_id(self, search_id: str) -> str:
+        for call, searches in self.batches:
+            if any(search.id == search_id for search in searches):
+                return call.id
+        raise ValueError("Search is not in the admitted batch")
 
     def provider_outcomes(self, packages: dict) -> list[ToolOutcome]:
         return [ToolOutcome(call_id=call.id, tool_name=call.name, success=True, data={

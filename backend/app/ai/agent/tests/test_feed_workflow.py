@@ -79,7 +79,7 @@ class FeedWorkflowTests(unittest.TestCase):
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidate_count"], 1)
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep orchestration fixture")
-                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research", revision=1, retain=(0,))]))
+                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver support research", candidate_count=1, retain=(0,))]))
                 elif len(self.requests) == 2:
                     test.assertEqual([m.call_id for m in messages if m.type == "function_call_output"],
                                      ["search_1", "search_2"])
@@ -143,7 +143,7 @@ class FeedWorkflowTests(unittest.TestCase):
                 for _ in range(batch):
                     identifier += 1
                     calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}",
-                                             revision=revision, retain=(0,)))
+                                             candidate_count=1 if revision else None, retain=(0,)))
                 turns.append(ModelTurn(tool_calls=calls))
             deps = FakeFeedDependencies(CONTEXT, turns=turns + [final_turn()])
             self.assertIs(deps.workflow().run(CONTEXT), deps.receipt)
@@ -337,7 +337,9 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
-        self.assertIn("일반적인 정보적 관련성", policy)
+        self.assertNotIn('personal_reason', policy)
+        post = '\n'.join(m.content for m in deps.client.requests[1][0] if m.role == 'system')
+        self.assertIn("일반적인 정보적 관련성", post)
         self.assertNotIn("근거/개인화 정보가 부족하면 items=[]", policy)
 
     def test_cold_start_empty_evidence_and_invalid_or_failed_citations(self):
@@ -392,7 +394,9 @@ class FeedArchitectureTests(unittest.TestCase):
         self.assertEqual(signature.parameters["max_total_tool_calls"].default, 10)
         self.assertEqual(production_registry().definitions(), [])
         self.assertEqual({name.value for name in ToolName},
-                         {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
+                         {"get_patient_profile", "get_recent_care_logs", "search_evidence", "get_patient_medications",
+                          "get_patient_medical_visits", "get_patient_assessments", "get_patient_safety_events",
+                          "get_caregiver_profile", "search_guidelines"})
         self.assertNotIn("workflow_type", inspect.getsource(agent_loop_runner))
 
     def test_test_query_hook_precedes_each_search_and_rejection_skips_handler(self):

@@ -25,7 +25,7 @@ class FeedGradePriorityTests(unittest.TestCase):
         source = evidence(rows)
         table = FeedCandidates()
         table.add('original', source)
-        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), {'original': source})
+        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), table.snapshot)
         self.assertEqual([r.source_ref for r in refs], [i.source_ref for i in output.items])
         return [r.pmid for r in refs], table, source
 
@@ -72,7 +72,7 @@ class FeedGradePriorityTests(unittest.TestCase):
         self.assertEqual(len(client.requests), 2)
         payload = json.loads(client.requests[1][0][-1].content)
         self.assertEqual([r['derived_evidence_grade'] for r in payload['candidates']], ['A', 'B', None])
-        self.assertTrue(all(set(row) == {'candidate_index', 'status', 'title', 'study_type', 'derived_evidence_grade', 'evidence_excerpt'}
+        self.assertTrue(all(set(row) == {'status', 'title', 'study_type', 'derived_evidence_grade', 'evidence_excerpt'}
                             for row in payload['candidates']))
         self.assertEqual([s.pmid for s in result.sources], ['review', 'trial', 'unknown'])
         self.assertTrue(all('derived_evidence_grade' not in i.model_dump() for i in result.output.items))
@@ -86,7 +86,7 @@ class FeedGradePriorityTests(unittest.TestCase):
         for _ in range(3):
             table = FeedCandidates()
             for key, source in sources.items(): table.add(key, source)
-            output, refs = table.finalize(json.dumps(decisions(4, range(4))), sources)
+            output, refs = table.finalize(json.dumps(decisions(4, range(4))), table.snapshot)
             self.assertEqual([r.pmid for r in refs], ['a', 'X', 'c', 'b'])
             self.assertEqual([(r.source_ref.tool_call_id, r.source_ref.evidence_index) for r in refs],
                              [('A', 1), ('B', 0), ('C', 0), ('B', 1)])
@@ -95,5 +95,5 @@ class FeedGradePriorityTests(unittest.TestCase):
         self.assertEqual(len(set(outputs)), 1)
         self.assertEqual({k: v.model_dump_json() for k, v in sources.items()}, originals)
         sources['B'].evidence[0].study_type = 'other'
-        with self.assertRaises(FeedDecisionError):
-            table.finalize(json.dumps(decisions(4, range(4))), sources)
+        _, refs = table.finalize(json.dumps(decisions(4, range(4))), table.snapshot)
+        self.assertEqual(refs[1].study_type, 'meta_analysis')

@@ -12,6 +12,7 @@ from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceSearchInput
 from ..workflows.feed_execution import FeedExecutionV1
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_feed_candidates import decisions, package, review_turn
 from . import test_parallel_feed as parallel
 from .test_parallel_feed import calls, registry
@@ -25,7 +26,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         table = FeedCandidates()
         for call_id, source in packages.items():
             table.add(call_id, source)
-        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), packages)
+        output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), table.snapshot)
         return table, output, refs
 
     def test_one_two_three_queries_retrieve_eight_sixteen_twenty_four_in_parallel(self):
@@ -88,7 +89,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         for i in range(3):
             call = calls(1)[0].model_copy(update={'id': str(i), 'arguments': {'query': f'topic {i}'}})
             turn = ModelTurn(tool_calls=[call])
-            turns.append(review_turn(turn, i) if i else turn)
+            turns.append(review_turn(turn, 8) if i else turn)
         turns.append(ModelTurn(text=json.dumps(decisions(8, range(5)))))
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, registry(
@@ -102,13 +103,13 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
         # A generic Runner cannot exceed the Feed-specific three-round cap.
         turns = [ModelTurn(tool_calls=[ToolCall(id=str(i), name='search_evidence',
             arguments={'query': f'topic {i}'})]) for i in range(4)]
-        turns = [review_turn(turn, i) if i else turn for i, turn in enumerate(turns)]
+        turns = [review_turn(turn, 8) if i else turn for i, turn in enumerate(turns)]
         searched = []
         def handler(context, args):
             searched.append(args.top_k)
             return package([f'{args.query}-{i}' for i in range(args.top_k)])
         client = FakeLLMClient(turns)
-        result = AgentLoopRunner(client, registry(handler)).run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
+        result = AgentLoopRunner(client, registry(handler), prompt_builder=FeedPromptBuilder()).run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
         self.assertEqual(result.execution.status, 'limit_reached')
         self.assertEqual(result.execution.errors[-1].code, 'tool_limit')
         self.assertEqual(searched, [8, 8, 8])

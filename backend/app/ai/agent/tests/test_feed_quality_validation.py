@@ -103,7 +103,7 @@ class FeedQualityValidationTests(unittest.TestCase):
         for name, packages in cohort().items():
             table = FeedCandidates()
             for call_id, source in packages.items(): table.add(call_id, source)
-            output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), packages)
+            output, refs = table.finalize(json.dumps(decisions(table.count, range(min(table.count, 5)))), table.snapshot)
             actual = [r.pmid for r in refs]
             baseline = [packages[c].evidence[i].pmid for c, i in relevance_baseline(packages)]
             changes[name] = (actual, baseline)

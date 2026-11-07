@@ -98,7 +98,7 @@ class ResponsesTests(unittest.TestCase):
         for index,body in enumerate(wire):
             projections=[i for i in body['input'] if isinstance(i.get('content'), str) and i['content'].startswith('{') and json.loads(i['content']).get('context_type') == 'untrusted_feed_candidates']
             self.assertEqual(len(projections),int(index>0))
-            if projections:self.assertEqual(json.loads(projections[0]['content'])['candidate_revision'],index)
+            if projections:self.assertNotIn('candidate_revision',json.loads(projections[0]['content']))
             self.assertEqual(sum(i.get('type')=='reasoning' for i in body['input']),index)
             self.assertNotIn('feed-rag:',json.dumps(body['input']))
         self.assertEqual([s.pmid for s in result.sources],['query-1','query-2'])
@@ -203,12 +203,12 @@ class ResponsesTests(unittest.TestCase):
             self.assertNotIn('parallel_tool_calls',body)
             if len(issued)<6:
                 count=1 if body.get('parallel_tool_calls') is False else 3
-                batch=[function(f'call-{i}',json.dumps({'query':f'query-{i}'}))
+                batch=[function(f'call-{i}',json.dumps({'query':f'query-{i}','top_k':i+1}))
                        for i in range(len(issued),min(len(issued)+count,6))]
                 issued.extend(c['call_id'] for c in batch)
                 return httpx.Response(200,json=response(batch))
             return httpx.Response(200,json=response_fixture({'text':json.dumps({
-                'schema_version':'1','response_type':'chat','answer':'Synthetic','citation_refs':[]})}))
+                'answer':'Synthetic','selected':[False]*6})}))
         def handler(context,args):
             executed.append(args.query)
             return package([args.query])
@@ -226,14 +226,14 @@ class ResponsesTests(unittest.TestCase):
             self.assertEqual([i['call_id'] for i in outputs],issued[:index*3])
             self.assertTrue(all(json.loads(i['output'])['success'] for i in outputs))
 
-    def test_chat_sdk_keeps_five_round_and_ten_call_limits(self):
-        for batch_size,expected_calls in ((1,5),(11,0)):
+    def test_chat_sdk_keeps_five_round_and_ten_executed_call_limits(self):
+        for batch_size,expected_calls in ((1,5),(11,10)):
             with self.subTest(batch_size=batch_size):
                 wire=[];executed=[]
                 def transport(req):
                     wire.append(json.loads(req.content))
                     return httpx.Response(200,json=response([
-                        function(f'call-{len(wire)}-{i}') for i in range(batch_size)]))
+                        function(f'call-{len(wire)}-{i}', json.dumps({'query':'dementia','top_k':i+1 if batch_size>1 and len(wire)==1 else 10})) for i in range(batch_size)]))
                 execution=ChatExecutionV1(self.client(transport),lambda c:registry(
                     lambda c,a:executed.append(a.query) or package(['A'])))
                 result=execution(CONTEXT,'{"user_message":"Synthetic","patient_scope_available":true}')

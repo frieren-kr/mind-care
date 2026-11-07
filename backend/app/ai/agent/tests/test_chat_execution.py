@@ -112,7 +112,7 @@ class ChatExecutionTests(unittest.TestCase):
                 self.execute(deps, context)
                 runners.append(run.call_args.args[0])
         names = lambda index: [d["name"] for d in deps.client.requests[index][1]]
-        self.assertEqual(names(0), [n.value for n in ToolName])
+        self.assertEqual(names(0), [ToolName.PATIENT_PROFILE.value, ToolName.RECENT_CARE_LOGS.value, ToolName.SEARCH_EVIDENCE.value])
         self.assertEqual(names(1), [ToolName.SEARCH_EVIDENCE.value])
         self.assertEqual(names(2), names(0))
         self.assertEqual(deps.factory_contexts, list(contexts))
@@ -142,7 +142,15 @@ class ChatExecutionTests(unittest.TestCase):
             client = FakeLLMClient([chat_final()])
             result = ChatExecutionV1(client, lambda context: registry)(CONTEXT, prepare_chat_input(CONTEXT, "안녕"))
             self.assertEqual(result.execution.status, "completed")
-            self.assertEqual(client.requests[0][1], registry.definitions())
+            received = json.loads(json.dumps(client.requests[0][1]))
+            expected = registry.definitions()
+            for definition, canonical in zip(received, expected, strict=True):
+                if definition['name'] == 'search_evidence':
+                    properties = definition['parameters']['properties']
+                    self.assertEqual(set(properties), {'query','top_k','exclude_candidates','candidate_version'})
+                    properties.pop('exclude_candidates'); properties.pop('candidate_version')
+                    properties['top_k'] = canonical['parameters']['properties']['top_k']
+            self.assertEqual(received, expected)
 
     def test_factory_registry_mutation_during_handler_cannot_change_active_runner(self):
         supplied = None

@@ -12,7 +12,7 @@ from ..clients.openai_client import OpenAIClient
 from ..agent_loop_runner import AgentLoopRunner
 from ..composition import build_evidence_registry
 from ..outputs import FeedAnswerV2
-from ..registry import ToolName, production_registry
+from ..registry import TOOL_CONTRACTS, ToolName, production_registry
 from ..testing.fake_tools import fake_registry
 from ..tools.contracts import EvidenceItem, EvidencePackage
 from ..workflows.feed import FeedWorkflow, FeedWorkflowError
@@ -130,11 +130,18 @@ class OpenAIClientTests(unittest.TestCase):
             self.assertEqual(payload["model"], "configured-test-model")
             self.assertNotIn("extra_body", payload)  # SDK flattens it into the HTTP JSON body.
         followup = requests[1]["input"]
-        self.assertEqual(followup[-2]["arguments"], "{}")
-        self.assertEqual(followup[-2]["call_id"], "call_1")
-        self.assertEqual(followup[-1]["type"], "function_call_output")
-        self.assertEqual(followup[-1]["call_id"], "call_1")
-        self.assertTrue(json.loads(followup[-1]["output"])["success"])
+        calls = [m for m in followup if m.get("type") == "function_call"]
+        outputs = [m for m in followup if m.get("type") == "function_call_output"]
+        self.assertEqual([m["call_id"] for m in calls], ["call_1"])
+        self.assertEqual([m["call_id"] for m in outputs], ["call_1"])
+        self.assertEqual(calls[0]["arguments"], "{}")
+        self.assertTrue(json.loads(outputs[0]["output"])["success"])
+        policy = TOOL_CONTRACTS[ToolName.PATIENT_PROFILE].data_policy
+        policies = [m for m in followup if m.get("role") == "system" and m.get("content") == policy]
+        self.assertEqual(len(policies), 1)
+        self.assertTrue(all(m.get("content") != policy for m in requests[0]["input"]))
+        self.assertLess(followup.index(calls[0]), followup.index(outputs[0]))
+        self.assertLess(followup.index(outputs[0]), followup.index(policies[0]))
         self.assertTrue(all("kind" not in m for m in followup))
 
     def test_empty_registry_omits_tools(self):

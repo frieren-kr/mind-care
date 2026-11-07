@@ -8,6 +8,7 @@ from openai import OpenAI
 from ..clients.base import GenerationRequest
 from ..clients.openai_client import OpenAIClient
 from ..schemas import Message, ModelTurn
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from ..workflows.feed_execution import FeedExecutionV1
 from . import test_feed_candidates as candidates
 from .test_feed_candidates import decisions, package, review_turn
@@ -38,7 +39,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
     def test_empty_missing_pmid_and_duplicate_results_have_actual_progress(self):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
-                turns = [review_turn(self.search(str(i), str(i)), i, (0,) if pmids == ["A"] else ()) if i else self.search(str(i), str(i)) for i in range(calls)]
+                turns = [review_turn(self.search(str(i), str(i)), 1 if pmids == ["A"] else 0, (0,) if pmids == ["A"] else ()) if i else self.search(str(i), str(i)) for i in range(calls)]
                 turns += [ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0)))]
                 result, client, _ = self.run_feed(turns, {str(i): package(pmids) for i in range(calls)},
                     max_tool_rounds=3, max_total_tool_calls=9)
@@ -64,7 +65,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
             payload = json.loads(request.content)
             requests.append(payload)
             if len(requests) <= 3:
-                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + f'opaque_{len(requests)}', 'call_id': f'opaque_{len(requests)}', 'name': 'search_evidence', 'arguments': json.dumps({'query': f'research {len(requests)}', **({'review': {'candidate_revision': len(requests) - 1, 'retain': [{'candidate_index': 0, 'personal_reason': 'Retained', 'category': 'care'}]}} if len(requests) > 1 else {})}), 'status': 'completed'}]}
+                message = {'text': None, 'calls': [{'type': 'function_call', 'id': 'item_' + f'opaque_{len(requests)}', 'call_id': f'opaque_{len(requests)}', 'name': 'search_evidence', 'arguments': json.dumps({'query': f'research {len(requests)}', **({'review': {'decisions':[{'include':True, 'personal_reason':'Retained', 'category':'care'}]}} if len(requests) > 1 else {})}), 'status': 'completed'}]}
                 return httpx.Response(200, json=response_fixture(message))
             return httpx.Response(200, json=response_fixture({'text': json.dumps(decisions(1, (0,)))}))
         sdk = OpenAI(api_key="offline-placeholder", http_client=httpx.Client(transport=httpx.MockTransport(transport)))
@@ -123,7 +124,7 @@ class FeedSearchPolicyTests(unittest.TestCase):
         for pmids in ([], [None], ["A"]):
             for calls in (1, 2, 3):
                 with self.subTest(pmids=pmids, calls=calls):
-                    turns = [review_turn(self.search(f"opaque_{i}", f"research {i}"), i, (0,) if pmids == ["A"] else ()) if i else self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
+                    turns = [review_turn(self.search(f"opaque_{i}", f"research {i}"), 1 if pmids == ["A"] else 0, (0,) if pmids == ["A"] else ()) if i else self.search(f"opaque_{i}", f"research {i}") for i in range(calls)]
                     turns.append(ModelTurn(text=json.dumps(decisions(1 if pmids == ["A"] else 0, (0,)))))
                     client = FakeLLMClient(turns)
                     registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE],
@@ -153,7 +154,13 @@ class FeedSearchPolicyTests(unittest.TestCase):
                         self.assertEqual(state["candidate_count"], int(pmids == ["A"]))
                         self.assertEqual([m.provider_output["call_id"] for m in messages if m.type == "provider_output" and m.provider_output["type"] == "function_call"],
                                          [m.call_id for m in messages if m.type == "function_call_output"])
-                        self.assertEqual(messages[-2].type, "function_call_output")
+                        results = [m for m in messages if m.type == "function_call_output"]
+                        data_policies = [m for m in messages if m.content == SEARCH_EVIDENCE_DATA_POLICY]
+                        self.assertEqual(len(data_policies), 1)
+                        self.assertEqual(data_policies[0].role, "system")
+                        self.assertGreater(messages.index(data_policies[0]), messages.index(results[0]))
+                        self.assertLess(messages.index(data_policies[0]), messages.index(projections[0]))
+                        self.assertTrue(all(messages.index(m) < messages.index(projections[0]) for m in results))
                         self.assertEqual(messages[-1], projections[0])
                     if pmids == ["A"]:
                         self.assertEqual(result.sources[0].source_ref.tool_call_id, "opaque_0")

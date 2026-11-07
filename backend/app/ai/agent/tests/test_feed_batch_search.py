@@ -122,7 +122,7 @@ class FeedBatchSearchTests(unittest.TestCase):
             reached.append(args.query)
             return package([args.query])
         result, client = self.run_turns([ModelTurn(tool_calls=[batch(['a','b'], 'first')]),
-            review_turn(ModelTurn(tool_calls=[batch(['c'], 'second')]), 1, (0, 1)),
+            review_turn(ModelTurn(tool_calls=[batch(['c'], 'second')]), 2, (0, 1)),
             ModelTurn(text=json.dumps(decisions(3, range(3))))], handler)
         self.assertEqual(result.execution.status, 'completed')
         self.assertCountEqual(reached, ['a','b','c'])

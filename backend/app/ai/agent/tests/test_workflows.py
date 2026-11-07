@@ -303,9 +303,23 @@ class BoundaryTests(unittest.TestCase):
         AgentLoopRunner(client, fake_registry()).run(original, CONTEXT)
         messages = client.requests[-1][0]
         self.assertEqual([m.content for m in messages if m.kind == "user_input"], [original])
-        self.assertEqual([m.role or m.type for m in messages], ["system", "system", "user", "provider_output", "function_call_output"])
-        self.assertEqual(json.loads(messages[1].content)["trusted_agent_context"]["patient_id"], str(CONTEXT.patient_id))
-        self.assertNotIn("patient_id", json.loads(messages[-1].content)["data"])
+        policy = TOOL_CONTRACTS[ToolName.PATIENT_PROFILE].data_policy
+        policies = [m for m in messages if m.role == "system" and m.kind == "policy" and m.content == policy]
+        self.assertEqual(len(policies), 1)
+        self.assertTrue(all(m.content != policy for m in client.requests[0][0]))
+        self.assertEqual([m.role or m.type for m in messages if m not in policies],
+                         ["system", "system", "user", "provider_output", "function_call_output"])
+        contexts = [m for m in messages if m.kind == "agent_context"]
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(json.loads(contexts[0].content)["trusted_agent_context"]["patient_id"], str(CONTEXT.patient_id))
+        calls = [m for m in messages if m.type == "provider_output" and m.provider_output.get("type") == "function_call"]
+        outputs = [m for m in messages if m.type == "function_call_output"]
+        self.assertEqual([m.provider_output["call_id"] for m in calls], ["call_1"])
+        self.assertEqual([m.call_id for m in outputs], ["call_1"])
+        self.assertLess(messages.index(calls[0]), messages.index(outputs[0]))
+        self.assertLess(messages.index(outputs[0]), messages.index(policies[0]))
+        self.assertTrue(json.loads(outputs[0].content)["success"])
+        self.assertNotIn("patient_id", json.loads(outputs[0].content)["data"])
 
     def test_custom_prompt_builder_used_without_loop_runner_changes(self):
         class Replacement(DefaultPromptBuilder):
@@ -351,10 +365,21 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(seen, [CONTEXT])
         messages = client.requests[-1][0]
-        self.assertEqual(messages[-1].type, "function_call_output")
+        calls = [m for m in messages if m.type == "provider_output" and m.provider_output.get("type") == "function_call"]
+        outputs = [m for m in messages if m.type == "function_call_output"]
+        self.assertEqual([m.provider_output["call_id"] for m in calls], ["call_1"])
+        self.assertEqual([m.call_id for m in outputs], ["call_1"])
+        policy = TOOL_CONTRACTS[ToolName.RECENT_CARE_LOGS].data_policy
+        policies = [m for m in messages if m.role == "system" and m.kind == "policy" and m.content == policy]
+        self.assertEqual(len(policies), 1)
+        self.assertTrue(all(m.content != policy for m in client.requests[0][0]))
+        self.assertLess(messages.index(calls[0]), messages.index(outputs[0]))
+        self.assertLess(messages.index(outputs[0]), messages.index(policies[0]))
         self.assertTrue(all(narrative not in (m.content or "") and mood not in (m.content or "")
                             for m in messages if m.role == "system"))
-        log = envelopes(client)[0]["data"]["logs"][0]
+        envelope = json.loads(outputs[0].content)
+        self.assertTrue(envelope["success"])
+        log = envelope["data"]["logs"][0]
         self.assertEqual(log["content"], narrative)
         self.assertEqual(log["mood_tag"], mood)
         trusted = json.loads(messages[1].content)["trusted_agent_context"]
@@ -386,8 +411,12 @@ class BoundaryTests(unittest.TestCase):
         inputs = {ToolName.PATIENT_PROFILE: {}, ToolName.RECENT_CARE_LOGS: {},
                   ToolName.SEARCH_EVIDENCE: {"query": "dementia sleep"}}
         self.assertEqual({name.value for name in ToolName},
-                         {"get_patient_profile", "get_recent_care_logs", "search_evidence"})
-        self.assertEqual(set(TOOL_CONTRACTS), set(inputs))
+                         {"get_patient_profile", "get_recent_care_logs", "search_evidence", "get_patient_medications",
+                          "get_patient_medical_visits", "get_patient_assessments", "get_patient_safety_events",
+                          "get_caregiver_profile", "search_guidelines"})
+        self.assertEqual(set(TOOL_CONTRACTS), set(inputs) | {
+            ToolName.PATIENT_MEDICATIONS, ToolName.PATIENT_MEDICAL_VISITS, ToolName.PATIENT_ASSESSMENTS,
+            ToolName.PATIENT_SAFETY_EVENTS, ToolName.CAREGIVER_PROFILE, ToolName.SEARCH_GUIDELINES})
         self.assertEqual({item["name"] for item in fake_registry().definitions()},
                          {name.value for name in inputs})
         executor = ToolExecutor(fake_registry())

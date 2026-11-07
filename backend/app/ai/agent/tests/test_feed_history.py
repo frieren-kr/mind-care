@@ -296,7 +296,7 @@ class FeedHistoryCandidateTests(unittest.TestCase):
         message = json.loads(table.message().content)
         self.assertEqual(message['last_search']['new_eligible_candidate_count'], 2)
         self.assertEqual([row['title'] for row in message['candidates']], ['Synthetic paper 1', 'Synthetic paper 3'])
-        output, refs = table.finalize(json.dumps(decisions(2, (0, 1))), sources)
+        output, refs = table.finalize(json.dumps(decisions(2, (0, 1))), table.snapshot)
         self.assertEqual([r.pmid for r in refs], ['B', 'D'])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in output.items],
                          [('original', 1), ('original', 3)])
@@ -318,7 +318,7 @@ class FeedHistoryCandidateTests(unittest.TestCase):
         sources = {'first': package(['A', 'B', 'C', 'D'])}
         table.add('first', sources['first'])
         table.finish_round()
-        table.apply_review(FeedReview.model_validate(review(1, (1,))), sources)
+        table.apply_review(FeedReview.model_validate(review(table.count, (1,))), table.snapshot)
         sources['next'] = package(['A', 'B', 'C', 'D', 'E'])
         before = table.eligible_count
         table.add('next', sources['next'])
@@ -329,7 +329,7 @@ class FeedHistoryCandidateTests(unittest.TestCase):
         self.assertEqual(set(table._reviewed), {'B', 'D', 'E'})
         self.assertEqual(table.last_search['new_eligible_candidate_count'], 1)
         self.assertEqual(table.selection_stats['duplicate_pmid_count'], 2)
-        _, refs = table.finalize(json.dumps(decisions(2, (0, 1))), sources)
+        _, refs = table.finalize(json.dumps(decisions(2, (0, 1))), table.snapshot)
         self.assertEqual([r.pmid for r in refs], ['D', 'E'])
 
     def test_empty_exclusion_set_is_identical_to_existing_selection_and_stats(self):
@@ -409,8 +409,7 @@ class FeedHistoryExecutionTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources], ['A', 'B'])
 
     def test_feed_only_runner_argument_does_not_change_chat_path(self):
-        client = FakeLLMClient([ModelTurn(text=json.dumps({'schema_version': '1', 'response_type': 'chat',
-                                                         'answer': 'Synthetic answer', 'citation_refs': []}))])
+        client = FakeLLMClient([ModelTurn(text=json.dumps({'answer':'Synthetic answer', 'selected':[]}))])
         runner = AgentLoopRunner(client, registry(lambda c, a: self.fail('No search expected')))
         with patch('app.ai.agent.agent_loop_runner.FeedCandidates', side_effect=AssertionError('Feed only')):
             result = runner.run_structured('Synthetic', CONTEXT, output_model=ChatAnswerV1,

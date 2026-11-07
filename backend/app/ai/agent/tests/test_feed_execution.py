@@ -32,9 +32,9 @@ def prepared_input():
     return prepare_production_feed_input(CONTEXT, context_loader(source))
 
 
-def search_call(identifier="search_1", query="Dementia sleep research", *, revision=None, retain=()):
+def search_call(identifier="search_1", query="Dementia sleep research", *, candidate_count=None, retain=()):
     call = ToolCall(id=identifier, name="search_evidence", arguments={"query": query})
-    return review_turn(ModelTurn(tool_calls=[call]), revision, retain).tool_calls[0] if revision else call
+    return review_turn(ModelTurn(tool_calls=[call]), candidate_count, retain).tool_calls[0] if candidate_count is not None else call
 
 
 def final_turn(*, count=1, selected=(0,), empty=False):
@@ -156,7 +156,7 @@ class IterativeResearchTests(unittest.TestCase):
                     candidates = json.loads(next(m.content for m in messages if m.kind == "evidence"))
                     test.assertEqual(candidates["candidates"][0]["title"], "[FAKE] Dementia sleep research")
                     # The synthetic provider chooses a followup after inspecting actual evidence.
-                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver sleep support research", revision=1, retain=(0,))]))
+                    self.turns.append(ModelTurn(tool_calls=[search_call("search_2", "Caregiver sleep support research", candidate_count=1, retain=(0,))]))
                 elif len(self.requests) == 2:
                     self.turns.append(final_turn(count=2, selected=(1,)))
                 return super().generate(request)
@@ -171,7 +171,7 @@ class IterativeResearchTests(unittest.TestCase):
         self.assertEqual(result.sources[0].source_ref.tool_call_id, "search_2")
 
     def test_third_search_result_can_be_followed_by_normal_final_output(self):
-        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research angle {i}", revision=i-1, retain=range(i-1))]) for i in range(1, 4)]
+        turns = [ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research angle {i}", candidate_count=(i-1) or None, retain=range(i-1))]) for i in range(1, 4)]
         execution, client, searches = research_runner(turns + [final_turn(count=3, selected=(2,))])
         result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "completed")
@@ -183,7 +183,7 @@ class IterativeResearchTests(unittest.TestCase):
 
     def test_fourth_tool_call_is_not_executed(self):
         execution, client, searches = research_runner([
-            ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}", revision=i-1, retain=range(min(i-1, 5)))]) for i in range(1, 5)])
+            ModelTurn(tool_calls=[search_call(f"search_{i}", f"Research perspective {i}", candidate_count=(i-1) or None, retain=range(min(i-1, 5)))]) for i in range(1, 5)])
         result = execution(CONTEXT, prepared_input())
         self.assertEqual(result.execution.status, "limit_reached")
         self.assertEqual(result.execution.total_tool_calls, 3)
@@ -204,7 +204,7 @@ class IterativeResearchTests(unittest.TestCase):
                         identifier += 1
                         calls.append(search_call(f"search_{identifier}", f"Research perspective {identifier}"))
                     turn = ModelTurn(tool_calls=calls)
-                    turns.append(review_turn(turn, revision, range(identifier-batch)) if revision else turn)
+                    turns.append(review_turn(turn, identifier-batch, range(identifier-batch)) if revision else turn)
                 if status == "completed":
                     turns.append(final_turn(count=count))
                 execution, _, searches = research_runner(turns)
@@ -219,7 +219,7 @@ class IterativeResearchTests(unittest.TestCase):
             with self.subTest(followup=followup):
                 turns = [ModelTurn(tool_calls=[search_call()])]
                 if followup:
-                    turns += [ModelTurn(tool_calls=[search_call("search_2", "Different research perspective", revision=1)]), final_turn()]
+                    turns += [ModelTurn(tool_calls=[search_call("search_2", "Different research perspective", candidate_count=0)]), final_turn()]
                 else:
                     turns.append(final_turn(count=0))
                 execution, client, searches = research_runner(turns, empty_queries={"Dementia sleep research"})

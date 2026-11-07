@@ -4,7 +4,7 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictInt, StringConstraints, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, model_validator
 
 from .schemas import AgentModel, AgentResult
 from .tools.contracts import EvidencePackage
@@ -48,6 +48,13 @@ class ChatAnswerV1(AgentModel):
     def check_refs(self):
         _unique_refs(self.citation_refs)
         return self
+
+
+class ChatDraft(AgentModel):
+    """Internal model judgment; original references are server-owned."""
+
+    answer: ContentText = Field(max_length=12000)
+    selected: list[StrictBool]
 
 
 class FeedContentItemV2(AgentModel):
@@ -177,19 +184,13 @@ def resolve_evidence_references(
         refs = [item.source_ref for item in output.items]
     else:
         refs = [output.source_ref]
-    resolved = []
-    for ref in refs:
-        package = evidence_by_call.get(ref.tool_call_id)
-        if package is None:
-            raise ValueError("Evidence reference does not match a successful search")
-        package = EvidencePackage.model_validate(package.model_dump(warnings=False))
-        if ref.evidence_index >= len(package.evidence):
-            raise ValueError("Evidence reference is outside the search result")
-        item = package.evidence[ref.evidence_index]
-        metadata = {name: getattr(item, name) for name in ResolvedEvidence.model_fields
-                    if name != "source_ref"}
-        resolved.append(ResolvedEvidence(source_ref=ref, **metadata))
-    return resolved
+    # Compatibility entry point for callers with an external source mapping.
+    # The live Runner owns a single EvidenceStore and never builds this mapping.
+    from .evidence import EvidenceStore
+    store = EvidenceStore()
+    for call_id, package in evidence_by_call.items():
+        store.add_search_result(call_id, package)
+    return store.resolve(refs)
 
 
 def _json_object(pairs):

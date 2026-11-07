@@ -25,7 +25,7 @@ from .test_workflows import CONTEXT
 
 
 def calls(count):
-    return [ToolCall(id=f'call-{i}',name='search_evidence',arguments={'query':str(i)})
+    return [ToolCall(id=f'call-{i}',name='search_evidence',arguments={'query':str(i),'top_k':i+1})
             for i in range(count)]
 
 
@@ -65,7 +65,7 @@ class ParallelChatTests(unittest.TestCase):
                     finally:
                         with lock:active-=1
                         finished[i].set()
-                client=FakeLLMClient([ModelTurn(tool_calls=calls(count)),chat_final()])
+                client=FakeLLMClient([ModelTurn(tool_calls=calls(count)),chat_final(selected=[False]*count)])
                 result=self.execute(client,registry(handler))
                 self.assertEqual(result.execution.status,'completed')
                 self.assertEqual(result.execution.errors,[])
@@ -75,8 +75,8 @@ class ParallelChatTests(unittest.TestCase):
                 self.assertEqual(completed,expected)
                 outputs=[m for m in client.requests[1][0] if m.type=='function_call_output']
                 self.assertEqual([m.call_id for m in outputs],[c.id for c in calls(count)])
-                self.assertEqual([json.loads(m.content)['data']['evidence'][0]['pmid'] for m in outputs],
-                                 [str(i) for i in range(count)])
+                self.assertEqual([json.loads(m.content)['data']['returned_evidence_count'] for m in outputs],
+                                 [1]*count)
                 self.assertEqual([t.success for t in result.execution.called_tools],[True]*count)
 
     def test_unsafe_mixed_unknown_single_and_cap_one_use_sequential_path(self):
@@ -94,7 +94,7 @@ class ParallelChatTests(unittest.TestCase):
                         TOOL_CONTRACTS[ToolName.PATIENT_PROFILE],profile)))
                     batch.insert(1,ToolCall(id='profile',name='get_patient_profile',arguments={}))
                 elif mode=='unknown':batch.insert(1,ToolCall(id='unknown',name='unknown',arguments={}))
-                client=FakeLLMClient([ModelTurn(tool_calls=batch),chat_final()])
+                client=FakeLLMClient([ModelTurn(tool_calls=batch),chat_final(selected=[False]*(1 if mode=='single' else 5))])
                 with patch('app.ai.agent.agent_loop_runner.bounded_parallel',
                            side_effect=AssertionError('Sequential fallback required')):
                     if mode=='cap_one':
@@ -112,15 +112,14 @@ class ParallelChatTests(unittest.TestCase):
             def search_evidence(self,*,query,top_k,context):
                 barrier.wait(2);return package([query])
         tools=build_evidence_registry(retriever=SyntheticRetriever(),parallel_safe=True)
-        native=[function(f'call-{i}',json.dumps({'query':str(i)})) for i in range(3)]
+        native=[function(f'call-{i}',json.dumps({'query':str(i),'top_k':i+1})) for i in range(3)]
         native[0].pop('id');native[1]['id']=None
         def transport(req):
             body=json.loads(req.content);wire.append(body)
             self.assertNotIn('parallel_tool_calls',body)
             self.assertFalse(body['store'])
             return httpx.Response(200,json=response(native) if len(wire)==1 else response_fixture({'text':json.dumps({
-                'schema_version':'1','response_type':'chat','answer':'Synthetic','citation_refs':[
-                    {'tool_call_id':f'call-{i}','evidence_index':0} for i in range(3)]})}))
+                'answer':'Synthetic','selected':[True]*3})}))
         with OpenAI(api_key='offline',http_client=httpx.Client(transport=httpx.MockTransport(transport))) as sdk:
             result=self.execute(OpenAIClient(sdk,model='offline'),tools)
         self.assertEqual(result.execution.status,'completed')
@@ -143,7 +142,7 @@ class ParallelChatTests(unittest.TestCase):
                 barrier.wait(2);return handler(context,args)
             specs.append(ToolSpec(TOOL_CONTRACTS[name],synchronized,test_only=True,parallel_safe=True))
             batch.append(ToolCall(id=name.value,name=name.value,arguments=args))
-        client=FakeLLMClient([ModelTurn(tool_calls=batch),chat_final()])
+        client=FakeLLMClient([ModelTurn(tool_calls=batch),chat_final(selected=[False])])
         result=self.execute(client,ToolRegistry(tuple(specs),mode='test'))
         self.assertEqual(result.execution.status,'completed')
         self.assertEqual(result.execution.errors,[])
@@ -162,7 +161,7 @@ class ParallelChatTests(unittest.TestCase):
                         if invalid_output:return {'PRIVATE':'invalid output'}
                         raise RuntimeError('PRIVATE exception')
                     return package([args.query])
-                client=FakeLLMClient([ModelTurn(tool_calls=calls(3)),chat_final()])
+                client=FakeLLMClient([ModelTurn(tool_calls=calls(3)),chat_final(selected=[False]*2)])
                 result=self.execute(client,registry(handler))
                 self.assertEqual(result.execution.status,'completed')
                 self.assertEqual([e.code for e in result.execution.errors],
@@ -237,11 +236,16 @@ class ParallelChatTests(unittest.TestCase):
                 user=next(m.content for m in request.inputs if m.role=='user')
                 if not outputs:return fake_output(ModelTurn(tool_calls=calls(2)))
                 owner=json.loads(user)['user_message']
-                values=[json.loads(m.content)['data']['evidence'][0]['pmid'] for m in outputs]
-                if values!=[owner+'-0',owner+'-1']:raise AssertionError('Cross-request state')
-                return fake_output(chat_final(owner))
+                values=[json.loads(m.content)['data']['returned_evidence_count'] for m in outputs]
+                if values!=[1,1]:raise AssertionError('Cross-request state')
+                projection=json.loads(next(m.content for m in request.inputs if m.kind=='evidence'))
+                if [r['abstract'] for r in projection['candidates']]!=[owner+'-0',owner+'-1']:raise AssertionError('Missing projection')
+                return fake_output(chat_final(owner,selected=[True,True]))
         def handler(context,args):
-            barrier.wait(2);return package([context.request_id+'-'+args.query])
+            barrier.wait(2)
+            data=package([context.request_id+'-'+args.query])
+            data.evidence[0].abstract=context.request_id+'-'+args.query
+            return data
         execution=ChatExecutionV1(Client(),lambda c:registry(handler));results={}
         def run(owner):
             context=CONTEXT.model_copy(update={'request_id':owner})
@@ -251,3 +255,4 @@ class ParallelChatTests(unittest.TestCase):
         for thread in threads:thread.join(4)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual({k:v.output.answer for k,v in results.items()},{'A':'A','B':'B'})
+        for owner,result in results.items():self.assertEqual([s.pmid for s in result.sources],[owner+'-0',owner+'-1'])

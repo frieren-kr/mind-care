@@ -28,16 +28,15 @@ class FeedP2RegressionTests(unittest.TestCase):
         source['B'].evidence[0].title='X original B snapshot'
         table=FeedCandidates()
         for call in ('A','B','C'): table.add(call,source[call])
-        output,refs=table.finalize(json.dumps(decisions(9,range(5))),source)
+        output,refs=table.finalize(json.dumps(decisions(9,range(5))),table.snapshot)
         self.assertEqual([s.pmid for s in refs],['a1','X','c1','a2','b1'])
         self.assertEqual([(s.source_ref.tool_call_id,s.source_ref.evidence_index) for s in refs],
                          [('A',0),('B',0),('C',0),('A',1),('B',1)])
         self.assertEqual(refs[1].title,'X original B snapshot')
         self.assertEqual([s.source_ref for s in refs],[i.source_ref for i in output.items])
         source['B'].evidence[0].title='mutated'
-        with self.assertRaises(FeedDecisionError) as caught:
-            table.finalize(json.dumps(decisions(9,range(5))),source)
-        self.assertEqual(caught.exception.code,'candidate_source_mismatch')
+        _, refs=table.finalize(json.dumps(decisions(9,range(5))),table.snapshot)
+        self.assertEqual(refs[1].title,'X original B snapshot')
 
     def test_all_duplicates_single_and_distinct_pools_keep_unique_bounded_candidates(self):
         for pools,expected in (([['x','x'],['x'],['x','x']],['x']),
@@ -46,7 +45,7 @@ class FeedP2RegressionTests(unittest.TestCase):
             table,source=FeedCandidates(),{}
             for i,rows in enumerate(pools):
                 source[str(i)]=package(rows);table.add(str(i),source[str(i)])
-            _,refs=table.finalize(json.dumps(decisions(len(expected),range(len(expected)))),source)
+            _,refs=table.finalize(json.dumps(decisions(len(expected),range(len(expected)))),table.snapshot)
             self.assertEqual([r.pmid for r in refs],expected)
 
     def test_later_failure_returns_before_first_slow_call_and_discards_late_state(self):

@@ -15,6 +15,7 @@ from ..schemas import ModelTurn
 from ..testing.fake_llm import FakeLLMClient
 from ..tools import contracts as c
 from ..tools.evidence_tools import EvidenceRetriever
+from ..tools.search_evidence import SEARCH_EVIDENCE_DATA_POLICY
 from .test_workflows import CONTEXT, call, envelopes, tool_turn
 
 
@@ -77,9 +78,14 @@ class EvidenceContractTests(TestCase):
         self.assertIn("검색", schema["properties"]["query"]["description"])
         self.assertIn("직접 식별정보", schema["properties"]["query"]["description"])
         self.assertIn("최대", schema["properties"]["top_k"]["description"])
-        for meaning in ("치매/MCI", "후보", "의학적", "relevance_score", "evidence level"):
+        for meaning in ("치매/MCI", "후보", "의학적", "영어 query", "한국어 query"):
             with self.subTest(meaning=meaning):
                 self.assertIn(meaning, definition["description"])
+        self.assertEqual(contract.data_policy, SEARCH_EVIDENCE_DATA_POLICY)
+        self.assertNotIn("relevance_score", definition["description"])
+        self.assertNotIn(SEARCH_EVIDENCE_DATA_POLICY, json.dumps(definition, ensure_ascii=False))
+        for meaning in ("relevance_score", "근거 수준", "임상적 확실성"):
+            self.assertIn(meaning, contract.data_policy)
         score = c.EvidenceItem.model_json_schema()["properties"]["relevance_score"]
         self.assertEqual((score["minimum"], score["maximum"]), (-1, 1))
         for meaning in ("BGE-M3", "cosine", "retrieval", "evidence level", "의료적 확신도"):

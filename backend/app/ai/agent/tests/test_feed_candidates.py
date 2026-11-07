@@ -13,6 +13,7 @@ from ..registry import TOOL_CONTRACTS, ToolName, ToolRegistry, ToolSpec
 from ..schemas import ModelTurn, ToolCall
 from ..testing.fake_llm import FakeLLMClient
 from ..tools.contracts import EvidenceItem, EvidencePackage
+from ..workflows.feed_prompts import FeedPromptBuilder
 from .test_workflows import CONTEXT
 
 
@@ -27,12 +28,13 @@ def decisions(count, selected=()):
                           if i in selected else {"include": False} for i in range(count)]}
 
 
-def review_turn(turn, revision, retain=()):
+def review_turn(turn, candidate_count, retain=()):
     turn = turn.model_copy(deep=True)
     raw = turn.tool_calls[0].arguments
     raw = json.loads(raw) if isinstance(raw, str) else dict(raw)
-    raw['review'] = {'candidate_revision': revision, 'retain': [
-        {'candidate_index': i, 'personal_reason': f'Retained reason {i}', 'category': 'care'} for i in retain]}
+    raw['review'] = {'decisions': [
+        {'include': True, 'personal_reason': f'Retained reason {i}', 'category': 'care'} if i in retain
+        else {'include': False} for i in range(candidate_count)]}
     turn.tool_calls[0].arguments = raw
     return turn
 
@@ -46,13 +48,13 @@ class FeedCandidateContractTests(unittest.TestCase):
 
     def fails(self, table, source, payload, code):
         with self.assertRaises(FeedDecisionError) as caught:
-            table.finalize(payload if isinstance(payload, str) else json.dumps(payload), source)
+            table.finalize(payload if isinstance(payload, str) else json.dumps(payload), table.snapshot)
         self.assertEqual(caught.exception.code, code)
         self.assertEqual(str(caught.exception), code)
 
     def test_one_search_five_candidates_and_position_based_source_order(self):
         table, source = self.table(tuple(str(i) for i in range(5)))
-        output, resolved = table.finalize(json.dumps(decisions(5, (1, 3))), source)
+        output, resolved = table.finalize(json.dumps(decisions(5, (1, 3))), table.snapshot)
         self.assertEqual(output.schema_version, "2")
         self.assertEqual([item.source_ref.evidence_index for item in output.items], [1, 3])
         self.assertEqual([item.personal_reason for item in output.items], ["Reason 1", "Reason 3"])
@@ -64,7 +66,7 @@ class FeedCandidateContractTests(unittest.TestCase):
         table, source = self.table((None, "A", "B"))
         source["next"] = package(("B", "C", "A", "D"))
         table.add("next", source["next"])
-        output, resolved = table.finalize(json.dumps(decisions(4, range(4))), source)
+        output, resolved = table.finalize(json.dumps(decisions(4, range(4))), table.snapshot)
         self.assertEqual([s.pmid for s in resolved], ["A", "B", "C", "D"])
         self.assertEqual([(i.source_ref.tool_call_id, i.source_ref.evidence_index) for i in output.items],
                          [("provider_real_call", 1), ("next", 0), ("next", 1), ("next", 3)])
@@ -79,13 +81,13 @@ class FeedCandidateContractTests(unittest.TestCase):
         table.add("overflow", source["overflow"])
         self.assertEqual(json.loads(before.content)["candidate_count"], 10)
         self.assertEqual(json.loads(table.message().content)["candidate_count"], 10)
-        output, refs = table.finalize(json.dumps(decisions(10, (0, 1, 2, 4))), source)
+        output, refs = table.finalize(json.dumps(decisions(10, (0, 1, 2, 4))), table.snapshot)
         self.assertEqual([r.pmid for r in refs], ["0", "5", "10", "1"])
         self.assertEqual([i.source_ref.tool_call_id for i in output.items], ["0", "1", "2", "0"])
 
     def test_missing_or_blank_pmids_are_excluded_without_reindexing(self):
         table, source = self.table((None, "", " \n", "A"))
-        output, refs = table.finalize(json.dumps(decisions(1, (0,))), source)
+        output, refs = table.finalize(json.dumps(decisions(1, (0,))), table.snapshot)
         self.assertEqual(output.items[0].source_ref.evidence_index, 3)
         self.assertEqual(refs[0].pmid, "A")
 
@@ -97,17 +99,17 @@ class FeedCandidateContractTests(unittest.TestCase):
             table.add("invalid", raw)
         self.assertEqual(json.loads(table.message().content)["candidate_count"], 0)
 
-    def test_candidate_snapshot_and_original_mapping_must_still_match(self):
-        for corruption in ("missing_call", "missing_row", "changed_metadata"):
+    def test_original_input_changes_cannot_change_server_snapshot(self):
+        for corruption in ('missing_call', 'missing_row', 'changed_metadata'):
             table, source = self.table()
-            if corruption == "missing_call":
-                source.clear()
-            elif corruption == "missing_row":
-                source["provider_real_call"].evidence.clear()
-            else:
-                source["provider_real_call"].evidence[0].title = "Mutated title"
+            before = [item.evidence.model_dump() for item in table._items]
+            if corruption == 'missing_call': source.clear()
+            elif corruption == 'missing_row': source['provider_real_call'].evidence.clear()
+            else: source['provider_real_call'].evidence[0].title = 'Mutated title'
             with self.subTest(corruption=corruption):
-                self.fails(table, source, decisions(3, (0,)), "candidate_source_mismatch")
+                output, refs = table.finalize(json.dumps(decisions(3, (0,))), table.snapshot)
+                self.assertEqual([item.evidence.model_dump() for item in table._items], before)
+                self.assertEqual(refs[0].title, before[0]['title'])
 
     def test_request_state_is_isolated_and_projection_does_not_mutate_snapshot(self):
         table, source = self.table()
@@ -133,7 +135,7 @@ class FeedCandidateContractTests(unittest.TestCase):
         value = json.loads(message.content)
         self.assertEqual(value["context_type"], "untrusted_feed_candidates")
         row = value["candidates"][0]
-        self.assertEqual(set(row), {"candidate_index", "status", "title", "study_type", "derived_evidence_grade", "evidence_excerpt"})
+        self.assertEqual(set(row), {"status", "title", "study_type", "derived_evidence_grade", "evidence_excerpt"})
         self.assertEqual(tuple(len(row[k]) for k in ('title', 'study_type', 'evidence_excerpt')), (300, 80, 1200))
         self.assertIsNone(row['derived_evidence_grade'])
         for private in ("PRIVATE_PMID", "PRIVATE_CALL_ID", "PRIVATE_DOI", "PRIVATE_ABSTRACT"):
@@ -142,14 +144,14 @@ class FeedCandidateContractTests(unittest.TestCase):
     def test_empty_and_all_excluded_are_valid_final_v2_outputs(self):
         for count in (0, 3):
             table, source = self.table(tuple(str(i) for i in range(count)))
-            output, refs = table.finalize(json.dumps(decisions(count)), source)
+            output, refs = table.finalize(json.dumps(decisions(count)), table.snapshot)
             self.assertEqual(output, FeedAnswerV2(schema_version="2", response_type="feed", items=[]))
             self.assertEqual(refs, [])
 
     def test_three_candidates_three_decisions_can_select_all_or_some(self):
         for selected in ((0, 1, 2), (1,), ()):
             table, source = self.table()
-            output, refs = table.finalize(json.dumps(decisions(3, selected)), source)
+            output, refs = table.finalize(json.dumps(decisions(3, selected)), table.snapshot)
             self.assertEqual([s.pmid for s in refs], [["A", "B", "C"][i] for i in selected])
             self.assertEqual(len(output.items), len(selected))
 
@@ -221,7 +223,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
             return value
         registry = ToolRegistry((ToolSpec(TOOL_CONTRACTS[ToolName.SEARCH_EVIDENCE], search),))
         client = FakeLLMClient(turns)
-        runner = AgentLoopRunner(client, registry, **options)
+        runner = AgentLoopRunner(client, registry, prompt_builder=FeedPromptBuilder(), **options)
         return runner.run_structured("Synthetic background", CONTEXT, output_model=FeedAnswerV2), client, runner
 
     @staticmethod
@@ -241,7 +243,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertNotIn('"evidence"', tools[0].content)
 
     def test_three_searches_have_one_latest_rebalanced_candidate_list(self):
-        turns = [review_turn(self.search(str(i), str(i)), i) if i else self.search(str(i), str(i)) for i in range(3)]
+        turns = [review_turn(self.search(str(i), str(i)), 5) if i else self.search(str(i), str(i)) for i in range(3)]
         turns.append(ModelTurn(text=json.dumps(decisions(5, (0, 1, 2)))))
         packages = {str(i): package([str(i * 5 + j) for j in range(5)]) for i in range(3)}
         result, client, _ = self.run_feed(turns, packages)
@@ -317,8 +319,7 @@ class FeedCandidateRunnerTests(unittest.TestCase):
                     self.assertTrue(finished.wait(1))
 
     def test_chat_still_uses_original_schema_and_tool_envelope(self):
-        client = FakeLLMClient([ModelTurn(text=json.dumps({"schema_version": "1", "response_type": "chat",
-                                                       "answer": "Synthetic", "citation_refs": []}))])
+        client = FakeLLMClient([ModelTurn(text=json.dumps({"answer": "Synthetic", "selected": []}))])
         runner = AgentLoopRunner(client, ToolRegistry(()))
         result = runner.run_structured("Synthetic", CONTEXT, output_model=ChatAnswerV1)
         self.assertEqual(result.execution.status, "completed")

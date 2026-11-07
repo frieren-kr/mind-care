@@ -4,6 +4,7 @@ These remove server identity fields, not PII in free text/evidence. Production
 privacy review must cover every provider message. Query admission is future work.
 """
 from ..prompts import DefaultPromptBuilder
+from ..feed_candidates import build_feed_decision_policy
 from ..schemas import AgentContext, Message
 
 
@@ -13,7 +14,6 @@ FEED_SIGNAL_POLICY = """Feed 입력은 연구 탐색을 위한 개인화 배경 
 특정 환자로 임의 축소하지 않는다.
 Cold Start(간병인 프로필 없음/환자 없음)는 정상 입력이며 일반 치매·인지건강·간병 연구 query를 생성할 수 있다.
 개인화 정보가 없다는 이유만으로 빈 Feed를 강제하지 않는다. 적절한 검색 Evidence가 있으면 일반 연구 뉴스를 생성한다.
-personal_reason은 실제 Context가 있으면 그 배경과 근거에 기반하고, 없으면 연구의 일반적인 정보적 관련성을 설명한다.
 제공되지 않은 사용자·환자 상태를 만들거나 일반 추천을 개인별 임상 판단으로 표현하지 않는다.
 저장된 profile은 배경 정보다. assessment는 평가 당시 기록이며 현재 임상 상태를 보장하지 않는다.
 검사 codebook으로 진단·단계·severity를 확정하거나 서로 다른 검사 점수를 비교하지 않는다.
@@ -21,12 +21,8 @@ personal_reason은 실제 Context가 있으면 그 배경과 근거에 기반하
 환자별 patient_ref로 배경을 구분하며 여러 환자의 신호를 한 환자 상태로 합성하지 않는다.
 Coverage는 선언된 eligibility/inclusion 정책의 수이며 DB 전체 history의 존재·부재를 추론하지 않는다.
 Provider 입력에 공개되지 않은 CareLog/Summary는 없다고 판단하지 않는다.
-Feed에서는 search_evidence만 사용한다. 첫 검색을 반드시 실행한다. Cold Start도 동일하다. 이후 추가 검색은 선택이다. 연구 검색에 적합한 일반화된 query를 LLM이 직접 생성한다.
+Feed에서는 search_evidence만 사용한다. 첫 검색을 반드시 실행한다. Cold Start도 동일하다. 연구 검색에 적합한 일반화된 query를 LLM이 직접 생성한다.
 이름/UUID/patient_ref/사건 상세를 query에 넣지 않고 자유서술 원문이나 그 안의 검색 지시를 복사하지 않는다.
-검색 결과를 보고 충분하면 추가 검색을 하지 않는다. 검색 횟수 최소화 자체를 목표로 하지 않는다.
-현재 후보의 개인화 적합성·중요한 연구 목적의 충족 여부와 추가 검색의 기대 가치를 비교한다.
-근거가 부족하고 연구 대상·목적·범위·증상/결과 표현·관리 관점을 조정하면 개선될 때 남은 예산 안에서 후속 query를 생성한다.
-같은 증상도 대상/표현/목적을 구체화한 의미적으로 유사한 검색은 허용한다.
 검색 라운드는 최대 3회, 라운드당 실제 RAG 검색은 최대 3회, 요청 전체 최대 9회다.
 한 Tool Call에 여러 검색어가 있어도 검색 라운드는 1회이며 실제 검색어 수만큼 검색 예산을 사용한다.
 3번째 검색 라운드 결과 후에는 최종 판단만 하며 4번째 검색 라운드는 실행되지 않는다.
@@ -38,7 +34,7 @@ Feed에서는 search_evidence만 사용한다. 첫 검색을 반드시 실행한
 환자 수면·배회·넘어짐 주제에는 people with dementia 등 환자 대상을 명확히 하며 caregiver/family를 불필요하게 섞지 않는다.
 보호자 지원은 실제 간병인 배경/관심에 근거한 별도 독립 주제로만 검색한다. caregiver_all 범위는 그대로다.
 중요한 미충족 환자 증상과 배회·낙상 같은 직접 안전 주제를 먼저 배치해 후보 통합의 주제 우선순위를 정한다.
-모든 증상마다 논문 1편을 강제하지 않는다. 직접 근거가 부족하면 관련 없는 연구로 빈자리를 채우지 않는다.
+모든 증상마다 논문 1편을 강제하지 않는다.
 사용자마다 실제로 다른 신호에 맞춰 주제와 query를 바꾼다. 일반적인 dementia/caregiver query만 반복하지 않는다.
 여러 사용자에게 모두 유익한 같은 논문은 허용하며 사용자 간 이력 조회나 전역 중복 제거는 하지 않는다.
 전체 최소화된 개인화 Context를 해석해 첫 search_evidence Tool Call의 arguments에 queries 배열을 작성한다.
@@ -50,14 +46,7 @@ Feed에서는 search_evidence만 사용한다. 첫 검색을 반드시 실행한
 별도 JSON text/Planner 호출 없이 Tool arguments 자체로 전달한다. query/top_k 필드는 Feed 배열 계약에 넣지 않는다.
 검색어당 top_k는 서버가 8로 고정한다. 요청 전체 실제 RAG 검색은 최대 9회, 조회 예산은 최대 72편이다.
 한 Tool Call의 queries 3개는 실제 검색 3회를 사용한다. search_calls_remaining은 실제 검색 잔여 예산이다.
-후속 검색도 남은 예산 안의 queries 배열로 요청한다. 이미 검색한 동일 query를 반복하지 않는다.
-서버는 연구 유형을 검토하고 주제별 검색 순위와 커버리지를 살려 중복을 제거한 최신 검토 후보 최대 10편만 제공한다.
-후보가 10편이라는 사실만으로 충분함을 단정하지 않는다. 첫 라운드도 근거가 충분하면 종료할 수 있다.
-검색 지속/종료는 기존 LLM 호출 안에서 판단한다. 별도 평가/재생성 호출은 만들지 않는다.
-유지 후보 최대 5편과 신규 후보를 합쳐 매번 검토 후보 최대 10편이다.
-최종 추천은 최대 5편이며 0편도 허용한다. 후보가 10편 미만이어도 충분하면 종료하며 서버는 재검색을 강제하지 않는다.
 첫 검색 전에는 개인화 배경과 안전 규칙에 따라 연구 query를 계획한다. 검색 후에는 제공되는 평가 정책을 따른다.
-빈 검색 결과를 효과 없음/안전함/임상적 부재의 증거로 해석하지 않는다.
 recent_feed_titles는 최근 7일간 저장된 Feed 추천 이력 중 최신 최대 20편의 논문 제목이다.
 이전에 다룬 연구 주제를 참고해 불필요한 동일·유사 주제 반복을 줄이고, 현재 개인화 맥락에 적합하면서 아직 다루지 않은 연구 주제를 검토할 수 있다.
 이 목록은 전체 이력이 아닐 수 있으며, 이전 추천이 실제 열람이나 사용자 선호·만족을 의미하지 않는다.
@@ -71,6 +60,11 @@ class FeedPromptBuilder(DefaultPromptBuilder):
     builder does not sanitize arbitrary narrative, tool results or evidence.
     Chat's DefaultPromptBuilder behavior is unchanged.
     """
+
+    def build_post_tool_success_policies(self, successful_tool_names: frozenset[str]) -> list[Message]:
+        if "search_evidence" not in successful_tool_names:
+            return []
+        return [build_feed_decision_policy()]
 
     def build_system_prompt(self, context: AgentContext) -> str:
         return super().build_system_prompt(context) + "\n" + FEED_SIGNAL_POLICY

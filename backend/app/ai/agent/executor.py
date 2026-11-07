@@ -9,7 +9,7 @@ from openai import APITimeoutError
 from pydantic import BaseModel, ValidationError
 
 from ._execution import RequestTimeout, bounded_handler, positive_seconds
-from .registry import ToolName, ToolRegistry
+from .registry import ToolRegistry
 from .schemas import AgentContext, AgentError, ToolCall, ToolOutcome, ToolTrace
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class ToolExecutor:
         data = None
         if spec is None:
             error_code = "unknown_tool"
-        elif (spec.contract.name in (ToolName.PATIENT_PROFILE, ToolName.RECENT_CARE_LOGS)
+        elif (spec.contract.patient_scoped
               and not isinstance(context.patient_id, UUID)):
             error_code = "patient_context_mismatch"
         else:
@@ -82,7 +82,7 @@ class ToolExecutor:
                               success=error is None, data=data, error=error)
         count = None
         if data is not None:
-            for key in ("logs", "evidence", "data"):
+            for key in ("logs", "evidence", "data", "visits", "assessments", "events"):
                 if isinstance(data.get(key), list):
                     count = len(data[key])
                     break

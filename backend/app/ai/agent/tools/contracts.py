@@ -1,10 +1,15 @@
-"""3개 Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
+"""Tool의 Agent 전용 입력/출력. 확장 필드는 DB 필드가 아니다."""
 from datetime import date, timezone
 from typing import Literal
 
 from pydantic import AwareDatetime, Field, JsonValue, StrictInt, field_validator, model_validator
 
 from ..schemas import AgentModel
+from .medications import MedicationItem, PatientMedicationsInput, PatientMedicationsOutput
+from .medical_visits import MedicalVisitItem, PatientMedicalVisitsInput, PatientMedicalVisitsOutput
+from .assessments import AssessmentItem, PatientAssessmentsInput, PatientAssessmentsOutput
+from .safety_events import SafetyEventItem, SafetyEventsPeriod, PatientSafetyEventsInput, PatientSafetyEventsOutput
+from .caregiver_profile import CaregiverProfileInput, CaregiverProfileData, CaregiverProfileOutput
 
 
 class PatientProfileInput(AgentModel):
@@ -103,6 +108,18 @@ class EvidenceSearchInput(AgentModel):
         return value
 
 
+class GuidelineSearchInput(AgentModel):
+    query: str = Field(min_length=1, max_length=2000, description="공식 가이드라인·돌봄 권고사항 검색어. 불필요한 직접 식별정보는 포함하지 않는다.")
+    top_k: StrictInt = Field(default=2, ge=1, le=4, description="해당 호출의 최대 반환 개수. 누적 목표 수가 아니며 남은 가이드라인 공간에 맞춰 축소될 수 있다.")
+
+    @field_validator("query")
+    @classmethod
+    def reject_blank_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Guideline search query must not be blank")
+        return value
+
+
 class EvidenceItem(AgentModel):
     evidence_type: Literal["new_research", "guideline"]
     pmid: str | None = Field(default=None, description="RAG가 제공한 PMID. 없으면 null이며 추정하지 않는다.")
@@ -129,7 +146,7 @@ class EvidencePackage(AgentModel):
 
 
 class ToolResultEnvelope(AgentModel):
-    """Prompt Builder에서 직렬화하는 결과 (성공 데이터는 각 Output으로 검증)."""
+    """Conversation 결과. Chat 검색 원본은 서버 EvidenceStore에 보존한다."""
 
     success: bool
     data: dict[str, JsonValue] | None = None

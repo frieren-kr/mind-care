@@ -34,7 +34,18 @@ Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar�
   PromptBuilder는 정책과 데이터만 조립하며 Provider 이력을 합성하지 않는다.
 - `agent_loop_runner.py`: 기존 단일 Loop가 Feed/Chat의 예산·권한·Executor·Evidence·
   최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
-  이전 candidate_revision 목록을 다음 요청에 중복 누적하지 않는다.
+  이전 후보 목록을 다음 요청에 중복 누적하지 않는다.
+
+`PromptBuilder.build_post_tool_success_policies(frozenset[str])`는 검증·반영이 완료된 요청별
+성공 Tool 이름만 받아 정적 Workflow System 정책을 반환한다. 검색 성공(정상 0건 포함) 후
+Chat은 질문 해결·추가 검색·누적 후보 인용 정책을, Feed는 기존 후보 평가 정책을 제공한다.
+Runner는 매 요청 스냅샷의 첫 user 메시지 앞에만 삽입하며 Conversation에는 누적하지 않는다.
+동적 후보·검색 진행 정보는 기존 Projection, Tool 데이터 해석은 기존 `ToolContract.data_policy`가
+각각 담당한다. DefaultPromptBuilder는 빈 목록을 반환하며 Hook이 없는 기존 Builder도 동작한다.
+Workflow 전용 후속 정책이 필요한 실행은 ChatPromptBuilder 또는 FeedPromptBuilder를 사용한다.
+`run_structured(output_model=FeedAnswerV2)`는 FeedPromptBuilder를 필수로 요구하며,
+기본/Hook 미구현/Chat Builder 조합은 LLM·Tool 실행 전에 ValueError 구성 오류로 거부한다.
+일반 `run()`과 Chat 구조화 실행에는 이 Feed 전용 제한을 적용하지 않는다.
 
 Provider 요청은 `store=False`, `include=["reasoning.encrypted_content"]`를 사용하며
 `previous_response_id`를 사용하지 않는다. reasoning 항목은 요청별 opaque continuation으로
@@ -66,6 +77,89 @@ Responses fixture, function_call/call_id, 평탄한 tools.name 검사로 변경�
 Backend 프로덕션 조립·HTTP·저장 Handoff를 Responses MockTransport로 검증한다.
 Backend 프로덕션 코드/호출 계약의 변경은 필요하지 않다. 인증된 실제 Provider·DB·RAG
 통합은 별도이며 API Key 없는 오프라인 통과가 모델 지원이나 의료 품질을 보장하지 않는다.
+
+## 공통 Evidence 관리와 서버 출처 결합
+
+현재 출처 관리 정본은 `evidence.py`의 요청별 `EvidenceStore`다. 실행 총괄은 기존
+`AgentLoopRunner` 하나이며 별도 Runner, Planner, 재시도·교정 LLM을 추가하지 않는다.
+ToolExecutor는 기존 입력/출력 검증을 수행한다. 표준 `EvidencePackage` 출력 Contract가
+성공한 경우에만 Runner가 Store에 등록하므로 향후 같은 근거 Contract를 쓰는 Tool도 이름 분기 없이 재사용한다.
+검색·RAG·Handler는 답변/추천 Draft나 Citation 구조를 알 필요가 없다.
+
+### 원본과 스냅샷의 소유권
+
+Store는 원본 항목을 불변 JSON 문자열로 한 번 보관한다. 반환하는 Pydantic 객체는 분리된
+사본이다. 원본 입력·반환 사본·모델 projection을 수정해도 서버 원본은 바뀌지 않는다.
+`EvidenceKey`는 원본 출현 위치, `EvidenceCandidate`는 원본 사본이 아닌 Store 접근 핸들이다.
+Runner의 별도 evidence 목록/`evidence_by_call`과 FeedCandidate의 EvidenceItem 사본을 제거했다.
+기존 `resolve_evidence_references()`는 외부 서버 DTO 검증용 호환 진입점으로 유지하되 실제
+검증·메타데이터 복사는 Store에 위임한다. 실 Runner는 이 호환 wrapper나 별도 원본 mapping을 만들지 않는다.
+
+`EvidenceSnapshot`은 순서가 고정된 키 tuple, 서버 버전, 요청 소유권을 가진 불변 값이다.
+Store의 현재 snapshot 객체와 동일해야 하며 오래된·위조된·다른 요청의 snapshot은 거부한다.
+Runner가 모델 호출 직전에 선택한 snapshot을 해당 응답 검증에 그대로 전달한다.
+Feed staging은 선택 상태만 복제하고 같은 원본 Store를 공유한다. 전체 검색 묶음 검증 후 등록하며,
+실패·timeout이면 요청을 종료하고 후보/후속 메시지를 발행하지 않는다. 요청 이후 영속 상태는 없다.
+
+Chat은 실제 Provider call_id를 원본 키로 사용한다. Feed 배열 검색은 기존 내부 검색 ID를
+원본 키로 유지하고 실제 Provider call_id를 Store에 별도로 보존한다. 원래 출력 항목 id와 혼동하지 않는다.
+Provider function_call/결과의 순서·call_id·reasoning continuation은 그대로다.
+원본 출현 키의 중복은 거부한다. Chat은 동일 PMID의 서로 다른 출현을 합치지 않으며 PMID 없는
+가이드라인도 인용 가능하다. Feed만 기존 PMID 적격성·중복 제외·연구 유형/등급·주제별 순위 정책을 적용한다.
+
+### Chat 내부 Draft와 공개 결과
+
+성공 검색의 function_call_output은 건수와 최신 후보 안내만 전달한다. 모든 성공 출현을
+원래 검색/배열 순서로 모은 `untrusted_chat_candidates` projection 하나만 호출 snapshot에 붙인다.
+원본 PMID/DOI/URL 및 Provider 참조를 선택용 데이터로 노출하지 않는다. 논문 본문은 user 데이터이며
+Tool 결과와 마찬가지로 비신뢰다. projection을 history에 누적하지 않는다.
+
+```json
+{"answer":"사용자에게 전달할 설명","selected":[true,false,true]}
+```
+
+LLM은 전체 답변에 대해 후보별 인용 여부를 한 번 판단한다. 번호 목록(A)은 희소 선택에 출력이
+짧지만 index 범위·중복 검증과 번호 복사가 필요하다. Boolean 배열(B)은 후보 수만큼 출력하지만
+순서/개수 대응이 단순하고 원본 식별자·후보 번호를 생성할 필요가 없어 B를 선택했다.
+구간마다 mask를 반복하지 않는다. 정상 검색 계약의 최대 10 calls × top_k 20이면 후보는 최대 200개다.
+최대 20개 인용 제한은 공개 ChatAnswerV1 검증에서 유지하며 조용히 자르지 않는다.
+
+서버는 strict Boolean, 정확한 길이, 현재 snapshot을 검증한 뒤 원본 EvidenceReference와
+ResolvedEvidence를 결합한다. 외부 `ChatAnswerV1`/`StructuredAgentResult`의 필드·버전은 그대로다.
+검색 전/정상 0건은 selected=[], 후보가 있어도 일반 설명이면 전체 false가 가능하다.
+잘못된 mask나 identifier 필드는 invalid_response로 거부한다. 연구 주장인지 서버가 추측하여
+인용만 제거하거나 다른 근거로 바꾸는 fallback은 하지 않는다. 유효한 무인용 Draft는 정상 반환한다.
+
+### Feed 중간 판단
+
+```json
+{"queries":["more specific research question"],"review":{"decisions":[{"include":false},{"include":true,"personal_reason":"유지 이유","category":"care"}]}}
+```
+
+중간 review도 전체 현재 후보 순서에 대응하는 decisions를 사용한다. candidate_index와
+candidate_revision은 LLM 입력/출력에서 제거했다. 버전 검증은 Store와 Runner가 전달한 snapshot의
+객체 동일성/소유권/현재성으로 수행한다. 첫 검색 review는 금지, 후속 검색에는 필수다.
+동일 turn의 여러 Call은 한 곳에 review를 넣거나 동일한 review만 반복할 수 있다.
+유지 최대 5편, 검토 최대 10편, 최종 추천 최대 5편 및 3라운드·9검색·top_k=8 예산은 그대로다.
+최종 FeedDecisionDraft는 기존처럼 후보별 include/이유/category만 판단하고 서버가 원본을 결합한다.
+
+스냅샷 결합은 과거 응답을 새 서버 상태에 적용하는 오류를 차단한다. 다만 모델이 같은 길이의
+과거 mask를 기억해 다시 출력하거나 후보 의미/순서를 잘못 이해한 경우를 내용만으로 판별하지는 못한다.
+형식·출처 식별 검증과 의미적 인용 정확성은 별개다.
+
+### Structured Outputs와 검증 한계
+
+SDK 1.109.1은 Responses `text.format`의 JSON Schema 형식을 지원한다. 다만 실제 주입 모델의
+지원 여부는 API 없이 확정할 수 없어 이번에는 이를 무조건 강제하지 않았다. 내부 JSON Schema 안내와
+서버 strict 검증을 적용하며 실제 Provider 사용 시 지원 모델에서 text.format 적용을 별도 검토한다.
+서버는 배열 길이·현재 snapshot·출처 결합을 계속 검증해야 한다. 기존 refusal/incomplete/timeout
+처리와 SDK retry 금지는 유지한다.
+
+오프라인 검증은 실제 SDK+MockTransport, 공통 Store 오류 주입, 원본 변경 방지, 병렬 요청 격리 및
+100회 결정적 임의 Call ID 시나리오를 포함한다. 실제 모델 수용/의미 판단·토큰·지연·의료적 적합성은
+실측하지 않았다. 실제 Provider 후속 평가는 호출/결과 뒤 System 정책과 reasoning continuation 수용,
+mask 형식 성공률, 출처 원본 일치, 주장-논문 관련성, 추천 적합성, 입력/출력 토큰·지연을 분리하여 측정한다.
+복약 Contract·정책 원문·성공 후 요청별 단일 System 정책 전달과 환자 Scope 선언은 그대로다.
 
 ## ChatWorkflow: 세 단계 Skeleton
 
@@ -113,6 +207,12 @@ parallel_safe=True이면 공용 Runner가 최대 3개씩 병렬 실행한다. �
 ChatPromptBuilder는 raw AgentContext 초기 메시지를 제외하고 정책과 사용자 데이터를 조립한다.
 Tool 결과 연결은 요청별 Conversation이 맡으며 공용 Runner가 기존 Chat structured policy를 삽입한다.
 Tool/질문/Evidence는 비신뢰 데이터다.
+성공한 Chat 검색 결과는 원본을 EvidenceStore에 보존하고 건수/최신 후보 안내만 Tool 결과로 전달한다.
+최신 untrusted_chat_candidates와 ChatDraft.selected를 서버 snapshot으로 연결하여 참조를 생성한다.
+실패 결과는 인용 후보가 아니며 정상 0건은 성공한 빈 후보로 구분한다. Feed/legacy Tool 결과 형식은 유지한다.
+공통 검색 Data Policy가 연구 데이터 해석을 담당한다. Chat 후속 정책은 질문과 근거의 직접 관련성,
+추가 검색 실익, 상충 결과 및 누적 후보 선택을 다룬다. null/조회 실패의 공통 안전 규칙은 초기에 유지한다.
+연구 유형을 Agent에서 일괄 제외하거나 Feed 후보·추천 정책을 복사하지 않는다.
 최소 Tool 선택·기록과 임상 판단 구분·개인정보 query 복사 금지는 Prompt 정책이며 Sanitizer/Query Guard나
 응답의 임상적 정확성을 강제하는 검증은 아니다. 실제 Provider 의미적 동작은 아직 검증하지 않았다.
 
@@ -148,6 +248,211 @@ recommendations의 PMID mapping은 존재하지만 ChatWorkflow와 연결하지 
 
 ```bash
 MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m unittest app.ai.agent.tests.test_chat_workflow app.ai.agent.tests.test_chat_execution app.ai.agent.tests.test_workflows app.ai.agent.tests.test_outputs
+```
+
+## 복약 기록 Tool 선언 및 데이터 해석 계약
+
+`get_patient_medications`는 환자 전용 읽기 Tool이다. `PatientMedicationsHandler`와
+`PatientMedicationsAdapter`가 구현되어 있으며 `build_chat_registry()`는 환자 선택 시에만
+canonical Contract로 등록한다. 기존 세 Fake Tool과 빈 `production_registry()`는 그대로다.
+실제 API 연결이나 DB 통합 검증 완료를 뜻하지는 않는다.
+
+- `tools/medications.py`: `PatientMedicationsInput(status="taking"|"stopped"|"all", limit=20)`;
+  limit은 strict 정수 1~30이다. 환자는 입력 ID가 아니라 trusted AgentContext에서 결정한다.
+- `MedicationItem`: drug_name/is_taking 필수, dosage/frequency/start_date/end_date/note는 nullable이다.
+  is_taking은 strict bool인 등록 상태이며 일별 실제 복용 완료/누락이 아니다. 미래 시작·종료일을 허용한다.
+  note는 부작용에 한정되지 않은 자유 메모 원문이며 날짜·횟수·사실을 보완하지 않는다.
+- `PatientMedicationsOutput(medications, total_count)`: 목록 최대 30개, total_count는 strict 비음수 정수이며
+  반환 개수 이상이다. 동일 status/Scope 조건의 limit 적용 전 건수다. 실제 limit/status 준수와
+  조회 실패 구분·권한·row identity·매핑은 Adapter가 담당한다.
+
+Tool별 해석 정책은 해당 Tool 영역의 `PATIENT_MEDICATIONS_DATA_POLICY`가 소유한다.
+`ToolContract.data_policy`에 보관하되 definition의 description에는 간결한 기능 설명만 전달한다.
+공통 Runner는 실행 성공과 반환값 검증 및 호출/결과 메시지 반영 후, 해당 Contract의 정책만
+별도 System 메시지로 추가하여 다음 LLM 호출에 전달한다. 실패·미실행 Tool의 정책은 전달하지 않는다.
+요청별 전달 집합으로 같은 Tool의 정책을 한 번만 이력에 추가한다. 이후 continuation에도 같은
+메시지 하나를 유지하며 요청 간 상태는 공유하지 않는다. 비신뢰 결과는 기존 function_call_output에
+그대로 남기며 전체 호출/결과 묶음의 순서를 바꾸거나 중간에 정책을 끼우지 않는다.
+Output Field 설명은 자동 공개되지 않는다. Chat 초기 Tool 선택 정책에만 복약 조회 기준을 추가하며
+Dialogue/Data Policy 및 복약 전용 Data Policy는 그대로다.
+기존 Tool의 빈 정책은 메시지를 추가하지 않으며 Feed 검색 계약도 바뀌지 않는다.
+
+환자 전용 여부는 `ToolContract.patient_scoped`로 선언하고 기존 Executor 및 Chat 사전 Scope 검사가
+참조한다. 이는 환자 선택 None 차단이며 실제 인증·환자 소속 검증을 대체하지 않는다.
+공통 Loop·별도 Policy 엔진·추가 실행 단계는 만들지 않았다.
+
+새 Tool 추가 시 Tool 영역의 모델/해석 정책, registry.py의 이름/Canonical Contract와 테스트를 추가한다.
+실제 실행을 연결할 때만 Handler·Adapter 및 서버 Registry factory를 추가한다. 기존 description/Scope
+전달 경로를 재사용하므로 Tool별 데이터 해석을 ChatWorkflow에 다시 작성할 필요가 없다.
+대화 행동 자체의 변경이 필요하면 별도의 Dialogue/Tool Selection 정책 작업으로 검토한다.
+
+Handler는 검증된 Context/status/limit를 Reader에 전달한다. Adapter는 기존 `get_patient()`으로
+환자 ID와 caregiver_id를 확인한 뒤 `list_medications(patient_id, is_taking=...)`를 1회 호출한다.
+status의 taking/stopped/all은 각각 True/False/None에 대응한다. 전체 반환 목록을 기존
+MedicationOut으로 타입 재검증하고 모든 행의 patient_id/status를 확인한다. limit 밖의 잘못된
+행도 실패시키며 조용히 삭제·보정하지 않는다. DB 정렬(is_taking DESC, start_date DESC NULLS LAST,
+created_at DESC, id)을 유지한 채 limit만 적용하고, total_count는 전체 목록 길이로 계산한다.
+Feed의 최근 90일 중단약 조건은 적용하지 않는다. 7개 Tool 필드만 투영하며 UUID와 DB 갱신 시각은 제외한다.
+정상 빈 목록은 성공이지만 None·조회 오류·권한 실패는 빈 목록으로 대체하지 않는다.
+
+테스트에서는 `PatientMedicationsAdapter(get_patient_fn=..., list_medications_fn=...)` 또는
+`build_chat_registry(..., medications_reader=...)`로 가짜 Reader를 주입한다. 기본 Adapter는
+호출 시점에 기존 user_functions의 두 함수를 가져오며 생성만으로 DB에 접근하지 않는다.
+환자 미선택 시에는 기존 search_evidence/get_caregiver_profile만 노출한다.
+
+후속 작업은 Backend API 연결과 실제 DB 필터·정렬·전체 목록 조회 성능 검증이다. 소속 확인과
+목록 조회는 별도 DB 호출로 동일 트랜잭션 Snapshot을 공유하지 않으므로, 동시 소속 변경에 대한
+권한 일관성은 DB 통합 검증에서 별도로 확인해야 한다. 필요 시 DB 담당자와 조회 계약을 조정하고
+Adapter 연결 부분만 최소 변경한다. 이번 구현은 새 SQL·DB 함수·DTO·API를 추가하지 않는다.
+현재 반환 데이터만 해석하며, 향후 실제 복약 체크·누락·용량 변경 이력과 다른 출처의 활용을 금지하지 않는다.
+실제 DB/LLM 연결 및 의료적 해석의 행동 평가는 이번 오프라인 선언 검증과 구분한다.
+
+## ChatWorkflow Dialogue Policy 및 후속 확장 시 재검토 사항
+
+### 이번 정책의 범위와 책임
+
+`ChatPromptBuilder`는 공통 System Prompt → `CHAT_DIALOGUE_POLICY` → `CHAT_TOOL_POLICY` →
+`CHAT_EVIDENCE_POLICY` → `CHAT_DATA_POLICY` 순서로 조립한다. Dialogue Policy는 요청 이해,
+환자·보호자·다른 사람의 구분, 직접 답변·필요한 명확화 질문·정서적 지원과 긴급 안전 안내의
+우선순위를 담당한다. 응급 징후에는 조회나 긴 문진보다 안전 대응을 우선하며 일상적인 건망증이나
+간병 피로를 자동으로 응급 상황으로 취급하지 않는다. 제공되지 않은 이전 대화를 기억했다고 말하지 않는다.
+
+Tool Selection Policy는 현재 `get_patient_profile`, `get_recent_care_logs`, `search_evidence`의
+실제 사용 필요성을 구분한다. 일반 설명에는 Tool을 강제하지 않으며 최신·특정 연구 확인 요청에는
+제공된 검색 Tool을 사용하도록 안내한다. Evidence/Data Policy는 현재 코퍼스와 실제 조회 범위,
+근거·저장 데이터의 의미와 한계를 담당한다. Tool Contract와 서버 검증·권한은 기존 실행 계층의 책임이다.
+환자 선택 여부는 인증·소속 권한의 증거가 아니다.
+
+이번 변경은 시스템 프롬프트 정책과 정적 회귀 검증이다. 새 Tool, 대화 이력, 의료 위험 분류기나
+새 Agent 실행 구조를 추가하지 않았다. 기존 3단계 Workflow, Runner, Responses API,
+`tool_choice="auto"`, ChatAnswerV1 및 Citation Resolver를 유지한다. Dialogue Policy는 Chat에만 적용한다.
+
+### 향후 Tool 확장
+
+새 Tool을 실제로 추가할 때 다음을 재검토한다. 미래 Tool의 이름이나 기능을 현재 프롬프트에 가정하지 않는다.
+
+- 실제 목적과 지원할 사용자 요청, 기존 Tool과의 책임 중복.
+- 호출할 때와 호출하지 않을 때, Tool 없이 직접 답변할 수 있는 요청과의 경계.
+- 다른 Tool과의 조합 및 호출 순서, 앞선 결과가 필요한 경우의 판단.
+- 사용 불가·조회 실패·부분 성공을 알리는 방식.
+- 응급 대응·명확화 질문·Tool 사용의 우선순위와 기존 Dialogue 일반 원칙의 적절성.
+
+우선 Tool Selection Policy를 확장하고, 실제 대화 행동의 원칙이 달라질 때에만 Dialogue Policy를 수정한다.
+
+### 향후 Tool Contract 및 Handler 구체화
+
+기존·신규 Tool의 실제 데이터 제공 기능이 완성되면 다음을 확인한다.
+
+- 반환 필드와 사용자 질문의 대응, 조회 가능한 범위와 제공 불가능한 정보.
+- 환자·보호자·다른 사람의 정보 Scope 및 실제 권한·소속 검증.
+- 요청 기간과 실제 반환 범위의 차이, 누락·빈 결과·부분 조회·실패의 구분.
+- Tool 출력의 신뢰 경계와 개인정보 취급, Contract와 `CHAT_DATA_POLICY`의 정합성.
+- 검색 Tool의 실제 코퍼스 범위와 `CHAT_EVIDENCE_POLICY`의 정합성.
+
+이는 후속 점검 목록이며 이번 정책 작업에서는 Contract·Handler·Adapter를 수정하지 않는다.
+
+### Chat 대화 이력 Context (Agent 경로 구현, 실제 DB 연결 후속)
+
+`prepare_chat_input(context, message, history_reader=reader)`를 기존 ChatWorkflow의 Stage 1에
+주입한다. 기존 두 인자 호출은 그대로 동작하며 이력을 읽지 않는다. 현재 API의 기본 조립은 아직
+두 인자 경로이므로 실제 이력이 자동 활성화된 상태가 아니다. Backend는 인증·환자 소속 확인 후
+아래 Reader를 바인딩한 `functools.partial(prepare_chat_input, history_reader=reader, ...)`를
+Stage 1에 공급하면 된다. API·DB 코드와 공용 Workflow·Runner·Conversation은 변경하지 않았다.
+
+현재 질문 검증을 먼저 수행하고 성공한 경우에만 Reader를 요청당 1회 호출한다. 조회·DTO 검증·
+토큰 계산 실패나 기본 2초(history_timeout_seconds) 대기 초과는 고정된 경고만 기록하고 이력을
+제외한 현재 질문으로 계속한다. 지연 결과는 반영하지 않는다. 이를 Stage 1 입력 오류로 다시
+던지지 않으므로 DB 장애가 사용자 입력 오류 422로 바뀌지 않는다. 실제 잘못된 질문은 기존대로 거부한다.
+
+JSON에는 기존 `user_message`, `patient_scope_available`을 보존하고, 성공한 조회에만
+`previous_chat_context.recent_turns`와 `daily_summaries`를 추가한다. 정상 0건은 빈 배열이며
+조회 실패는 이력 필드 없이 진행한다. server-only user_id/patient_id와 Snapshot 자체를
+Provider에 직렬화하지 않는다. 과거 role은 JSON 내부 참고 필드이며 네이티브 assistant/system
+또는 현재 Tool Result로 재생하지 않는다. 원래 사용자 입력 메시지는 첫 LLM 호출부터 모든 후속
+Tool 라운드까지 기존 Conversation이 유지한다. 과거 답변은 현재 검증된 사실·출처가 아니며,
+생략한 내용을 기억한 것처럼 답하지 않는다. 인용 표식 후처리는 현재 user_message만 확인한다.
+
+**선택과 발췌:** 최근 완료 턴 최대 5개를 최신순으로 검토하고 최종 전달은 시간순이다.
+최근 1~2턴의 질문·답변은 원문 그대로다. 3~5턴은 각 메시지가 600자 이하면 원문을 유지하고,
+초과하면 600자 안에서 끝맺음 문장부호가 있는 연속된 첫 문단만 발췌한다. 문장 내부·목록·수식의
+임의 절단, 재서술, 임상적 중요도 분류는 하지 않는다. 안전하게 발췌할 수 없는 턴만 제외한다.
+예산을 초과한 턴에서는 중단하고 더 오래된 턴도 선택하지 않는다. `verbatim_excerpt`로 불완전한 원문임을 표시한다.
+이 규칙이 의료적으로 중요한 모든 조건을 보존한다는 보장은 없으며 실제 모델 품질 평가는 후속이다.
+일별 요약은 완료된 KST 날짜만 최신순으로 선택하고, 초과한 요약부터 더 오래된 요약도 제외한다.
+
+**원문·요약 중복 방지:** 조회된 최대 5개 원문 턴이 걸치는 한국 날짜 전체에서 원문을 우선한다.
+원문이 예산·발췌 제한으로 빠졌어도 그 날짜의 요약은 주입하지 않는다. 자정에 걸친 턴은 질문
+시작일부터 답변 완료일까지의 모든 날짜 요약을 제외한다. 이를 위한 선택적 `started_at`이 없다면
+원문은 사용하되 해당 요청의 요약은 보수적으로 모두 제외한다. 완료 시각만으로 질문 날짜를
+추정하지 않는다. 원문이 없으면 저장된 과거 날짜 요약만 독립적으로 사용할 수 있다.
+
+**토큰 예산:** 최근 원문/발췌 5,500, 일별 요약 1,500, 전체 이력 7,000 이하를 검사한다.
+텍스트뿐 아니라 실제 주입 형식의 날짜·role·representation·배열·JSON 구문과
+previous_chat_context 래퍼 전체를 직렬화한 결과를 측정한다. 각 부분에도 공통 래퍼와 빈 반대
+배열 비용을 포함해 보수적으로 계상하고, 결합한 전체도 다시 검사한다. 현재 질문·기존 시스템
+정책·Tool 정의는 이력 자체의 예산과 별개다. 최종 입력과 동일한 JSON 직렬화 함수를 사용한다.
+기본 계산기는 `tiktoken==0.14.0`이며 실행 모델을 tiktoken의 모델→인코딩 정본으로 매핑한다.
+`model`을 명시하지 않으면 현재 Backend Chat과 동일하게 openai_agent_model → openai_summary_model
+순서로 설정을 사용한다. 별도 모델로 실행기를 조립하면 Stage 1에도 같은 `model=client.model`을
+주입해야 한다. `count_tokens(serialized_text) -> positive int`를 명시하면 그 계산기가 우선한다.
+특수 토큰처럼 보이는 이력 문자열도 encode_ordinary로 일반 데이터로 계산한다.
+모델 미설정(model_unconfigured), 미지원 모델(model_unsupported), 인코딩 파일 로딩 실패
+(encoding_unavailable)는 각각 구분해 경고하고 UTF-8 바이트 기반 보수적 상한으로 fallback한다.
+미지원 모델에 임의의 알려진 모델 인코딩을 대신 적용하지 않는다. 설치 단계에서 사용할 인코딩
+파일을 미리 캐시해야 한다. 공식 다운로드 호스트는 openaipublic.blob.core.windows.net이며,
+현재 클라우드에서는 해당 파일 다운로드가 프록시 403으로 막혀 실제 인코딩 검증은 제한된다.
+fallback 값은 실측 모델 토큰이나 Provider 사용량이 아니다. tiktoken 계산 역시 전체 Provider
+사용량(시스템·Tool·메시지 포맷 포함)과는 별개이며 허용된 실제 평가에서 교차 확인해야 한다.
+요청 중 요약용 LLM 호출은 없다.
+
+#### DB/Backend 담당자에게 필요한 후속 조회 계약
+
+Agent의 `ChatHistoryReader.read_history(*, user_id, patient_id, reference_time, max_recent_turns=5)`
+인터페이스는 다음 `ChatHistorySnapshot`을 한 번 반환해야 한다. 실제 DB 함수명·SQL·DB DTO는
+확정하지 않았고 Adapter나 DB 조회 구현을 임의로 추가하지 않았다.
+
+| 데이터 | Agent 입력 |
+|---|---|
+| 요청 범위 확인용 (서버 전용) | user_id, patient_id (환자 없음은 명시적 None) |
+| recent_turns | 완료된 쌍만: user_message, assistant_message, aware completed_at, 선택적 aware started_at |
+| daily_summaries | summary_date(KST 날짜), 저장된 summary 원문 |
+
+조회는 인증된 동일 사용자·현재 선택 환자 조건을 양쪽 목록에 동일하게 적용하고 최신순으로
+정렬한다. 같은 완료 시각은 DB가 결정적인 순서로 반환해야 한다. reference_time 이전에 완료된
+쌍만 최대 5개 제공하고, 일별 요약은 현재 KST 날짜보다 이전의 저장된 요약만 제공한다.
+오류를 정상 빈 목록으로 위장하지 않으며 메시지·요약의 출처 범위와 조회 일관성을 보장해야 한다.
+현재 질문은 실행 후 저장되므로 조회에 포함하지 않는다. 텍스트가 같다는 이유로 실제 과거의
+동일 질문을 삭제하지는 않는다. 기존 저장·7일 원문 삭제·요약 저장 정책은 변경하지 않는다.
+
+현재 `chat_store.get_recent_chat_messages()`는 메시지 단위이며 일별 요약 조회도 없다.
+질문/답변의 완료 대응 관계를 단순 인접 메시지나 동일 시각이라고 추측해서는 안 된다.
+원문 저장 스키마에는 turn_id가 없으므로 완료 쌍 판정 방법은 DB 담당자와 별도 확인해야 한다.
+또한 012의 원문 patient_id는 환자 삭제 시 NULL이 된다. 기존 NULL 범위 조회를 그대로 연결하면
+삭제된 환자의 대화와 원래 환자 미선택 대화가 섞일 수 있다. 이 혼입을 막을 출처 보장 방안 역시
+DB 담당 영역의 미해결 연결 조건이다. Agent의 Snapshot ID 비교나 Fake 테스트가 실제 DB 권한·
+완료 쌍·삭제 환자 격리를 보장하는 것은 아니다. 필요한 DB 설계 변경은 이번에 수행하지 않는다.
+
+`create_daily_chat_summary` 구현 및 배치 연결도 별도 작업이다. 저장된 요약이 없는 경우에도
+원문과 현재 질문으로 정상 실행한다. 저장은 기존 api/chat.py의 _save_turn()만 사용하고 중복 추가하지 않는다.
+
+### 후속 실제 LLM 행동 평가
+
+정책 구현·정적 테스트 통과와 실제 LLM의 의료 안전성·상담 품질 검증은 별개다.
+향후 실제 Provider 및 Tool 연결 상태에서 다음을 평가한다.
+
+- 직접 답변과 불필요한 Tool 호출, 필요한 명확화 질문.
+- 환자·보호자의 증상 주체 구분 및 보호자 정서적 지원.
+- 갑작스러운 인지 변화 등 위험 상황에서의 안전 대응.
+- 특정 연구 요청의 실제 근거 검색 및 여러 Tool이 필요한 복합 질문.
+- 조회 범위 밖의 사실 생성 여부와 다중 턴 대화 연속성.
+
+고위험 의료 상황은 전체 평균 품질 점수와 구분하여 평가하고 필요하면 전문적인 검토를 받는다.
+실제 Provider 테스트나 의료 평가 시스템은 이번 구현에 포함하지 않는다.
+
+오프라인 회귀 검증 (`backend/`, Provider Integration 비활성화):
+
+```bash
+MINDCARE_RUN_PROVIDER_INTEGRATION=0 PRELOAD_EMBEDDING_MODEL=0 PYTHONPATH=. .venv/bin/python -B -m unittest app.ai.agent.tests.test_chat_policy app.ai.agent.tests.test_chat_execution app.ai.agent.tests.test_chat_workflow app.ai.agent.tests.test_outputs
 ```
 
 ## FeedWorkflow: 정식 Production Stage 1과 세 단계 실행
@@ -218,7 +523,7 @@ ai_summary(없으면 abstract) 발췌 최대 1,200자만 제공한다. 식별 me
 자유 텍스트의 개인정보 제거를 보장하지 않는다. 후보 본문은 비신뢰 데이터이고 system 정책이 아니다.
 
 LLM은 `{"decisions":[{"include":true,"personal_reason":"...","category":"care"},{"include":false}]}`
-형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 실제 검토 후보 수(최대 15편)만큼의 판단이 필요하고,
+형식의 내부 `FeedDecisionDraft`만 작성한다. strict boolean과 실제 검토 후보 수(최대 10편)만큼의 판단이 필요하고,
 제외 항목에는 이유/category/null도 허용하지 않는다. 선택 수가 5를 넘거나 길이가 다르면 실패한다.
 출처 ID·추가 필드·중복 JSON 키도 거부한다. 검색 성공 후 후보 0개/판단 0개 및 전체 제외는 정상 빈 Feed다. 검색 미실행은 정상 완료할 수 없다.
 서버는 후보 순서로 원본 참조를 결합하고 Snapshot 일치 및 기존 `resolve_evidence_references()`를
@@ -1083,6 +1388,7 @@ UUID는 레포 실제 타입을 따른다. 날짜는 ISO 날짜, 시각은 datet
 | `get_patient_profile`: 저장된 기본 환자 프로필 snapshot | `PatientProfileInput` → `PatientProfileOutput` | `{}` (추가 argument 금지) | `name?: str`, `dementia_stage?: str`, `diagnosis_date?: date`, `symptoms: list[str]`, `interests: list[str]` |
 | `get_recent_care_logs`: 최근 patient_care 기록 | `RecentCareLogsInput` → `RecentCareLogsOutput` | `days: strict int=14 (1..90)`, `limit: strict int=10 (1..30)` | `period: {start_at,end_at}`, `logs: list[CareLogItem]`, `total_count: strict int>=0` |
 | `search_evidence`: RAG 근거 | `EvidenceSearchInput` → `EvidencePackage` | `query: str (1..2000자)`, `top_k: int=5 (1..20)` | `query`, `evidence: list[EvidenceItem]` |
+| `search_guidelines`: 공식 가이드라인·돌봄 지침 | `GuidelineSearchInput` → `EvidencePackage` | `query: str (1..2000자, 공백 제외)`, `top_k: strict int=2 (1..4)` | 기존 `EvidenceItem`의 `evidence_type="guideline"`, 문서·장절 제목, 발행 기관·연도, 발췌, 출처 |
 
 `CareLogItem`: `logged_at: aware datetime`, `content: str | None=null`, `mood_tag: str | None=null`.
 기간의 `start_at`/`end_at`도 timezone-aware이며 `start_at <= logged_at < end_at`을 검사한다.
@@ -1155,8 +1461,9 @@ annotation 저장, semantic memory 갱신 등의 side effect를 수행하지 않
 
 `get_recent_care_logs`는 trusted server `AgentContext`가 지정한 현재 사용자/환자에 대해,
 간병인이 저장한 최근 **patient_care 돌봄 기록**을 제한된 범위에서 읽기 전용으로 조회해
-개인화 context를 제공하는 Tool이다. 현재는 합성 Fake만 존재한다. 아래 조회/권한 의미는
-V1 계약이며 실제 DB 조회 함수, Backend DTO/Adapter, Real Handler, production 등록은 후속이다.
+개인화 context를 제공하는 Tool이다. Handler·Adapter와 Chat Registry 등록은 구현되어 있다.
+전용 DB 조회 함수는 미연결이며, 현재 성공 경로는 주입된 가짜 조회 함수로 검증한다.
+기존 Feed Snapshot을 가져와 사후 필터링하는 대체 경로는 사용하지 않는다.
 
 LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며 문자열 숫자/bool/float를
 거부한다. `days`는 기본 14, 1..90이고 `limit`은 기본 10, 1..30의 최대 반환 개수다.
@@ -1164,15 +1471,16 @@ LLM-visible input은 `days`와 `limit`뿐이다. 두 값은 strict integer이며
 대상 사용자/환자와 종료 시각을 LLM argument로 선택하거나 바꿀 수 없다.
 기존 PromptBuilder의 trusted Context system message와 ID 전달은 이번에 변경하지 않는다.
 
-현재 단일 caregiver DB 구조에서 **향후 Real Handler/Backend Adapter가 강제할 backing semantics**:
+현재 단일 caregiver DB 구조에서 **실제 DB 조회 함수가 보장해야 할 backing semantics**:
 
 1. 먼저 `patient_profiles.id == context.patient_id`인 환자의
    `patient_profiles.caregiver_id == context.user_id`인지 서버에서 검증한다.
 2. 조회 row는 `care_logs.patient_id == context.patient_id`,
    `care_logs.user_id == context.user_id`, `care_logs.log_type == "patient_care"`를 모두 만족해야 한다.
 
-이는 현재 Fake가 실제 접근 권한을 검증한다는 뜻이 아니다. 권한/identity 실패를 빈 logs로
-위장하지 않는다. DB query, 권한 적용, timeout/cancellation 및 production 연결은 후속 책임이다.
+Adapter는 반환된 모든 row의 user/patient/log_type을 검증하지만, Fake 테스트나 row 검증만으로
+실제 환자 소속·권한을 보장하지 않는다. 특히 빈 결과에서도 DB 함수가 권한을 확인해야 한다.
+권한/identity 실패를 빈 logs로 위장하지 않는다. 실제 SQL·권한·트랜잭션 검증은 후속 책임이다.
 
 `end_at`은 Handler가 요청당 한 번 결정한 조회 종료 시각이고,
 UTC 기준으로 `start_at = end_at - timedelta(days=args.days)`다. 달력 날짜 N개가 아닌 최근 **N×24시간
@@ -1181,7 +1489,8 @@ rolling window**이며 DST 등에서도 UTC instant 기준으로 N×24시간을 
 `start_at < end_at`이어야 한다. 모든 시각은 timezone-aware이며 offset이 달라도 실제 instant로
 비교한다. `logged_at`은 DB의 기록 시각이며 content가 서술하는 사건/증상의 발생 시각으로 추론하지 않는다.
 
-향후 Real Handler는 종료 시각을 timezone-aware instant로 결정하고, duration 계산 전에 UTC로 정규화한다.
+Handler는 호출당 한 번 종료 시각을 결정하고, timezone-aware인지 확인한 뒤 UTC로 정규화한다.
+테스트에서만 now_fn으로 고정 시각을 주입할 수 있으며 duration 계산 전에 UTC로 변환한다.
 
 ```python
 end_utc = end_at.astimezone(timezone.utc)
@@ -1191,8 +1500,7 @@ start_utc = end_utc - timedelta(hours=24 * args.days)
 DB의 `TIMESTAMPTZ` 조회 경계도 instant 기준의 `start_utc <= logged_at < end_utc`로 적용한다.
 local wall-clock timezone datetime에 직접 `timedelta(days=...)`를 적용하는 계산에 의존하지 않는다.
 DST spring-forward/fall-back에서도 실제 elapsed duration은 항상 `days × 24시간`이어야 한다.
-이는 후속 구현 규칙이며 현재 Real Handler는 없다. 향후 Handler 테스트에서는 두 DST 전환 모두
-`days=1`의 UTC elapsed가 정확히 24시간인지 확인한다.
+Handler 테스트는 두 DST 전환 모두 `days=1`의 UTC elapsed가 정확히 24시간인지 확인한다.
 
 출력은 `period`, `logs`, `total_count`뿐이다. `period`는 `start_at`, `end_at`만,
 각 `CareLogItem`은 `logged_at`, `content`, `mood_tag`만 포함한다. 환자/사용자/간병인 ID와
@@ -1204,7 +1512,7 @@ DST spring-forward/fall-back에서도 실제 elapsed duration은 항상 `days ×
 `total_count`는 동일한 authorization/patient/user/log_type/period 조건의 **limit 적용 전 전체 row 수**다.
 Handler는 `0 <= len(logs) <= limit`, `len(logs) <= total_count`를 유지해야 하며 일관된
 DB snapshot에서는 보통 `len(logs) == min(limit, total_count)`다. count와 목록의 snapshot
-일관성 확보는 Real Handler 책임이다. Output validator는 input.limit를 알지 못하므로
+일관성 확보는 후속 DB 조회 함수 책임이다. Output validator는 input.limit를 알지 못하므로
 이를 추측하지 않는다. 다만 어떤 유효한 V1 input에서도 31개 이상을 반환할 수 없으므로
 Output schema는 `logs`의 절대 최대 길이 30을 강제하며, count 하한, 기간 포함 여부, 최신순도 검증한다.
 
@@ -1233,6 +1541,34 @@ invalid output은 failure이며 empty success로 숨기지 않는다. 기존 Exe
 임상 진단/상태 판정, annotation 저장, profile 수정, embedding/memory 생성·갱신을 하지 않는다.
 read-only이며 business side effect가 없다. 긴 content의 크기 제한/truncation 정책과
 Real Handler용 DB index/performance 검토는 후속이며 이번 V1에 새 필드나 DB 변경을 추가하지 않는다.
+
+#### DB 담당자 후속 연결 계약
+
+`RecentCareLogsHandler`는 기간을 계산하고 Reader를 호출한다. `RecentCareLogsAdapter(query_fn=...)`는
+다음 keyword 입력·반환 계약의 함수를 1회 호출하며, 새로운 SQL이나 DB 함수를 정의하지 않는다.
+
+```python
+query_fn(*, user_id: UUID, patient_id: UUID, start_at: datetime, end_at: datetime,
+         limit: int) -> FeedReadCollection[FeedReadCareLog]
+```
+
+함수명은 추후 DB 담당자와 확정한다. 반환 DTO의 items/total_count는 모두 필수다.
+DB 함수는 환자의 caregiver_id 확인, user_id/patient_id/patient_care 및 `[start_at,end_at)` 필터,
+`logged_at DESC, id DESC` 정렬과 limit 적용 전 전체 건수를 동일한 권한 확인·읽기 전용
+REPEATABLE READ Snapshot에서 보장해야 한다. 권한 실패는 정상 0건으로 반환하지 않는다.
+DB id는 내부 정렬에만 사용하고 기존 FeedReadCareLog DTO에는 포함하지 않는다.
+
+Adapter는 기존 FeedReadCollection/FeedReadCareLog로 결과를 재검증한 뒤 scope·현재 limit를
+검사하고 RecentCareLogsOutput으로 투영한다. 기간·최신순·건수 하한은 기존 Output 검증을
+재사용한다. 위반 행을 삭제하거나, 정렬·중복 제거·total_count 재계산·원문 축약을 하지 않는다.
+`query_fn=None`인 기본 Adapter는 NotImplementedError를 발생시키며 Executor의 tool_exception으로
+처리된다. DB 미연결을 정상 빈 조회로 대체하지 않는다. 생성 시점에는 DB 접근을 하지 않는다.
+
+후속 함수는 `RecentCareLogsAdapter(query_fn=조회함수)`를 구성하여
+`build_chat_registry(..., care_logs_reader=adapter)`에 주입하면 된다. 환자 선택 시에만 Tool을
+등록하며 기존 검색·프로필 Tool과 Feed용 검색 전용 Factory는 유지한다. 새 API는 만들지 않는다.
+가짜 조회 함수 테스트는 SQL 필터·정렬 tie-break·정확한 집계·Snapshot의 실제 일관성을
+입증하지 않는다. 이 항목과 실제 운영 연결은 이후 DB 통합 테스트로 확인한다.
 
 ### search_evidence V1 semantics
 
@@ -1435,7 +1771,7 @@ feed = engine.run_structured(user_input, context, output_model=FeedAnswerV2)
 구조화 정책은 첫 user message 직전에 삽입하며 Builder의 기존 메시지 순서는 보존한다.
 기본 순서는 system 정책 → system Context → system 구조화 정책 → user 원문이다.
 Structured 모드에서는 `build_final_response_context()`의 aggregate evidence copy를 생략한다.
-Chat은 call ID가 있는 원래 Tool Result의 전체 EvidencePackage를 계속 전달한다.
+Chat은 원본을 Store에 보존하고 Tool acknowledgment와 최신 후보 projection을 전달한다.
 Feed는 내부 Snapshot을 보관하고 성공 Tool message의 긴 근거를 최소화한 뒤 최신 후보 목록을 전달한다.
 legacy `run()`은 기존 aggregate evidence message와 Builder 호출 동작을 유지한다.
 Tool Call이 없는 마지막 `ModelTurn.text`를 단일 JSON object로 검증한다.
@@ -1490,20 +1826,17 @@ Paper Detail은 기존 summary_bullets/근거 참조를 재사용하는 보조 �
 
 ### 출처 참조 검증과 서버 조립 경계
 
-AgentLoopRunner는 Executor 성공 및 EvidencePackage 재검증을 통과한 `search_evidence` 결과만
-요청 내부 `evidence_by_call`에 call ID로 보관한다. 원래 서버 Snapshot은 바꾸지 않는다.
-Chat 모델은 function_call_output의 call_id와 output JSON의 data.evidence 위치를 참조한다.
-Feed 모델은 후보별 include/이유/category만 반환하며, 원본 참조를 결합하는 책임은 서버에 있다.
-`resolve_evidence_references(output, evidence_by_call)`는 output을 다시 검증하고,
-현재 요청의 성공 검색 존재/0-based index 범위를 검사한다. 실패한 검색/다른 Tool/다른 요청의
-ID/없는 근거를 인용할 수 없다. helper를 직접 쓸 때도 성공 검색 snapshot만 제공해야 한다.
-이 검증은 의료적 함의, 환자 사실, 인용 문장과 논문 내용의 일치까지 증명하지 않는다.
+AgentLoopRunner는 검증된 성공 EvidencePackage를 요청별 EvidenceStore에 등록한다.
+ChatDraft.selected 및 FeedDecisionDraft/FeedReview의 decisions는 서버가 전달한 현재 snapshot에 결합한다.
+참조 존재·중복·원본 위치·snapshot 소유권/현재성을 Store가 검증한다. Provider call_id나 metadata를
+모델의 최종 출력에서 읽지 않는다. 외부 helper resolve_evidence_references는 동일 Store 검증에 위임한다.
+출처 식별 검증은 환자 사실이나 논문과 답변의 의미적 일치까지 증명하지 않는다.
 
 서버용 `ResolvedEvidence`는 source_ref와 실제 evidence_type/title/pmid/doi/journal/
 publication_year/study_type/organization/source_url/full_text_available만 원본에서 복사한다.
 없던 metadata는 null 그대로 유지하고 abstract/ai_summary/전체 환자 기록은 반환하지 않는다.
 LLM이 이 metadata를 반환하는 schema는 없다. 이 클래스와 StructuredAgentResult는 서버용이며
-LLM 최종 출력 모델은 ChatAnswerV1/내부 FeedDecisionDraft이며 외부 최종 DTO는 ChatAnswerV1/FeedAnswerV2다.
+LLM 최종 출력 모델은 내부 ChatDraft/FeedDecisionDraft이며 외부 최종 DTO는 ChatAnswerV1/FeedAnswerV2다.
 
 | AI 콘텐츠 | 현재 Frontend 매핑 | 신뢰 가능한 서버 조립 |
 |---|---|---|
@@ -1524,7 +1857,16 @@ Assembler/Frontend DTO 생성은 구현하지 않았다. 현재 RAG는 DB paper 
 가짜 URL을 생성하지 않는다. Structured Chat의 answer에는 inline 인용 번호를 생성하지
 않도록 안내하며, citation_refs만 authoritative 출처 연결로 사용한다. 기존 mock의 [1] 같은
 본문 표기를 근거로 서버가 번호를 신뢰하지 않는다. 모델이 정책을 무시하고 번호를 출력해도
-일반 answer 문자열일 뿐 출처 연결로 해석하지 않는다. 별도 marker validator는 도입하지 않았다.
+일반 answer 문자열일 뿐 출처 연결로 해석하지 않는다.
+ChatExecutionV1은 JSON과 Citation 검증이 끝난 completed 결과에서만 보수적인 표시 후처리를 수행한다.
+검증된 citation_refs가 있고, 그 개수 범위의 `[1]`/`[1][2]`가 문장부호 바로 뒤에 붙은 경우만 제거한다.
+코드/인용문/수식, 사용자 질문에 등장한 표식, 번호 목록/배열, 독립 표식과 공백으로 분리된 표식 등
+모호한 본문은 보존한다. 숫자는 출처 ID가 아니므로 잘못된 Citation을 복구하거나 새 연결을 만들지 않는다.
+보호 구간을 먼저 수집하며 http/https URL 자체, Markdown blockquote(빈 줄 전의 연속 문맥 포함),
+DOC.[1]/ABC-123.[1] 같은 영문·숫자 식별자 형태도 보존한다. 영문 문장 끝의 word.[1]과 식별자를
+확정적으로 구분할 수 없으므로 이 형태도 남긴다. 보호 구간 밖의 일반 문장은 계속 후처리한다.
+수정 시 answer와 execution.final_answer를 함께 갱신하고 wrapper를 재검증한다. refs/sources는 그대로다.
+공통 Runner를 직접 호출하는 경로에는 이 ChatExecution 표시 후처리를 적용하지 않는다.
 
 정책은 relevance_score를 검색 유사도로만 사용하고 근거 등급/의학적 확신도로 해석하지 않는다.
 근거 없는 인용·환자 사실·개인화 설명을 만들지 않고, 빈 검색을 효과 없음/안전함으로 해석하지
@@ -1579,7 +1921,7 @@ failed로 반환하며 추가 모델 호출이나 자동 재검색을 수행하�
 Cold Start의 최초 Tool Call, 1~3회 검색 후 상태, 예산 소진 뒤 최종 판단, AI Handoff를 확인한다.
 MockTransport는 SDK 요청 형식만 검증하며 실제 모델 옵션 지원·검색 품질·토큰 비용은 검증하지 않는다.
 
-### Feed 병렬 검색과 검토 후보 15편 통합
+### Feed 병렬 검색과 검토 후보 10편 통합
 
 공통 Runner는 allow_parallel_tools=False가 기본이며, FeedExecutionV1은 True / max_parallel_calls=3이다.
 ChatExecutionV1도 True / max_parallel_calls=3을 사용한다. 한 턴 전체가 등록된 parallel_safe Tool이고
@@ -1604,7 +1946,7 @@ Decimal 비교로 경계 오차를 방지하고, 이웃 점수의 연쇄 근접�
 그룹 안에서는 파생 A→B→C→D→미확인, 같은 등급에서는 원본 순위를 사용한다. 그룹 사이 원래 순서는 보존한다.
 서로 다른 query 점수는 비교하지 않는다. 고정된 2개 순위 묶음은 사용하지 않는다.
 주제별 목록을 요청 순서로 라운드 로빈 순회하며 실제 선택 시점에만 PMID를 중복 제거한다.
-중복/제외 뒤의 유효 항목도 순회해 검토 후보 최대 15편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
+중복/제외 뒤의 유효 항목도 순회해 검토 후보 최대 10편을 확보하고 원본 tool_call_id/evidence_index를 그대로 보존한다.
 other/None/미등록 유형은 의견 글로 단정하지 않고 후보로 남긴다. 분류 오류를 숨기거나 제목으로 재분류하지 않는다.
 서버의 관련성 평가는 검색 주제 커버리지와 query별 RAG 순위에 한정된다. 실제 대상/개인화 관련성은
 기존 최종 LLM이 제목·발췌로 판단한다. 별도의 LLM 재순위화와 5편 강제 충원은 없다.
@@ -1652,7 +1994,7 @@ study_type 기반 파생 등급을 압축에 활용한다. Projection에는 deri
 파생 등급은 기존 규칙의 참고값이며 실제 DB 저장 등급이나 임상적 품질 확정값이 아니다.
 DB 저장 등급을 통한 정렬에는 검색 담당자의 조회/DTO 계약 협의가 필요하다. 추가 DB 조회는 없다.
 
-LLM 검토 후보 15편과 유지/최종 추천 각각 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
+LLM 검토 후보 10편과 유지/최종 추천 각각 5편은 최대치다. 검색 반환 수, 유형 제외·중복/PMID 누락 후 후보 수, LLM 선택 수, Backend DB 매핑 후 수는 다를 수 있다.
 정상적으로 유익한 공통 논문은 여러 사용자에게 추천할 수 있다. 사용자 간 이력 조회나 전역 중복 금지는 없다.
 관련 근거가 없는 경우 정상 빈 Feed와 기존 검색 fallback을 유지한다. 0편 비율을 낮추려고 부적합한 논문을 채우지 않는다.
 
@@ -1662,7 +2004,7 @@ LLM 검토 후보 15편과 유지/최종 추천 각각 5편은 최대치다. 검
 
 P2 보완: 원본 풀과 출처를 보존하고 주제별 라운드 로빈 순회 중 선택 시점에만 PMID 중복을 제거한다.
 A의 낮은 순위에 있는 논문도 B의 상위 순위에서 먼저 선택할 수 있고, 그 경우 B의 원본 참조/스냅샷을 사용한다.
-선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 검토 후보 최대 15편과 원본 Snapshot 검증은 유지한다.
+선택되지 않은 PMID가 다른 주제의 선택을 막지 않는다. 최신 검토 후보 최대 10편과 원본 Snapshot 검증은 유지한다.
 
 Feed 조기 종료에서는 완료 결과를 실제 도착 순서로 검증한다. 자원 admission 대기 중에도 실패를 감지한다.
 이미 Executor 진입을 시작한 호출만 total_tool_calls에 집계하고, 미시작 호출은 실행하지 않는다.
@@ -1717,22 +2059,15 @@ FakeLLM 및 실제 SDK+MockTransport는 배열 계약·분배·프로토콜만 �
 
 ### 요청 내부 검토 이력과 유지 후보 (Feed 전용)
 
-첫 검색은 기존 queries 배열만 전달한다. 후속 검색에는 현재 projection의 버전과 유지할 후보를 전달한다.
-
-```json
-{"queries":["more specific research question"],"review":{"candidate_revision":1,"retain":[{"candidate_index":0,"personal_reason":"이전 후보가 도움이 되는 이유","category":"care"}]}}
-```
-
-candidate_index는 현재 후보 목록의 0 기반 위치이고 candidate_revision은 서버가 발행한 목록 버전이다.
-첫 검색의 review, 후속 검색의 review 누락/다른 버전, 범위 밖·중복·비정수 index, 잘못된 이유/category를 거부한다.
-같은 turn에 여러 실제 Provider Call이 있다면 review를 한 곳에 넣거나 같은 값만 반복할 수 있다.
-서버는 원본 Snapshot을 제외 후보까지 검증한다. 유지 목록 순서를 재정렬 요청으로 사용하지 않고 기존 후보 순서를 유지한다.
-review는 아직 노출하지 않은 PMID/출처를 임의 지정할 수 없다. 최종 FeedDecisionDraft 및 FeedAnswerV2 계약은 바뀌지 않는다.
+첫 검색은 queries만 전달하고 후속 검색은 현재 후보 전체 순서의 review.decisions를 전달한다.
+include=true인 항목만 이유/category를 작성해 유지하며 최대 5편이다. 버전과 원본 대응은 서버 snapshot이
+관리한다. 모델은 candidate_index/candidate_revision을 제출하지 않는다. 잘못된 길이·타입·이유/category,
+서로 다른 review, 오래된 서버 snapshot은 거부한다. 자세한 형식은 공통 Evidence 관리 절을 따른다.
 
 검색 결과 전체와 원본 index를 요청 내부에 보유한다. 이미 제시한 PMID는 다음 신규 후보 선정에서 제외한다.
 유지 후보는 prefix로 보존하며, 미검토 결과는 신규 검색 묶음의 주제부터 이전 검색 주제 순으로 라운드 로빈 순회한다.
 주제별 순위/근접 점수 내 파생 등급 정렬과 실제 선택 시점 PMID 중복 제거를 유지한다.
-유지 후보 최대 5편 + 미검토 신규/기존 후보는 항상 합계 최대 15편이다. 후보 부족/빈 결과/최종 모두 제외는 정상이며 자동 재검색하지 않는다.
+유지 후보 최대 5편 + 미검토 신규/기존 후보는 항상 합계 최대 10편이다. 후보 부족/빈 결과/최종 모두 제외는 정상이며 자동 재검색하지 않는다.
 이미 적합한 후보도 후속 review에서 버리거나 마지막 decisions에서 include=false로 제외할 수 있다.
 
 projection은 매 모델 호출의 최신 목록 하나이며 history에 저장하지 않는다. 신규 후보에만 제목/발췌/유형/파생 등급을 제공한다.
@@ -1753,18 +2088,18 @@ reviewed_count는 현재 제시하는 논문을 포함한 요청 내부 고유 P
 
 ### Feed 검토·유지·최종 추천의 독립 상한
 
-`feed_candidates.py`의 `MAX_FEED_REVIEW_CANDIDATES=15`, `MAX_FEED_RETAINED_CANDIDATES=5`,
+`feed_candidates.py`의 `MAX_FEED_REVIEW_CANDIDATES=10`, `MAX_FEED_RETAINED_CANDIDATES=5`,
 `MAX_FEED_RECOMMENDATIONS=5`를 독립적으로 적용한다. 후보 압축 상한과 최종 추천 상한은 다르다.
-후보 0~15편에 대해 정확히 같은 수의 decisions를 요구한다. include=true가 6개 이상이면
+후보 0~10편에 대해 정확히 같은 수의 decisions를 요구한다. include=true가 6개 이상이면
 `too_many_selected`로 거부하며 5개로 자르지 않는다. 외부 FeedAnswerV2.items는 계속 최대 5개다.
-유지 인덱스는 0~14이며 유지 목록은 최대 5개다. 현재 목록의 버전/실제 범위/중복 검증도 유지한다.
-유지 2편이면 신규 최대 13편, 유지 5편이면 신규 최대 10편을 제시할 수 있다. 유지 후보의 최종 제외도 가능하다.
+중간 판단 배열은 최대 10개이며 유지 선택은 최대 5개다. 현재 목록의 버전/실제 범위/중복 검증도 유지한다.
+유지 2편이면 신규 최대 8편, 유지 5편이면 신규 최대 5편을 제시할 수 있다. 유지 후보의 최종 제외도 가능하다.
 
 선정/등급/라운드 로빈/PMID 검토 이력/원본 출처 검증은 그대로다. 미검토 기존 결과도 재활용하며,
-검토 후보 15편 또는 최종 추천 5편을 채우기 위한 자동 검색은 없다. 3라운드·9검색·top_k=8·72건 예산,
+검토 후보 10편 또는 최종 추천 5편을 채우기 위한 자동 검색은 없다. 3라운드·9검색·top_k=8·72건 예산,
 Chat Tool 계약·외부 API·기본 request deadline 120초와 Tool timeout 30초는 변경하지 않았다.
 신규 후보는 기존 제목 300자/연구 유형 80자/발췌 1,200자 제한을 유지한다. retained는 판단 이유/category만 전달한다.
-신규 후보 15편의 발췌는 최대 18,000자로, 이전 5편(6,000자) 대비 최대 3배다. 이는 토큰 수의 정확한 비율이 아니다.
+신규 후보 10편의 발췌는 최대 12,000자로, 이전 5편(6,000자) 대비 최대 2배다. 이는 토큰 수의 정확한 비율이 아니다.
 LLM 입력/판단 시간이 증가할 수 있고 추가 검색이 줄어들 가능성도 있으나 실측 전에는 품질·비용·전체 지연 개선을 주장하지 않는다.
 실 Provider에서 15개 판단의 완전성, 기존 120초 deadline 내 종료, 유지 선택과 최종 5개 제한, 기존 두 사용자 합성/허가된 로컬 사례를
 별도로 확인해야 한다. 실제 OpenAI/RAG/PostgreSQL 테스트는 Codex 오프라인 검증에서 실행하지 않는다.
@@ -1786,8 +2121,8 @@ LLM 입력/판단 시간이 증가할 수 있고 추가 검색이 줄어들 가�
 충분한 탐색에도 관련 근거가 부족하거나 추가 탐색 기대 가치가 낮으면 0편 종료가 정상이다. 첫 라운드도 추가 검색 실익이 낮으면 종료할 수 있다.
 0편 응답을 서버가 거부/재검색하지 않는다. 예산 소진 후에도 현재 후보의 최종 판단을 반환한다.
 
-15편 검토·5편 유지·5편 최종 추천, 3라운드·9검색·top_k=8·총 72건, 후보 Snapshot·PMID 추적과 출처 검증,
-개인정보 최소화·비신뢰 Evidence 처리·Chat·외부 FeedAnswerV2/FeedReview/FeedDecisionDraft 계약은 그대로다.
+10편 검토·5편 유지·5편 최종 추천, 3라운드·9검색·top_k=8·총 72건, 후보 Snapshot·PMID 추적과 출처 검증,
+개인정보 최소화·비신뢰 Evidence 처리·Chat·외부 FeedAnswerV2 및 최종 FeedDecisionDraft는 유지하고 중간 FeedReview만 위치 배열로 변경했다.
 Runner·후보 선택 알고리즘·추가 Evaluator/Planner 호출·외부 평가 메타데이터·운영 로그는 추가하지 않았다.
 기존 search_progress/retained_count/candidate_count 및 execution의 라운드/실행 횟수와 최종 선택 수를 검증에 활용한다.
 
@@ -1795,3 +2130,311 @@ Fake/Mock 테스트는 정책이 전달되고 종료/추가 검색 경로가 허
 사용자 Windows 로컬 VS Code/FastAPI 환경에서 MCI·수면·인지기능, 배회·넘어짐·돌봄 지원의 두 사례를 반복 비교한다.
 0편 조기 종료 빈도, 환자/보호자 연구 대상 일치, 조합의 정보 중복·주요 목적 충족, retained 재평가와 추천 사유의 사실성,
 검색/LLM 호출 수·후보 수·입출력 토큰·응답시간(기존 120초 제한)을 함께 확인한다. 검색/추천 편수 증가만으로 성공을 판정하지 않는다.
+
+
+## get_patient_medical_visits — Handler / Adapter
+
+`tools/medical_visits.py`는 `PatientMedicalVisitsInput`, `MedicalVisitItem`,
+`PatientMedicalVisitsOutput`, `PATIENT_MEDICAL_VISITS_DATA_POLICY`를 소유한다.
+`PatientMedicalVisitsHandler`와 `PatientMedicalVisitsAdapter`를 구현하고, 환자 선택 시에만
+`build_chat_registry(..., visits_reader=...)`에 canonical ToolSpec을 등록한다. 기본 Adapter는 기존
+DB 함수를 호출 시점에 가져오며 생성만으로 조회하지 않는다. 빈 `production_registry()`와
+Feed용 검색 전용 Factory는 유지한다. 새 API는 없으며 실제 운영 연결은 후속이다.
+
+입력은 `status="completed"`, `start_date=None`, `end_date=None`, `limit=5`다.
+날짜 양 끝 포함, 동일 날짜 허용, 역전 거부, 과거·미래 허용이며 limit은 엄격한 정수 1~20이다.
+환자와 KST 기준일은 서버가 결정하므로 환자/사용자 ID나 기준일 인자를 받지 않는다.
+
+| status | 조회·정렬 계약 (Handler·Adapter 및 DB 조회 함수 책임) |
+|---|---|
+| completed | 방문 완료 등록 (`is_visited=true`), 방문일 내림차순 |
+| upcoming | KST 오늘 포함 이후의 미방문 등록, 사용자 날짜 범위와 교집합, 방문일 오름차순 |
+| unvisited | 과거·오늘·미래의 모든 미방문 등록, 방문일 내림차순 |
+| all | 방문 여부와 무관한 등록 기록, 방문일 내림차순 |
+
+출력은 `visits`(최대 20건) 하나다. 각 항목은 필수 `visit_date`, strict Boolean `is_visited`와
+nullable 텍스트 `hospital_name`, `department`, `visit_reason`, `diagnosis`, `treatment_content`,
+`test_summary`, `medication_change`, `doctor_note`, `follow_up_plan`, `visit_content`를 가진다.
+선택 텍스트의 기본값은 None이며 `id/patient_id/created_at/updated_at`과 전체 건수는 노출하지 않는다.
+빈 목록은 조회 조건에서 반환된 기록 없음이며 전체 방문·치료 부재가 아니다.
+
+정책은 공식 의무기록과 등록된 서술, 현재 임상 상태와 과거 진료, 약물 변경 메모와 실제 복약,
+후속 계획과 확정 예약을 구분한다. 미방문을 예약 확정·취소·결석으로 단정하지 않는다.
+오늘 날짜만으로 현재 시각 이후의 일정임을 판단하지 않는다. 과거 `visit_content`에는 진료 내용
+전체가 있을 수 있으므로 임의 분해하거나 다른 필드와 중복 계산하지 않는다. 자유 서술은 비신뢰 데이터다.
+`ToolContract.data_policy`로 연결되며 실행·출력 검증 성공 후 trusted system 메시지로 요청당 한 번만
+전달한다. 초기 프롬프트·Tool Description에 상세 정책을 넣지 않으며 실패 시 새로 전달하지 않는다.
+
+Handler는 upcoming에서만 기존 `app.user_schemas.today()`로 KST 기준일을 호출당 한 번 결정한다.
+테스트는 today_fn을 주입할 수 있다. 다른 status에는 기준일 계산 없이 인자를 그대로 전달한다.
+Adapter는 get_patient()으로 환자 ID와 caregiver_id를 확인한 뒤 completed/unvisited/all에서
+기존 list_medical_visits(patient_id, is_visited=..., start_date=..., end_date=..., limit=...)를 사용한다.
+이 경로는 visit_date DESC, created_at DESC, id ASC를 유지한다. Feed의 365일/90일 조건은 적용하지 않는다.
+
+upcoming의 기존 내림차순 LIMIT 결과를 뒤집는 대체 경로는 없다. 별도 주입 계약은 다음과 같다.
+
+```python
+class UpcomingMedicalVisitsQuery(Protocol):
+    def __call__(self, *, user_id: UUID, patient_id: UUID, start_date: date,
+                 end_date: date | None, limit: int) -> list[MedicalVisitOut]: ...
+```
+
+호출 시 start_date는 max(사용자 시작일 또는 KST 오늘, KST 오늘), end_date는 사용자 지정 종료일
+또는 None이며 limit은 1~20이다. is_visited=False는 고정 조건으로 인자에 넣지 않는다.
+환자 소속 확인 후 end_date가 유효 시작일보다 이르면 조회 없이 정상 visits=[]로 반환한다.
+그 외에는 upcoming_query_fn이 미연결일 때 NotImplementedError로 실패하며 빈 성공으로 숨기지 않는다.
+DB 담당자는 user_id로 환자 소속을 확인하고, patient_id/is_visited=False/양 끝 포함 날짜 조건을
+적용해야 한다. visit_date ASC, created_at DESC, id ASC 정렬을 LIMIT보다 먼저 적용하여 가까운
+일정부터 선정해야 한다. 기존 MedicalVisitOut을 반환하며 새 DTO나 Agent SQL을 만들지 않는다.
+향후 PatientMedicalVisitsAdapter(upcoming_query_fn=조회함수)를 visits_reader로 주입해 연결한다.
+
+Adapter는 반환 목록 전체의 타입·환자·상태·포함 날짜 범위·정렬(tie-break 포함)·현재 limit를
+재검증하고 12개 공개 필드를 명시적으로 투영한다. 누락된 nullable 컬럼은 정상 null과 구분하며,
+DB 모델의 원래 fields_set도 검사해 기본값이 누락을 숨기지 않게 한다. 행 삭제·재정렬·중복 제거·
+자동 절단은 하지 않는다. 정상 빈 목록은 성공이지만 None·권한 실패·DB 오류는 빈 결과로 대체하지 않는다.
+Chat 초기 Tool 선택 기준에만 진료 조회 문장을 추가하며 Contract·Data Policy·Runner는 유지한다.
+
+후속 검증: 실제 DB 필터와 LIMIT 전 선정·정렬, 빈 결과에서도 소속 확인, 병렬 호출 안전성,
+기존 소속 조회와 목록 조회 간 트랜잭션 일관성 및 운영 연결. Fake 조회만으로 원본 전체에서
+가장 가까운 일정이 선정됐음을 입증하지는 않는다. `ToolTrace.result_count`는 공통 Executor가
+출력 검증·직렬화에 성공한 visits의 실제 반환 개수를 기록한다. 정상 빈 목록은 0이며 실패는 None이다.
+전체 방문 건수나 LIMIT 이전 건수가 아니다. DB 조회 및 Tool 반환값 계약은 변경하지 않는다.
+
+
+## get_patient_assessments — Handler / Adapter
+
+`tools/assessments.py`는 `PatientAssessmentsInput`, `AssessmentItem`, `PatientAssessmentsOutput`,
+`PATIENT_ASSESSMENTS_DATA_POLICY`를 소유한다. `PatientAssessmentsHandler`와
+`PatientAssessmentsAdapter`가 구현되어 있으며 `build_chat_registry(..., assessments_reader=...)`는
+환자 선택 시에만 canonical ToolSpec을 등록한다. 기본 Adapter는 기존 함수를 호출 시점에 가져온다.
+빈 production_registry와 Feed용 검색 전용 Factory는 유지하며 새 API는 만들지 않는다.
+
+입력은 `mode="latest_by_type"`, `assessment_type=None`, `limit=20`이다. limit은 최대 반환 개수로
+엄격한 정수 1~30이며 정확한 결과 개수가 아니다. 검사명은 null 또는 1~64자 nonblank 문자열로
+별칭 원문을 보존한다. 지원 검사명 검증·정규화의 정본은 기존 서버 규칙이며 Contract에 복제하지 않는다.
+환자 ID, 날짜 범위, 정렬·페이지네이션 인자는 받지 않는다.
+
+| mode | 특정 검사 없음 | 특정 검사 지정 | 정렬·limit 계약 |
+|---|---|---|---|
+| latest_by_type | 검사 종류마다 최신 한 건 | 해당 검사 최신 한 건 | assessed_at DESC, created_at DESC, id 기준 선택 후 검사 표준 이름순으로 limit 적용 |
+| history | 전체 검사 최근 이력 | 해당 검사 최근 이력 | assessed_at DESC, created_at DESC, id 기준, limit 이하 |
+
+latest_by_type의 limit=2는 검사명순 앞선 두 종류이며 전체에서 평가일이 가장 최근인 두 건이 아니다.
+같은 검사 점수 추이는 history와 해당 검사명을 함께 사용한다. 기록 입력 시각은 평가 날짜와 다르다.
+
+출력은 최대 30건의 `assessments` 하나이며 빈 목록도 정상이다. 각 항목은 필수 `assessment_type`,
+`assessed_at: date`와 nullable `assessment_name`, `score`, `score_min`, `score_max`,
+`higher_is_worse`(strict Boolean), `result_detail`, `assessed_by`의 정확히 9개 필드다.
+점수 없이 세부 결과만 있는 평가도 정상이다. id/patient_id/created_at/updated_at과 전체 건수는 제공하지 않는다.
+메타데이터는 현재 시스템의 검사 명칭·범위·방향이며 당시 검사 버전·진단 기준이 아니다.
+GDS는 현재 시스템의 Global Deterioration Scale이며 노인우울척도와 혼동하지 않는다.
+다른 검사의 원점수를 직접 비교하거나 수치 변화만으로 실제 임상적 개선·악화·치료 효과를 확정하지 않는다.
+result_detail은 비신뢰 원문이며 평가 주체·날짜·null·빈 목록·제한 조회의 불확실성을 유지한다.
+정책은 ToolContract가 소유하고 기존 Runner가 출력 검증 성공 후 별도 trusted system 메시지로
+요청당 한 번만 전달한다. 초기 프롬프트나 Tool Description에 정책 전문을 미리 포함하지 않는다.
+
+Handler는 검증된 Context/mode/assessment_type/limit만 Reader에 전달한다. Adapter는 get_patient()으로
+소속을 확인한 뒤, 입력 검사명에 기존 normalize_assessment_type()을 적용한다. 미지원 입력은 빈 성공이
+아닌 오류다. 검사별 최신 결과는 get_latest_assessments(patient_id), 이력은
+list_assessments(patient_id, assessment_type=표준 검사명 또는 None, limit=limit)를 재사용한다.
+latest_by_type은 반환 목록 전체의 환자·타입·누락 필드·검사 종류 중복을 검사한 뒤
+특정 검사 필터와 limit를 적용한다. 이름순은 get_latest_assessments의 DB collation을 따르며
+다를 수 있는 Python 문자열 순서를 중복 강제하지 않는다. history는 검사별 최신 재선정 없이 DB의 평가일·입력 시각 내림차순,
+id 오름차순을 검증하고 보존하며 조건 불일치·초과 반환을 실패시킨다. 재정렬·동일 날짜 중복 제거는 없다.
+
+메타데이터는 기존 list_assessment_types()의 AssessmentTypeInfo를 사용하며 검사명·점수 범위표를
+Agent에 복제하지 않는다. CDR allowed의 최저·최고값 계산도 Backend 정본이 담당한다.
+name/min/max/higher_is_worse만 공개 필드로 연결하고 id/patient_id/created_at은 제외한다.
+성공한 메타데이터 목록에 해당 검사 항목이 없으면 네 필드는 None이며, 저장된 검사명은 바꾸지 않는다.
+조회 함수 실패나 잘못된 메타데이터를 정상 누락으로 숨기지 않는다. 빈 선정 결과에는 메타데이터 조회가 없다.
+원본 score/result_detail/assessed_at/assessed_by가 빠졌는지 원래 fields_set도 검사한다.
+저장된 점수·날짜·서술과 점수/서술 간 차이는 보존하며 임상적 정정·새 점수 범위 검증을 하지 않는다.
+공통 Executor는 출력 검증·직렬화된 assessments의 실제 반환 개수(빈 성공 0, 실패 None)를
+ToolTrace.result_count에 기록한다. 전체 평가 횟수나 LIMIT 이전 건수를 의미하지 않는다.
+
+테스트는 get_patient_fn/get_latest_assessments_fn/list_assessments_fn/list_assessment_types_fn을
+주입한다. 실제 DB 권한·동시 변경 시 소속 확인과 조회의 일관성·정렬 collation·최신 1건의 실제 선정은
+DB 통합 검증 대상이다. 점수/서술의 임상적 의미와 실제 모델 답변 품질도 오프라인 통과만으로 입증하지 않는다.
+이번 구현에서 DB·DTO·기존 Contract·Data Policy·Runner·Feed는 변경하지 않는다.
+
+## 환자 날짜별 안전 체크 Tool 계약
+
+`get_patient_safety_events`는 기존 canonical Contract에 `PatientSafetyEventsHandler`와
+`PatientSafetyEventsAdapter`를 연결한다. `build_chat_registry(..., safety_events_reader=...)`에서
+환자 선택 시에만 등록하며 기본 Adapter는 기존 DB 함수를 호출 시점에 가져온다. 새 API는 없다.
+`patient_scoped=True`를 기존 Executor가 사용한다. 환자/사용자 ID와 기준 날짜는 LLM 입력으로 받지 않는다.
+
+| mode | 허용 기간 인자 | 의미 |
+|---|---|---|
+| recent_days (기본) | days: StrictInt 1~31, 생략 시 30 | 서버 KST 오늘을 포함한 N개 달력 날짜. N×24시간이 아니다. |
+| relative_month | months_ago: 필수 StrictInt ≥0 | 0=이번 달, 1=지난달, 2=지지난달. 해당 월 한 개 전체다. |
+| specific_month | year: 필수 StrictInt 1~9999, month: 필수 StrictInt 1~12 | 지정한 연월 전체다. |
+
+모드별 다른 기간 인자는 null이나 기본값으로 명시해도 거부한다. 필요한 인자의 명시적 null도
+거부하며 빈 입력은 최근 30일이다. 단일 object JSON Schema와 필드 설명을 사용하고,
+조건부 필수/금지 조합은 Pydantic Validator가 최종 검증한다. 내부 미사용 필드는 None이며
+입력을 재직렬화할 때는 `model_dump(exclude_none=True)`로 활성 인자만 전달한다.
+월 경과 수에는 임의 보관기간 상한을 두지 않는다. Handler가 KST 기준일을 호출당 한 번 읽고
+같은 Tool 파일의 순수 함수 resolve_safety_period()로 달력 기간을 계산한다. today_fn 주입을 지원한다.
+
+출력은 필수 `period.start_date/end_date`(양 끝 포함, 1~31일)와 필수 `events`(최대 31행)다.
+각 행은 `event_date`, 세 필수 StrictBool `has_fall/has_wandering/has_missing`,
+필수 nullable `note`만 포함한다. note=null과 매핑 누락을 구분하며 원문을 재작성하지 않는다.
+날짜 최신순·중복 없음·반환 기간 내 날짜를 검증하고 모두 false인 행과 정상 빈 목록을 허용한다.
+id/patient_id/created_at, limit, total_count, has_more, 페이지네이션은 제공하지 않는다.
+
+이는 개별 사고 로그가 아니라 날짜별 체크다. true는 횟수가 아니고 false와 행 부재는 다르다.
+과거 실종 체크로 현재 실종·발견·해결을 확정하지 않는다. Boolean과 메모가 상충해도 각각 보존한다.
+체크된 날짜 수·날짜별 차이·메모는 설명할 수 있지만 사고 횟수·임상적 위험도·질환 진행을 만들지 않는다.
+이번 달 전체가 조회 조건이어도 아직 지나지 않은 날짜의 관찰·기록 완료를 뜻하지 않는다.
+전용 Data Policy는 기존 ToolContract 경로에서 출력 검증 성공 후에만 system 메시지로 한 번 전달된다.
+초기 Definition에는 기능과 Input Schema만 있고, 별도의 Workflow 후속 Hook은 추가하지 않는다.
+
+Handler는 기존 app.user_schemas.today()를 사용하고 recent_days에서 오늘-(days-1)부터 오늘까지,
+두 월 모드에서 월 1일~말일을 적용한다. 월 인덱스와 calendar.monthrange()로 연도 변경·윤년을
+처리하며 0001년 이전으로 넘어가는 계산과 미래 월은 실패시킨다. 9999-12도 다음 달을 생성하지
+않고 계산한다. Reader 반환 period가 실제 요청 기간과 다르면 실패한다.
+현재 월은 월 전체를 조건으로 사용하되 미래 날짜의 기록을 생성하거나 false로 채우지 않는다.
+Adapter는 get_patient()으로 환자 ID와 caregiver_id를 확인한 뒤
+list_safety_events(patient_id, start_date=시작일, end_date=종료일, limit=31)를 1회 호출한다.
+DB의 UNIQUE(patient_id,event_date)와 최대 31일 조건에 따라 기간 내 모든 저장 행을 조회한다.
+Feed의 true 플래그/180일 필터는 사용하지 않는다. source SafetyEventOut과 원래 fields_set을
+검사하여 note 누락·다른 환자·비정상 Boolean을 거부하고 공개 5개 필드만 명시적으로 투영한다.
+날짜 정렬·중복·기간 포함 여부는 기존 Output Validator를 재사용하며 행 삭제·재정렬·절단은 없다.
+최대 31행이라는 DTO 검증만으로 조회의 완전성을 증명할 수 없다.
+조회 실패를 events=[]로 숨기지 않는다. 자유 메모의 개인정보 자동 제거는 이 계약이 보장하지 않는다.
+공통 Executor의 events 관측 건수는 반환된 날짜별 행 개수다. 빈 성공은 0, 실패는 None이며
+사고 발생 횟수나 조회 기간의 날짜 수가 아니다. Chat 초기 Tool 선택 문장에 긴급 안전 안내 우선을
+포함하고 상세 Data Policy는 기존 성공 후 요청당 1회 전달 경로를 그대로 사용한다.
+달력 계산·상한·잘못된 반환값과 SDK 정책 메시지는 오프라인 테스트로 확인한다. 실제 DB의 권한,
+기간 조회 완전성·유일성·동시 변경 시 소속 확인과 조회의 일관성 및 운영 연결은 후속 통합 검증이다.
+LLM의 사용자 표현→mode 선택과 실제 안전 답변 품질은 Mock 통과만으로 입증하지 않는다.
+DB·DTO·기존 Contract·Data Policy·Runner·Feed 및 검색 전용 Factory는 변경하지 않는다.
+
+## 간병인 프로필 Tool 계약
+
+`get_caregiver_profile`는 기존 canonical 계약에 Handler·Adapter를 연결하며,
+`build_chat_registry(context)`에서 환자 선택 여부와 무관하게 등록한다. Input은 추가 필드를 받지 않는 `{}`다.
+대상은 인증된 `AgentContext.user_id`이며 LLM이 사용자/환자 ID를 선택하지 않는다.
+`patient_scoped=False`는 환자 선택 없이 사용 가능하다는 뜻이고 인증·사용자 접근 권한 검증을 대신하지 않는다.
+
+Output은 필수 nullable `profile` 하나다. `profile=null`은 저장된 프로필이 없는 정상 조회 결과이며
+조회 실패를 나타내지 않는다. 프로필이 있으면 아래 다섯 필드가 모두 필수다.
+
+| 필드 | 타입 | 의미 |
+|---|---|---|
+| relationship | str 또는 null | 사용자 단위 관계 문자열. 현재 선택된 특정 환자와의 관계로 확정하지 않는다. |
+| burden_score | StrictInt 0~88 또는 null | 등록된 Zarit 자가점검 점수. 판본·시행 조건은 제공되지 않는다. |
+| mood_score | StrictInt 0~27 또는 null | 등록된 PHQ-9 자가점검 점수. 현재 우울증 진단이나 정신건강 상태를 확정하지 않는다. |
+| lifestyle_tags | list[str] | 저장된 생활환경 태그 원문. []를 허용한다. |
+| updated_at | AwareDatetime | 프로필 마지막 수정 시각. 점수의 실제 검사일이나 전체 정보 확인 시각이 아니다. |
+
+nullable 필드에 기본값을 두지 않으므로 명시적 null과 누락을 구분한다. 점수의 Boolean·문자열·실수·
+범위 밖 값은 거부하며 DB 값을 임의 보정하지 않는다. updated_at에는 시간대가 필요하다.
+내부 id/user_id/patient_id, 이메일·전화번호·계정 필드는 공개 DTO에 포함하지 않는다.
+관계·태그 원문은 재작성하지 않는다. 등록 정보와 현재 진술이 다르면 각각 구분하고 임의 정정하지 않는다.
+
+승인된 `CAREGIVER_PROFILE_DATA_POLICY` 전문은 ToolContract가 소유한다. Definition에는 기능 설명과
+빈 Input Schema만 제공하고 정상 실행·Output 검증 성공 후에만 기존 Runner 경로로 system 정책을
+요청당 한 번 등록한다. 정상 profile=null에도 정책을 전달하며 실패·미호출·다른 Tool만 성공한 경우에는
+전달하지 않는다. 문자열·태그는 비신뢰 데이터이고 정책으로 승격하지 않는다.
+
+`CaregiverProfileHandler`는 Reader 호출만 수행한다. `CaregiverProfileAdapter`는 기존
+`get_caregiver_profile(context.user_id)`를 1회 호출하고, 반환된 행의 user_id를 검증한 뒤
+공개 5개 필드만 투영한다. None은 정상 미등록으로 반환하며 예외·잘못된 점수·시간대는
+미등록으로 대체하지 않는다. 주입 조회 함수와 기존 Fake/MockTransport로 오프라인 검증한다.
+실제 사용자 인증·존재 보장은 Backend 책임이며 추가 사용자 확인 조회는 하지 않는다.
+Chat 초기 정책에는 이 Tool의 최소 선택 기준만 추가하고 상세 Data Policy는 성공 후 전달한다.
+기존 검색·환자 프로필 등록과 검색 전용 Factory는 유지한다. 운영 Chat API 연결과 초기 Context의
+중복 처리 규칙은 별도 후속 작업이다. Runner·Executor·Dialogue Policy·Feed는 변경하지 않는다.
+
+## Chat 논문 검색량과 활성 후보 재검토
+
+Chat 구조화 실행의 top_k는 **유지 후보 + 새 RAG 결과 검토 후보**의 전체 목표 수다.
+최초 생략 시 3, 이후 생략 시 현재 목표를 유지한다. 명시적으로 변경하면 그 값을 적용하되
+7 초과는 7로 축소한다. LLM은 사용자 입력과 대화 이력, 실제 검색 결과를 검토해
+기존 규모로 설명할 수 없을 때만 필요한 최소한으로 확장한다. 서버는 확장 필요성의
+의학적·의미적 적절성까지 검증하지 않으며 최대 7편의 활성 논문 후보 규모를 강제한다.
+
+최신 후보에 근거가 부족하면 다음 검색의 `exclude_candidates`에 0-based 인덱스 목록을,
+`candidate_version`에 최신 통합 후보 메시지의 버전을 전달한다. 두 검색 Tool을 통틀어 동일 Turn의 첫 검색만
+제외 판단을 제공할 수 있다. 중복·범위 밖 인덱스, 잘못된 타입, 버전 누락·불일치는
+입력 오류이며 해당 호출에서 후보 변경·Handler 실행을 하지 않는다. 생략하면 모두 유지한다.
+유지 논문 수보다 작은 논문 top_k는 명시적 제외 없이는 적용하지 않는다. 제외된 유형의 공간만 반환된다.
+
+서버는 유지 후보를 뺀 빈자리만 검색하고, 같은 Turn의 호출 순서대로 예약한다.
+예: 유지 1편·top_k=3이면 최대 2편, 유지 3편·top_k=5이면 최대 2편을 검색한다.
+동일 Turn에서 목표 4와 7을 순서대로 요청하면 신규 검색은 최대 4와 3편이다.
+이미 예약한 검색과 유지 후보보다 작은 후속 top_k는 오류다. 실패·중복·정상 0건으로
+사용하지 않은 예약량은 다음 Turn에 재사용하며 자동 추가 검색은 하지 않는다.
+양의 정수가 아닌 top_k는 거부한다. Handler가 조정된 실제 검색량을 초과 반환하면
+invalid_output으로 처리하고 초과 결과는 등록·노출하지 않는다.
+
+EvidenceStore는 검색 원본을 중복까지 보존한다. Runner는 제외 후 새 키로 활성 Snapshot을
+갱신하고 LLM에는 그 후보만 투영한다. PMID 우선·DOI 보조로 최초 원본 참조를 유지하고,
+제목 유사성만으로 합치지 않는다. DOI 접두사·공백·대소문자는 식별 시에만 정규화한다.
+서로 다른 PMID는 같은 DOI만으로 합치지 않는다. 식별자가 없으면 동일성 보장은 제한된다.
+기존 중복 식별 이력은 제외 후에도 유지하므로 제외된 논문이 재검색으로 다시 활성화되지 않는다.
+누적 논문 검토량은 교체로 7편을 넘을 수 있지만 **활성 논문 + 논문 예약 신규 검색량은 논문 top_k 이하**다.
+
+매 LLM 요청에 원래 사용자 입력과 Tool 대화 이력을 유지하고, 최신 후보 Snapshot과
+서버 `chat_search_budget`의 `papers`(active_count·target_top_k·remaining_candidate_budget·candidate_limit·search_available)와
+`guidelines`(active_count·remaining_candidate_budget·candidate_limit·search_available)을 덧붙인다.
+과거 후보 투영은 대화에 누적하지 않는다. 새 다중 사용자 메시지 수집 기능은 추가하지 않는다.
+예산 미배정 호출은 원래 Provider Call ID로 success=false·chat_search_budget_exhausted를 반환하고
+실행·성공·오류 Trace로 기록하지 않는다. 다른 Tool 및 최종 답변은 계속 가능하다.
+후속 요청에서 실제 유지 후보가 보정된 top_k를 채웠고 제외 없이 재요청하면, 미실행 결과를
+반환한 뒤 요청 내부에서 search_evidence를 비활성화한다. 같은 Turn의 예약량 때문에
+미실행된 경우나 입력·버전 오류는 이 조건에 포함하지 않는다. 비활성화 후 같은 Turn에
+남은 검색도 실행하지 않고, 다음 LLM 요청부터 검색 Definition을 제거한다. 다른 Tool과
+최종 답변은 유지한다. 이후 모델이 비활성 검색을 다시 요청하면 Handler·예산 변경 없이
+invalid_response로 종료하여 반복을 차단한다. 다음 Chat 요청에는 비활성 상태를 넘기지 않는다.
+기존 일반 실행 횟수·라운드·요청 시간 제한은 유지한다.
+
+최종 ChatDraft.selected는 최신 활성 Snapshot 길이·순서와 일치해야 한다. 기존 finalize_chat이
+오래된 Snapshot·잘못된 선택을 거부하고 원본 출처를 결합한다. 공통 EvidenceSearchInput,
+SearchEvidenceHandler, RAG와 Feed 정책은 그대로다. Chat 전용 두 검토 인자는 Runner에서
+검증·소비하며 Handler에 전달하지 않는다. 별도 후보 관리 클래스·추가 LLM 평가는 없다.
+
+### search_guidelines 계약과 독립 후보 공간
+
+`search_guidelines`의 top_k는 누적 목표가 아닌 **호출당 최대 반환 개수**다. 기본 2, strict int 1..4이며,
+범위 밖 입력은 거부한다. Runner는 가이드라인 활성 수와 같은 Turn의 가이드라인 예약량을 뺀 공간으로
+검색량을 축소한다. 논문 7편과 가이드라인 4개의 활성 공간은 독립적이며, 통합 후보는 최대 11개다.
+예: 논문 5편·목표 7이면 논문 2편, 가이드라인 3개·요청 4이면 가이드라인 1개를 신규 검색한다.
+한 유형의 예약·활성 수는 다른 유형의 예산을 차감하지 않는다. 미사용 예약량은 다음 Turn에 재사용한다.
+이 수치는 채울 목표가 아니며 Chat의 5라운드·총 실행 10회·병렬·timeout 제한은 유지한다.
+
+가이드라인의 동일 장·절은 `(source_url, title)`로 식별한다. 같은 문서의 서로 다른 절은 별도 후보다.
+제외된 가이드라인의 식별 이력도 요청 안에 남겨 재등장을 막으며 검색 원본은 삭제하지 않는다.
+검색 Tool과 반환 `evidence_type`이 다르거나 조정된 top_k를 초과 반환하면 invalid_output으로 처리하고
+원본·후보·성공 정책을 등록하지 않는다. 정상 0건은 성공이며 실패·미실행과 구분한다.
+제외·종료 상태는 Tool별로 독립이다. 유지 후보가 해당 예산을 채운 채 재요청하면 그 검색만 닫고,
+다른 검색과 환자 Tool·최종 답변은 허용한다. 예약량으로 인한 미실행은 검색을 닫지 않는다.
+
+단일 EvidenceStore·통합 Snapshot의 순서 전체에 ChatDraft.selected를 대응시킨다.
+LLM 후보에는 기존 방식대로 source_url·PMID를 제외하고 발행 기관·연도·원문 발췌를 제공한다.
+서버는 기존 원본 tool_call_id/evidence_index로 citation_refs·ResolvedEvidence에 출처를 결합한다.
+SEARCH_GUIDELINES_DATA_POLICY는 canonical Contract가 소유하고 성공·출력 검증 이후 요청당 한 번만
+system 메시지로 전달한다. 미호출·실패 시 미전달이며 별도 Workflow Success Policy는 추가하지 않는다.
+발췌·검색 유사도와 권고 강도·개인별 진료 판단을 구분하고, 원문이 지지하는 권고만 설명하며
+출처 생성과 문서 내부 지시문 실행을 금지한다. 논문 후속 정책은 논문 검색 종료만 판단한다.
+
+**Handler·Adapter 연결:** `SearchGuidelinesHandler`는 검증된 query·top_k와 Context를
+`GuidelineRetriever.search_guidelines()`에 그대로 전달한다. `RagGuidelineRetriever`는 실행 시점에
+RAG 정본 `app.ai.retrieval.search.search_guidelines(query, k)`를 호출한다. 생성 시 임베딩이나
+DB 조회를 실행하지 않으며 `search_fn` 주입으로 오프라인 검증할 수 있다.
+RAG에는 원본 query와 `k=top_k`만 전달하며 사용자·환자 Context나 별도 검색 옵션은 넘기지 않는다.
+
+RAG 반환형은 `list[EvidenceItem]`이다. Adapter는 목록과 각 BaseModel 항목을 확인하고
+JSON 모드로 변환한 뒤 기존 Agent EvidencePackage로 재검증한다. Output.query는 RAG의 실제
+strip 동작과 같은 query.strip()이며 검색 함수에 넘기는 원문은 바꾸지 않는다. 결과 순서·중복·
+발췌·기관·연도·출처·유사도를 그대로 보존하고 추가 정렬·요약·상한 절단·출처 생성은 하지 않는다.
+정상 빈 목록만 정상 0건이며 예외·잘못된 반환형·변환 실패를 빈 목록으로 대체하지 않는다.
+변환 예외는 기존 Executor로 전파되고, Tool별 자료 유형·반환 건수 검증은 기존 Chat Runner가 담당한다.
+
+`build_chat_registry(..., guidelines_retriever=...)`는 환자 선택 유무와 무관하게 canonical
+search_guidelines를 production Tool로 등록한다. 기본값은 RagGuidelineRetriever이며 기존
+parallel_safe 옵션을 따른다. 환자 미선택 시 논문 검색·가이드라인 검색·간병인 프로필 3개,
+환자 선택 시 기존 환자 전용 6개를 더 제공한다. Feed의 검색 전용 Registry·정책은 변경하지 않는다.
+운영 Backend/API 연결, 실제 임베딩·DB 통합 및 검색 품질 검증은 후속 작업이다.
