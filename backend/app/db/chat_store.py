@@ -135,12 +135,13 @@ def list_chat_turns(user_id: UUID, patient_id: Optional[UUID], *, before: Option
     return [ChatTurnRecord(*row) for row in reversed(rows[:limit])], len(rows) > limit
 
 
-def _select_turns(user_id, patient_id, before, limit, conn) -> list[tuple]:
+def _select_turns(user_id, patient_id, before, limit, conn, since=None) -> list[tuple]:
     """완료된 질문·답변 쌍을 답변 시각 최신순으로. (turn_id, 질문, 답변, 출처, 질문 시각, 답변 시각)
 
     turn_id로 질문·답변 행을 self-join 한다. turn_id가 NULL인 옛 행(012)과 짝이 없는 행은 빠진다.
+    답변 시각이 since 이상 before 미만인 것만 (None이면 그쪽 제한 없음). limit None = 전부.
     """
-    if limit < 1:
+    if limit is not None and limit < 1:
         raise ValueError("limit은 1 이상이어야 합니다")
     with _use(conn) as c:
         return c.execute(
@@ -151,8 +152,9 @@ def _select_turns(user_id, patient_id, before, limit, conn) -> list[tuple]:
             " WHERE a.role = 'assistant' AND a.user_id = %(user_id)s"
             "   AND a.patient_id IS NOT DISTINCT FROM %(patient_id)s"
             "   AND (%(before)s::timestamptz IS NULL OR a.created_at < %(before)s::timestamptz)"
+            "   AND (%(since)s::timestamptz IS NULL OR a.created_at >= %(since)s::timestamptz)"
             " ORDER BY a.created_at DESC, a.turn_id LIMIT %(limit)s",
-            {"user_id": user_id, "patient_id": patient_id, "before": before, "limit": limit},
+            {"user_id": user_id, "patient_id": patient_id, "before": before, "since": since, "limit": limit},
         ).fetchall()
 
 
@@ -215,6 +217,16 @@ def get_messages_for_day(user_id: UUID, patient_id: Optional[UUID], day: date) -
             (user_id, patient_id, *_day_range(day)),
         ).fetchall()
     return [ChatMessage(*row) for row in rows]
+
+
+def get_turns_for_day(user_id: UUID, patient_id: Optional[UUID], day: date) -> list[ChatTurn]:
+    """그날(KST, 답변 시각 기준) 완료된 질문·답변 쌍 전부를 시간순으로 (하루 요약 배치용).
+
+    범위·제외 규칙은 get_recent_chat_turns와 같다 (turn_id 없는 옛 행, 답 없는 질문은 빠진다).
+    """
+    start, end = _day_range(day)
+    rows = _select_turns(user_id, patient_id, end, None, None, since=start)
+    return [ChatTurn(question, answer, asked, answered) for _, question, answer, _, asked, answered in reversed(rows)]
 
 
 def save_daily_summary(user_id: UUID, patient_id: Optional[UUID], day: date, summary: str, model: str) -> None:

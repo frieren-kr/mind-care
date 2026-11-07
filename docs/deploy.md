@@ -12,6 +12,7 @@ EC2 한 대(Ubuntu 24.04, t3.medium 메모리 4GB + 스왑 4GB, Docker 설치됨
 | `deploy/web.Dockerfile` (+ `.dockerignore`) | 프론트 웹 빌드(`expo export`) → nginx 이미지 |
 | `deploy/nginx.conf` | `/` 정적 파일(기본 인증), `/api/` → backend(기본 인증 없음, 로그인 토큰으로 보호 → 10번) |
 | `deploy/run_update_papers.sh` | 실행 중인 backend 컨테이너 안에서 `update_papers` 배치를 돌린다 (cron용) |
+| `deploy/run_summarize_chats.sh` | 같은 방식으로 `summarize_chats`(챗봇 대화 하루 요약 + 7일 지난 원문 삭제)를 돌린다 (cron용) |
 
 compose 명령은 **항상 레포 루트에서, `--env-file backend/.env`를 붙여서** 쓴다. 아래에서는 줄여서 `$DC`로 적는다.
 
@@ -47,7 +48,7 @@ nano backend/.env
   (영문·숫자만이라 접속 주소에 넣어도 깨지지 않는다).
 - `DATABASE_URL` — 서버에서는 compose가 `db` 호스트 주소로 **덮어쓴다**. 비워 두거나 아무 값이어도 된다.
 - `PUBMED_API_KEY`, `PUBMED_EMAIL` — 수집
-- `OPENAI_SUMMARY_API_KEY`(없으면 `OPENAI_API_KEY`), `OPENAI_SUMMARY_MODEL` — 요약
+- `OPENAI_SUMMARY_API_KEY`(없으면 `OPENAI_API_KEY`), `OPENAI_SUMMARY_MODEL` — 논문 요약·챗봇 대화 하루 요약
 - `OPENAI_API_KEY`, `GEMINI_API_KEY` — 챗봇 등
 - `EMBEDDING_MODEL`, `EMBEDDING_DIM`, `PRELOAD_EMBEDDING_MODEL` — 로컬과 같게
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `APP_ENV`
@@ -125,6 +126,24 @@ bash deploy/run_update_papers.sh --skip-collect --limit 1; echo "exit $?"
 
 `*/3`은 "매달 1·4·7…31일"이라 달이 바뀔 때(31일 → 1일)는 하루 만에 다시 돈다. 단계마다 처리 안 된 논문만 고르므로 문제는 없다.
 
+**챗봇 대화 하루 요약** (`summarize_chats`) — 매일 새벽 2시 30분. 기본으로 **어제(한국 날짜)** 대화를 요약하고
+7일 지난 원문을 지운다. 논문 갱신(4시)보다 먼저 끝나게 앞 시간에 둔다 (잠금 파일이 따로라 겹쳐도 막히지는 않지만
+메모리를 같이 쓰지 않게). 먼저 손으로 확인:
+
+```bash
+bash deploy/run_summarize_chats.sh --dry-run; echo "exit $?"   # LLM은 부르지만 저장·삭제는 안 한다
+```
+
+```cron
+30 2 * * * bash /home/ubuntu/mind-care/deploy/run_summarize_chats.sh >> /home/ubuntu/mindcare-cron.log 2>&1
+```
+
+- 하루를 빠뜨렸으면 그날만 다시: `bash deploy/run_summarize_chats.sh --date 2026-11-05` (같은 날은 덮어쓴다).
+  단, 원문은 7일만 남으므로 7일 안에 돌려야 한다.
+- 키나 `OPENAI_SUMMARY_MODEL`이 없으면 요약을 못 하므로 **원문도 지우지 않고** 종료 코드 2로 끝난다
+  (로그에 `설정 누락으로 삭제 건너뜀`). 설정을 고친 뒤 빠진 날을 `--date`로 다시 돌린다.
+  일부 사용자만 요약에 실패한 경우는 종료 코드 1이고 삭제는 그대로 한다.
+
 ## 6. 코드 업데이트
 
 ```bash
@@ -143,7 +162,7 @@ $DC exec -T db psql -U mindcare -d mindcare -v ON_ERROR_STOP=1 < backend/app/db/
 
 ```bash
 $DC logs --tail 100 backend                                   # API 서버
-$DC exec backend ls -l logs                                   # 배치 로그 목록 (update_papers_YYYY-MM-DD.log)
+$DC exec backend ls -l logs                                   # 배치 로그 목록 (update_papers_·summarize_chats_YYYY-MM-DD.log)
 $DC exec backend tail -n 50 logs/update_papers_2026-10-18.log
 tail -n 50 ~/mindcare-cron.log                                # cron 자체 오류 (docker 권한 등)
 free -h                                                       # 배치 중 메모리·스왑

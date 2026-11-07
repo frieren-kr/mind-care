@@ -78,12 +78,18 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 | `list_chat_turns(user_id, patient_id, *, before=None, limit=20)` | 화면용 `(ChatTurnRecord 목록, has_more)`. 답변 시각 `before` 미만 중 최신 limit개를 오래된 것부터. `ChatTurnRecord(turn_id, question, answer, sources, asked_at, answered_at)`. `GET /chat/{user_id}/history`가 쓴다 |
 | `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 메시지 limit개를 오래된 것부터 (메시지 단위. `/chat`은 위의 턴 단위 조회를 쓴다) |
 | `list_chat_threads_for_day(day)` | 그날 대화가 있었던 `(user_id, patient_id)` 목록 (요약 배치용) |
-| `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부, 시간순 (요약 배치용) |
+| `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부(메시지 단위), 시간순 |
+| `get_turns_for_day(user_id, patient_id, day)` | 그날(KST, **답변 시각** 기준) 완료된 질문·답변 쌍 `ChatTurn` 전부, 시간순. 제외 규칙은 `get_recent_chat_turns`와 같다 (요약 배치용) |
 | `save_daily_summary(user_id, patient_id, day, summary, model)` | 사용자·환자·날짜당 한 행, 다시 저장하면 덮어씀 |
 | `delete_old_chat_messages(days=7)` | 7일 지난 원문 삭제, 지운 행 수 반환. 요약은 남는다 |
 
 `POST /chat`은 답변 성공 시 저장하고, 저장이 실패해도 답변은 그대로 준다(로그만).
 매일 `python -m scripts.summarize_chats`(기본 어제, `--date`, `--dry-run`)가 요약 → 저장 → 7일 지난 원문 삭제를 한다.
+요약은 백엔드 담당(웅 님과 합의): 그날 질문·답변 쌍을 `OPENAI_SUMMARY_MODEL`로 일반 호출(Batch 아님) 한 번,
+하루 요약 300토큰 이내(Agent의 `chat_history_token_counter`로 셈, 넘으면 한 번 더 요청 → 그래도 넘으면 문장 단위로 자름).
+남길 내용이 없으면 저장하지 않는다. `model` 칸에는 실제 모델 이름.
+키·모델이 없어 요약을 아예 못 하면 원문도 지우지 않고 종료 코드 2(로그 `설정 누락으로 삭제 건너뜀`). 일부 사용자만 실패하면 종료 코드 1, 삭제는 진행. 요약 기준은 `scripts/summarize_chats.py`의 `SYSTEM_PROMPT`.
+로그에는 원문·요약문 없이 날짜·건수·사용자/환자 id만. 서버 cron은 [`deploy.md`](deploy.md) 5번.
 검증은 `python -m unittest tests.test_chat_store_db tests.test_summarize_chats tests.test_chat`.
 
 ### 기존 데이터 함수

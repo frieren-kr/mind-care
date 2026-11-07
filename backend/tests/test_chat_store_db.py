@@ -122,6 +122,21 @@ class ChatStoreDbTests(unittest.TestCase):
         self.assertEqual(sorted(chat_store.list_chat_threads_for_day(DAY), key=str),
                          sorted([(self.user, None), (self.user, self.patient)], key=str))
 
+    def test_turns_for_day_is_kst_by_answer_time(self):
+        start = datetime(2026, 11, 5, tzinfo=KST)
+        self.turn("전날 질문", "자정 답", start - timedelta(seconds=5), start)  # 답변 시각이 그날이면 그날 대화
+        self.turn("오후 질문", "오후 답", start + timedelta(hours=15), start + timedelta(hours=15, seconds=5))
+        self.turn("밤 질문", "다음날 답", start + timedelta(hours=23, minutes=59), start + timedelta(days=1))
+        self.turn("환자 질문", "환자 답", start + timedelta(hours=1), start + timedelta(hours=1, seconds=1),
+                  patient=self.patient)
+        self.insert("user", "옛 질문", start + timedelta(hours=2))  # turn_id 없음
+        self.insert("assistant", "옛 답", start + timedelta(hours=2))
+        self.insert("user", "답 없는 질문", start + timedelta(hours=3), turn=uuid4())
+        turns = chat_store.get_turns_for_day(self.user, None, DAY)
+        self.assertEqual([(t.question, t.answer) for t in turns], [("전날 질문", "자정 답"), ("오후 질문", "오후 답")])
+        self.assertEqual(turns[1].started_at, start + timedelta(hours=15))
+        self.assertEqual([t.question for t in chat_store.get_turns_for_day(self.user, self.patient, DAY)], ["환자 질문"])
+
     def test_daily_summary_overwrites_even_without_patient(self):
         for patient in (None, self.patient):
             chat_store.save_daily_summary(self.user, patient, DAY, "처음", "m1")
