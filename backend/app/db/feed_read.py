@@ -768,6 +768,32 @@ def get_latest_feed_batch(
     return FeedBatch(batch_id=batch_id, generated_at=generated_at, items=items)
 
 
+_PROFILE_CHANGED_SINCE = """
+    SELECT EXISTS (SELECT 1 FROM caregiver_profiles
+                    WHERE user_id = %(user_id)s AND updated_at > %(since)s)
+        OR EXISTS (SELECT 1 FROM patient_profiles
+                    WHERE caregiver_id = %(user_id)s
+                      AND (created_at > %(since)s OR updated_at > %(since)s))
+"""
+
+
+def profile_changed_since(user_id: UUID, since: datetime) -> bool:
+    """since 뒤에 간병인 프로필이 바뀌었거나 환자가 추가·수정됐는지 (쿼리 한 번, 읽기 전용).
+
+    AI 피드 저장본(generated_at = since)을 기간이 남아도 새로 만들지 정할 때 쓴다.
+    환자 삭제는 행이 사라져 여기서 알 수 없다 (docs/api.md "피드 저장본 갱신 조건" 참고).
+    복약·평가·진료·안전 기록 같은 하위 기록 변경도 보지 않는다 (환자 updated_at을 바꾸지 않는다).
+    caregiver_profiles는 PK(user_id), patient_profiles는 idx_patient_profiles_caregiver를 탄다.
+
+    Raises:
+        ValueError: since에 시간대가 없는 경우.
+    """
+    if since.tzinfo is None or since.utcoffset() is None:
+        raise ValueError("since에 시간대가 없습니다 (tz-aware datetime이어야 합니다).")
+    with get_connection() as conn:
+        return conn.execute(_PROFILE_CHANGED_SINCE, {"user_id": user_id, "since": since}).fetchone()[0]
+
+
 def get_recent_feed_papers(
     user_id: UUID,
     *,

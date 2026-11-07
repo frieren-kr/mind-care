@@ -12,6 +12,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from psycopg.errors import CheckViolation, NotNullViolation, UniqueViolation
 
 from app.db import chat_store
@@ -196,6 +197,34 @@ class ChatStoreDbTests(unittest.TestCase):
         self.assertEqual(chat_store.get_recent_chat_turns(self.user, self.patient, ago(5)), [])
         with self.assertRaises(ValueError):
             chat_store.get_recent_chat_turns(self.user, None, datetime(2026, 11, 7), 5)
+
+    def test_list_chat_turns_for_screen(self):
+        now = datetime.now(KST)
+
+        def ago(minutes):
+            return now - timedelta(minutes=minutes)
+
+        turns = [self.turn(f"q{i}", f"a{i}", ago(50 - i * 10), ago(49 - i * 10)) for i in range(4)]  # q0이 가장 오래됨
+        self.conn.execute("UPDATE chat_messages SET sources = %s WHERE turn_id = %s AND role = 'assistant'",
+                          (Jsonb([SOURCE]), turns[3]))
+        self.turn("환자 q", "환자 a", ago(5), ago(4), patient=self.patient)
+        self.insert("user", "옛 q", ago(3))  # turn_id 없음
+        self.insert("assistant", "옛 a", ago(3))
+        self.insert("user", "답 없는 q", ago(2), turn=uuid4())
+
+        page, more = chat_store.list_chat_turns(self.user, None, limit=2)
+        self.assertEqual(([t.question for t in page], more), (["q2", "q3"], True))  # 최신 2개, 오래된 것부터
+        self.assertEqual((page[1].turn_id, page[1].answer, page[1].sources), (turns[3], "a3", [SOURCE]))
+        self.assertEqual((page[0].asked_at, page[0].answered_at), (ago(30), ago(29)))
+        self.assertEqual(page[0].sources, [])
+        page, more = chat_store.list_chat_turns(self.user, None, before=page[0].answered_at, limit=2)
+        self.assertEqual(([t.question for t in page], more), (["q0", "q1"], False))
+        page, more = chat_store.list_chat_turns(self.user, None, limit=4)
+        self.assertEqual((len(page), more), (4, False))  # 딱 맞으면 has_more=false
+        self.assertEqual([t.question for t in chat_store.list_chat_turns(self.user, self.patient)[0]], ["환자 q"])
+        self.assertEqual(chat_store.list_chat_turns(uuid4(), None), ([], False))
+        with self.assertRaises(ValueError):
+            chat_store.list_chat_turns(self.user, None, before=datetime(2026, 11, 7))
 
     def test_daily_summaries_before_and_scope(self):
         for day, text in ((date(2026, 11, 4), "4일"), (DAY, "5일"), (date(2026, 11, 6), "6일")):

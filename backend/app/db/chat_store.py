@@ -44,6 +44,17 @@ class ChatTurn:
 
 
 @dataclass(frozen=True)
+class ChatTurnRecord:
+    """화면용 질문·답변 한 쌍 (GET /chat/{user_id}/history). sources는 답변 행의 출처 목록."""
+    turn_id: UUID
+    question: str
+    answer: str
+    sources: list[dict[str, Any]]
+    asked_at: datetime
+    answered_at: datetime
+
+
+@dataclass(frozen=True)
 class ChatDailySummary:
     summary_date: date  # 한국 날짜
     summary: str
@@ -105,20 +116,44 @@ def get_recent_chat_turns(user_id: UUID, patient_id: Optional[UUID], reference_t
     conn을 넘기면 그 트랜잭션 안에서 조회한다 (read_chat_history 참고).
     """
     _aware(reference_time, "reference_time")
+    rows = _select_turns(user_id, patient_id, reference_time, limit, conn)
+    return [ChatTurn(question, answer, asked, answered) for _, question, answer, _, asked, answered in rows]
+
+
+def list_chat_turns(user_id: UUID, patient_id: Optional[UUID], *, before: Optional[datetime] = None,
+                    limit: int = 20) -> tuple[list[ChatTurnRecord], bool]:
+    """화면에 그릴 대화 목록 (GET /chat/{user_id}/history). (턴 목록, has_more)를 돌려준다.
+
+    before(답변 시각 기준, 이 시각 미만)보다 이전에 완료된 쌍 중 최신 limit개를 골라
+    오래된 것부터 정렬해 준다. 더 불러오기는 받은 목록 첫 턴의 answered_at을 다음 before로 넘긴다.
+    has_more = 그보다 이전 쌍이 더 있는지 (limit+1개를 읽어 판단). 범위·제외 규칙은 get_recent_chat_turns와 같다.
+    7일 지난 원문은 이미 지워져 없다.
+    """
+    if before is not None:
+        _aware(before, "before")
+    rows = _select_turns(user_id, patient_id, before, limit + 1, None)
+    return [ChatTurnRecord(*row) for row in reversed(rows[:limit])], len(rows) > limit
+
+
+def _select_turns(user_id, patient_id, before, limit, conn) -> list[tuple]:
+    """완료된 질문·답변 쌍을 답변 시각 최신순으로. (turn_id, 질문, 답변, 출처, 질문 시각, 답변 시각)
+
+    turn_id로 질문·답변 행을 self-join 한다. turn_id가 NULL인 옛 행(012)과 짝이 없는 행은 빠진다.
+    """
     if limit < 1:
         raise ValueError("limit은 1 이상이어야 합니다")
     with _use(conn) as c:
-        rows = c.execute(
-            "SELECT q.content, a.content, q.created_at, a.created_at"
+        return c.execute(
+            "SELECT a.turn_id, q.content, a.content, a.sources, q.created_at, a.created_at"
             "  FROM chat_messages a"
             "  JOIN chat_messages q ON q.turn_id = a.turn_id AND q.role = 'user'"
             "   AND q.user_id = a.user_id AND q.patient_id IS NOT DISTINCT FROM a.patient_id"
-            " WHERE a.role = 'assistant' AND a.user_id = %s AND a.patient_id IS NOT DISTINCT FROM %s"
-            "   AND a.created_at < %s"
-            " ORDER BY a.created_at DESC, a.turn_id LIMIT %s",
-            (user_id, patient_id, reference_time, limit),
+            " WHERE a.role = 'assistant' AND a.user_id = %(user_id)s"
+            "   AND a.patient_id IS NOT DISTINCT FROM %(patient_id)s"
+            "   AND (%(before)s::timestamptz IS NULL OR a.created_at < %(before)s::timestamptz)"
+            " ORDER BY a.created_at DESC, a.turn_id LIMIT %(limit)s",
+            {"user_id": user_id, "patient_id": patient_id, "before": before, "limit": limit},
         ).fetchall()
-    return [ChatTurn(*row) for row in rows]
 
 
 def get_daily_summaries_before(user_id: UUID, patient_id: Optional[UUID], before_day: date,

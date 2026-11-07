@@ -1,4 +1,5 @@
-"""피드 저장본 함수(save_feed_batch / get_latest_feed_batch / get_recent_feed_papers) 테스트 (실 DB). 박주현 담당.
+"""피드 저장본 함수(save_feed_batch / get_latest_feed_batch / get_recent_feed_papers / profile_changed_since)
+테스트 (실 DB). 박주현 담당.
 
 실행 (backend/ 에서):  python -m unittest tests.test_feed_cache
 
@@ -10,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from app.db.connection import get_connection
-from app.db.feed_read import get_latest_feed_batch, get_recent_feed_papers, save_feed_batch
+from app.db.feed_read import get_latest_feed_batch, get_recent_feed_papers, profile_changed_since, save_feed_batch
 from app.feed_schemas import FeedItemIn
 
 EMAIL_PREFIX = "test-feed-cache-"
@@ -157,6 +158,62 @@ class RecentFeedPapersDbTests(_UserTestCase):
                 get_recent_feed_papers(self.user, **kw)
         save_feed_batch(self.user, [FeedItemIn(paper_id=PAPERS[0])])  # created_at = now()
         self.assertEqual([r.paper_id for r in get_recent_feed_papers(self.user)], [PAPERS[0]])
+
+
+
+class ProfileChangedSinceDbTests(_UserTestCase):
+    """저장본 이후 간병인 프로필·환자 변경 감지 (쿼리 한 번)."""
+
+    SINCE = datetime(2026, 11, 1, 12, tzinfo=timezone.utc)
+
+    def execute(self, query, params):
+        with get_connection() as conn:
+            cur = conn.execute(query, params)
+            row = cur.fetchone() if cur.description else None
+        return row[0] if row else None
+
+    def patient(self, created, updated, caregiver=None):
+        return self.execute("INSERT INTO patient_profiles (caregiver_id, created_at, updated_at)"
+                            " VALUES (%s, %s, %s) RETURNING id", (caregiver or self.user, created, updated))
+
+    def changed(self):
+        return profile_changed_since(self.user, self.SINCE)
+
+    def test_nothing_changed_and_exact_time_is_not_change(self):
+        self.assertFalse(self.changed())  # 프로필·환자 없음
+        self.patient(self.SINCE - timedelta(days=1), self.SINCE)
+        self.execute("INSERT INTO caregiver_profiles (user_id, updated_at) VALUES (%s, %s)", (self.user, self.SINCE))
+        self.assertFalse(self.changed())  # 같은 시각은 변경이 아니다 (저장본이 그 상태로 만들어졌다)
+
+    def test_caregiver_profile_updated_after(self):
+        self.execute("INSERT INTO caregiver_profiles (user_id, updated_at) VALUES (%s, %s)",
+                     (self.user, self.SINCE + timedelta(seconds=1)))
+        self.assertTrue(self.changed())
+
+    def test_patient_created_or_updated_after(self):
+        patient = self.patient(self.SINCE - timedelta(days=1), self.SINCE - timedelta(days=1))
+        self.assertFalse(self.changed())
+        self.execute("UPDATE patient_profiles SET updated_at = %s WHERE id = %s RETURNING id",
+                     (self.SINCE + timedelta(minutes=1), patient))
+        self.assertTrue(self.changed())
+        self.execute("UPDATE patient_profiles SET updated_at = %s WHERE id = %s RETURNING id",
+                     (self.SINCE - timedelta(days=1), patient))
+        self.patient(self.SINCE + timedelta(minutes=1), self.SINCE - timedelta(days=1))  # created_at만 이후
+        self.assertTrue(self.changed())
+
+    def test_other_users_patient_and_deleted_patient_are_not_seen(self):
+        other = self.execute("INSERT INTO users (name, email) VALUES (%s, %s) RETURNING id",
+                             ("다른 간병인", f"{EMAIL_PREFIX}{uuid4().hex[:12]}@example.com"))
+        self.patient(self.SINCE + timedelta(minutes=1), self.SINCE + timedelta(minutes=1), caregiver=other)
+        self.assertFalse(self.changed())
+        # 환자 삭제는 행이 사라져 감지하지 못한다 (알려진 한계, docs/api.md)
+        patient = self.patient(self.SINCE - timedelta(days=1), self.SINCE - timedelta(days=1))
+        self.execute("DELETE FROM patient_profiles WHERE id = %s RETURNING id", (patient,))
+        self.assertFalse(self.changed())
+
+    def test_naive_since_rejected(self):
+        with self.assertRaises(ValueError):
+            profile_changed_since(self.user, datetime(2026, 11, 1))
 
 
 if __name__ == "__main__":

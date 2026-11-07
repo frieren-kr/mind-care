@@ -507,6 +507,7 @@ class FeedCacheTests(unittest.TestCase):
             "app.api.recommendations.context_prepare": {"return_value": "{}"},
             "app.api.recommendations.feed_read.save_feed_batch": {"side_effect": save},
             "app.api.recommendations.feed_read.get_latest_feed_batch": {"side_effect": latest},
+            "app.api.recommendations.feed_read.profile_changed_since": {"return_value": False},
             "app.api.recommendations._now": {"side_effect": lambda: self.now},
         }.items():
             patcher = patch(target, **kw)
@@ -578,6 +579,29 @@ class FeedCacheTests(unittest.TestCase):
         with self.assertLogs("app.api.recommendations", "WARNING"):
             body = self.get()
         self.assertEqual((body["mode"], self.calls), ("ai", 1))
+
+    def test_profile_or_patient_change_regenerates_within_period(self):
+        first = self.get()
+        self.at(hours=1)
+        self.assertEqual(self.get()["generated_at"], first["generated_at"])
+        self.profile_changed_since.assert_called_with(self.user, self.T0)  # 저장본 generated_at 기준
+        self.profile_changed_since.return_value = True  # 프로필 수정·환자 추가/수정
+        body = self.get()
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(datetime.fromisoformat(body["generated_at"]), self.now)
+        self.profile_changed_since.return_value = False  # 새 저장본 이후로는 변경 없음
+        self.at(hours=2)
+        self.assertEqual(self.get()["generated_at"], body["generated_at"])
+        self.assertEqual(self.calls, 2)
+
+    def test_change_check_only_when_saved_feed_exists_and_failure_regenerates(self):
+        self.get()  # 저장본이 없었으니 확인 쿼리도 없다
+        self.profile_changed_since.assert_not_called()
+        self.profile_changed_since.side_effect = RuntimeError("PRIVATE 확인 실패")
+        with self.assertLogs("app.api.recommendations", "WARNING") as logs:
+            body = self.get()
+        self.assertEqual((body["mode"], self.calls), ("ai", 2))
+        self.assertNotIn("PRIVATE", "\n".join(logs.output))
 
     def test_refresh_ignores_period(self):
         self.get()

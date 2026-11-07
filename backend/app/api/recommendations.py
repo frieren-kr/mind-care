@@ -14,6 +14,8 @@ interests=수면관리&interests=돌봄스트레스   간병인 관심사를 추
 
 AI 피드 저장 기간 (10/14 회의): AI 결과는 feed_items에 묶음으로 저장하고, 기간(기본 3일) 안에는
 실행기를 다시 부르지 않고 저장본을 돌려준다. refresh=true면 기간과 상관없이 새로 만든다.
+저장본을 만든 뒤 간병인 프로필이 바뀌었거나 환자가 추가·수정됐으면 기간이 남아도 새로 만든다
+(feed_read.profile_changed_since, 쿼리 한 번). 환자 삭제는 아직 감지하지 못한다 (docs/api.md).
 검색 방식 결과는 저장하지 않는다.
 
 라우터 공통 의존성이 로그인·본인 확인을 실행기 초기화와 데이터 조회보다 먼저 수행한다.
@@ -121,10 +123,16 @@ def _now() -> datetime:
 
 
 def load_cached_feed(user_id: UUID) -> Optional[tuple[datetime, list[RecommendationItem]]]:
-    """기간 안의 저장본 (생성 시각, 항목). 없거나 읽기에 실패하면 None (→ 새로 만든다)."""
+    """기간 안의 저장본 (생성 시각, 항목). 없거나 읽기에 실패하면 None (→ 새로 만든다).
+
+    기간이 남아도 저장본을 만든 뒤 간병인 프로필이 바뀌었거나 환자가 추가·수정됐으면 None (새로 만든다).
+    """
     try:
         days = get_feed_cache_days(user_id)
         batch = feed_read.get_latest_feed_batch(user_id, max_age=timedelta(days=days), reference_time=_now())
+        if batch is not None and feed_read.profile_changed_since(user_id, batch.generated_at):
+            logger.info("피드 저장본 이후 프로필·환자 변경 → 새로 만든다")
+            return None
     except Exception as exc:  # 009 미적용 등. 저장본이 없을 때처럼 새로 만든다
         logger.warning("피드 저장본 읽기 실패 → 새로 만든다 (%s)", type(exc).__name__)
         return None
@@ -280,7 +288,8 @@ def get_recommendations(
       실패했거나 결과가 0건일 때의 대신 응답이다. 환자마다 영어 검색어를 최대 4줄 만들어 섞고 k줄까지 쓴다.
       `patient_id`를 주면 그 환자 검색어만 쓴다. 환자가 0명이면 일반 검색어 하나.
     - AI 결과는 저장되고, 저장 기간(기본 3일) 안에는 저장본을 그대로 준다 (`generated_at` = 처음 만든 시각).
-      `refresh=true`면 새로 만든다. 검색 방식 결과는 저장하지 않는다 (`generated_at`=null).
+      `refresh=true`면 새로 만든다. 저장본을 만든 뒤 간병인 프로필이 바뀌었거나 환자가 추가·수정됐으면
+      기간이 남아도 새로 만든다. 검색 방식 결과는 저장하지 않는다 (`generated_at`=null).
     - `patient_id`는 선택이다. 이 사용자의 환자가 아니면(없는 환자 포함) 404.
     - `interests`는 간병인이 요청에 지정한 관심사다. 공백·중복을 제거하고 영어 검색어 줄로 바꿔 환자 검색어와 섞는다 (전체 k줄까지).
       유효한 관심사가 있으면 검색 방식을 사용한다 (AI 저장본은 요청 관심사를 반영하지 않음).

@@ -23,7 +23,7 @@ from app.ai.agent.testing.fake_llm import FakeLLMClient
 from app.ai.agent.workflows.chat_execution import ChatExecutionV1
 from app.api import chat
 from app.api.chat_history import ChatStoreHistoryReader
-from app.db.chat_store import ChatDailySummary, ChatTurn
+from app.db.chat_store import ChatDailySummary, ChatTurn, ChatTurnRecord
 from app.auth.dependencies import get_current_user
 from app.auth_schemas import AuthUser
 from main import app
@@ -256,6 +256,78 @@ class ChatApiTests(unittest.TestCase):
         with patch.object(chat, "settings", fake_settings), patch.object(chat, "OpenAI") as sdk:
             self.assertIsNone(chat.get_chat_execution())
         sdk.assert_not_called()
+
+
+
+class ChatHistoryApiTests(unittest.TestCase):
+    """GET /chat/{user_id}/history. DB 없이 chat_store.list_chat_turns·is_caregiver_of를 가짜로."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+        self.addCleanup(app.dependency_overrides.clear)
+        user = AuthUser(id=USER_ID, name="간병인", email="a@example.com", feed_refresh_days=3)
+        app.dependency_overrides[get_current_user] = lambda: user
+        now = datetime(2026, 11, 7, 3, tzinfo=timezone.utc)
+        self.rows = [ChatTurnRecord(uuid4(), f"q{i}", f"a{i}", [EVIDENCE[1]] if i else [],
+                                    now + timedelta(minutes=i), now + timedelta(minutes=i, seconds=5))
+                     for i in range(2)]
+        for name, target, kw in (
+            ("turns", "app.api.chat.chat_store.list_chat_turns", {"return_value": (self.rows, True)}),
+            ("owner", "app.api.chat.user_functions.is_caregiver_of",
+             {"side_effect": lambda user_id, patient_id: (user_id, patient_id) == (USER_ID, PATIENT_ID)}),
+            ("db", "psycopg.connect", {"side_effect": AssertionError("Live DB forbidden")}),
+        ):
+            patcher = patch(target, **kw)
+            setattr(self, name, patcher.start())
+            self.addCleanup(patcher.stop)
+
+    def get(self, user_id=USER_ID, **params):
+        return self.client.get(f"/chat/{user_id}/history", params=params)
+
+    def test_turns_oldest_first_with_sources_and_has_more(self):
+        res = self.get()
+        self.assertEqual(res.status_code, 200)
+        body = res.json()
+        self.assertTrue(body["has_more"])
+        self.assertEqual([t["question"] for t in body["turns"]], ["q0", "q1"])  # chat_store 순서 그대로
+        self.assertEqual(body["turns"][1]["sources"], [EVIDENCE[1]])
+        self.assertEqual(body["turns"][0]["sources"], [])
+        self.assertEqual(set(body["turns"][0]), {"turn_id", "question", "answer", "sources", "asked_at", "answered_at"})
+        self.assertEqual(body["turns"][0]["turn_id"], str(self.rows[0].turn_id))
+        self.turns.assert_called_once_with(USER_ID, None, before=None, limit=20)
+        self.owner.assert_not_called()  # 환자 미선택이면 환자 확인 쿼리도 없다
+
+    def test_patient_scope_limit_and_before(self):
+        before = "2026-11-07T12:00:00+09:00"
+        res = self.get(patient_id=str(PATIENT_ID), limit=50, before=before)
+        self.assertEqual(res.status_code, 200)
+        self.turns.assert_called_once_with(USER_ID, PATIENT_ID, before=datetime.fromisoformat(before), limit=50)
+
+    def test_other_users_or_unknown_patient_404(self):
+        res = self.get(patient_id=str(uuid4()))
+        self.assertEqual(res.status_code, 404)
+        self.turns.assert_not_called()
+
+    def test_no_token_401_and_other_user_403(self):
+        self.assertEqual(self.get(user_id=uuid4()).status_code, 403)
+        app.dependency_overrides.pop(get_current_user)
+        res = self.get()
+        self.assertEqual((res.status_code, res.headers.get("WWW-Authenticate")), (401, "Bearer"))
+        self.turns.assert_not_called()
+
+    def test_invalid_query_422(self):
+        for params in ({"limit": 0}, {"limit": 51}, {"before": "2026-11-07T12:00:00"}, {"before": "어제"},
+                       {"patient_id": "not-a-uuid"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.get(**params).status_code, 422)
+        self.turns.assert_not_called()
+
+    def test_db_failure_503_without_leaking(self):
+        self.turns.side_effect = RuntimeError("PRIVATE db failure")
+        with self.assertLogs(chat.logger, "WARNING") as logs:
+            res = self.get()
+        self.assertEqual(res.status_code, 503)
+        self.assertNotIn("PRIVATE", res.text + "\n".join(logs.output))
 
 
 if __name__ == "__main__":

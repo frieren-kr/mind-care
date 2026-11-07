@@ -75,6 +75,7 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 | `get_recent_chat_turns(user_id, patient_id, reference_time, limit=5, *, conn=None)` | `reference_time`(시간대 필수) 전에 완료된 질문·답변 쌍 `ChatTurn`, 최신순. `turn_id` self-join이라 옛 행·짝 없는 행은 빠진다. 같은 완료 시각은 `turn_id` 순 |
 | `get_daily_summaries_before(user_id, patient_id, before_day, limit=7, *, conn=None)` | `before_day`(한국 날짜)보다 이전 하루 요약 `ChatDailySummary`, 최신 날짜부터 |
 | `read_chat_history(user_id, patient_id, reference_time, max_turns=5)` | 위 두 조회를 커넥션·트랜잭션 하나로. 요약은 `reference_time`의 KST 오늘 이전만. `(turns, summaries)` 반환, 오류는 그대로 올린다. `/chat`의 이전 대화 Reader(`app/api/chat_history.py`)가 쓴다 |
+| `list_chat_turns(user_id, patient_id, *, before=None, limit=20)` | 화면용 `(ChatTurnRecord 목록, has_more)`. 답변 시각 `before` 미만 중 최신 limit개를 오래된 것부터. `ChatTurnRecord(turn_id, question, answer, sources, asked_at, answered_at)`. `GET /chat/{user_id}/history`가 쓴다 |
 | `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 메시지 limit개를 오래된 것부터 (메시지 단위. `/chat`은 위의 턴 단위 조회를 쓴다) |
 | `list_chat_threads_for_day(day)` | 그날 대화가 있었던 `(user_id, patient_id)` 목록 (요약 배치용) |
 | `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부, 시간순 (요약 배치용) |
@@ -150,6 +151,7 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 | `save_profile_summary(user_id, period_start, period_end, summary=None, updated_tags=None)` | 월간 요약 1건. 같은 `(user_id, period_start, period_end)`면 **갱신(upsert)** | `profile_summaries` id (`UUID`) |
 | `save_feed_batch(user_id, items: list[FeedItemIn])` | AI 피드 한 묶음 (`paper_id, personal_reason?, category?, relevance_score?`). 목록 순서대로 `rank` 1부터. **트랜잭션 하나** — 없는 사용자·논문이 있으면 `ValueError`, 아무것도 저장 안 됨. 빈 목록도 `ValueError` | `SavedFeedBatch(batch_id, generated_at)` |
 | `get_latest_feed_batch(user_id, *, max_age: timedelta, reference_time)` | `reference_time`은 **tz-aware**. `created_at > reference_time - max_age`인 가장 최근 묶음 | `FeedBatch(batch_id, generated_at, items)` — items는 `rank` 순, 항목마다 `personal_reason, category, relevance_score, is_saved, paper: PaperDetailResponse`. 없으면 `None` |
+| `profile_changed_since(user_id, since)` | `since`는 **tz-aware** (보통 저장본 `generated_at`). 쿼리 한 번 | bool — `since` 이후 `caregiver_profiles.updated_at`이 바뀌었거나 이 사용자의 환자 `created_at`/`updated_at`이 이후면 True. 환자 삭제·하위 기록 변경은 감지하지 않는다 |
 | `get_recent_feed_papers(user_id, *, days=7, limit=50, reference_time=None)` | 읽기 전용. 기간은 `(reference_time - days, reference_time]` — 미래 시각의 행은 빠진다. `reference_time`은 **tz-aware**, `None`이면 지금. `days`·`limit`은 1 이상 정수(아니면 `ValueError`) | `list[FeedRecentPaper(paper_id, pmid?, title, last_recommended_at, times_recommended)]` — **논문별로 묶음**(같은 논문이 여러 묶음에 있어도 1개), 최근 추천 순, 최대 `limit`개. `pmid`는 `source='pubmed'`일 때만 값(아니면 `None`). 이력 없음·없는 사용자는 `[]` |
 
 **`get_recent_feed_papers()` 사용 예시** (Feed Agent가 같은 논문을 반복 추천하지 않게):

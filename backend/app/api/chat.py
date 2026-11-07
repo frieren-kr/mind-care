@@ -1,6 +1,7 @@
 """챗봇 API (박주현 담당, 10/28 회의).
 
-POST /chat/{user_id}   본문 {"message": "...", "patient_id": null}
+POST /chat/{user_id}           본문 {"message": "...", "patient_id": null}
+GET  /chat/{user_id}/history   ?patient_id=&limit=20&before=   저장된 대화(질문·답변 쌍) 목록, 화면용
 
 흐름 (웅 님 ChatWorkflow 3단계, app/ai/agent/README.md의 조립 인터페이스 그대로):
   ① get_user_profile_context()로 사용자·환자 확인 (404 판정)   [한슬님 함수]
@@ -22,12 +23,13 @@ status=upcoming)는 부르면 그 Tool만 실패하고 답변은 계속 만든�
 (api/users.py·recommendations.py와 같은 방식). 토큰 없음·만료 401, 남의 user_id 403, 남의 환자 404.
 """
 import logging
+from datetime import datetime
 from contextlib import suppress
 from functools import lru_cache
 from typing import Callable, Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from openai import OpenAI
 
 from app.ai.agent.clients.openai_client import OpenAIClient
@@ -42,7 +44,7 @@ from app.ai.agent.workflows.chat_history_context import chat_history_token_count
 from app.auth.dependencies import require_user_access
 from app.config import settings
 from app.db import chat_store, user_functions
-from app.schemas import ChatRequest, ChatResponse, ChatSource
+from app.schemas import ChatHistoryResponse, ChatHistoryTurn, ChatRequest, ChatResponse, ChatSource
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[Depends(require_
 _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."
 _UNAVAILABLE = "지금은 답변을 만들 수 없어요. 잠시 후 다시 시도해 주세요."
+_HISTORY_UNAVAILABLE = "지금은 대화 기록을 불러올 수 없어요. 잠시 후 다시 시도해 주세요."
 
 ChatExecution = Callable[[AgentContext, str], StructuredAgentResult]
 
@@ -176,3 +179,43 @@ def _save_turn(user_id: UUID, patient_id: Optional[UUID], question: str, respons
                                   [source.model_dump() for source in response.sources])
     except Exception as exc:
         logger.warning("챗봇 대화 저장 실패 — 답변은 그대로 보냄 (%s)", type(exc).__name__)
+
+
+@router.get(
+    "/{user_id}/history",
+    response_model=ChatHistoryResponse,
+    summary="저장된 챗봇 대화 목록",
+    responses={404: _example(_PATIENT_NOT_FOUND), 503: _example(_HISTORY_UNAVAILABLE)},
+)
+def get_chat_history(
+    user_id: UUID,
+    patient_id: Optional[UUID] = Query(None, description="선택. 없으면 환자를 고르지 않은 대화만, 있으면 그 환자 대화만"),
+    limit: int = Query(20, ge=1, le=50, description="최대 턴 수 (1~50)"),
+    before: Optional[datetime] = Query(
+        None, description="이 시각(답변 시각) 이전 대화만. 더 불러오기: 받은 첫 턴의 answered_at. 시간대 필수"),
+) -> ChatHistoryResponse:
+    """저장된 질문·답변 쌍을 **오래된 것부터 최신 순**으로 돌려준다 (화면에 그대로 그리면 된다).
+
+    - 권한은 POST /chat과 같다: 토큰 없음·만료 401, 남의 user_id 403, 남의 환자(없는 환자 포함) 404.
+    - 대화 원문은 7일만 보관한다. 그보다 오래된 대화는 나오지 않는다.
+    - `has_more=true`면 더 이전 대화가 있다. 첫 턴의 `answered_at`을 `before`로 다시 부른다.
+    - `before`에 시간대가 없으면 422 (`+09:00`의 `+`는 URL에서 `%2B`로 보낸다).
+    - 질문만 있고 답변이 없는 기록, 2026-11-07 이전 저장 방식(turn_id 없음)의 기록은 나오지 않는다.
+    """
+    if before is not None and (before.tzinfo is None or before.utcoffset() is None):
+        raise HTTPException(status_code=422, detail="before에는 시간대가 있어야 합니다 (예: 2026-11-07T12:00:00+09:00).")
+    try:
+        if patient_id is not None and not user_functions.is_caregiver_of(user_id, patient_id):
+            raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
+        turns, has_more = chat_store.list_chat_turns(user_id, patient_id, before=before, limit=limit)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("챗봇 대화 기록 조회 실패 → 503 (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail=_HISTORY_UNAVAILABLE) from None
+    return ChatHistoryResponse(has_more=has_more, turns=[
+        ChatHistoryTurn(turn_id=t.turn_id, question=t.question, answer=t.answer,
+                        sources=[ChatSource.model_validate(source) for source in t.sources],
+                        asked_at=t.asked_at, answered_at=t.answered_at)
+        for t in turns
+    ])

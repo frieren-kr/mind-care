@@ -34,6 +34,7 @@
 | `PATCH /users/{user_id}/feed-settings` | `api/users.py` | JSON `{"feed_refresh_days": 5}` 저장. 정수 1~7만 허용, 잘못된 입력은 422, 없는 사용자는 404 | `FeedSettingsOut` |
 | `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 | `POST /chat/{user_id}` | `api/chat.py` | 챗봇 질문 1개 → 답변 + 근거. 본문 `{"message": "...", "patient_id": null}` (`message` 1~4000자, `patient_id` 선택). 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404, 입력 오류는 422, AI를 못 쓰거나 실패하면 503. **최대 90초** 걸릴 수 있다 | `ChatResponse` |
+| `GET /chat/{user_id}/history?patient_id=&limit=20&before=` | `api/chat.py` | 저장된 챗봇 대화(질문·답변 쌍)를 **오래된 것부터 최신 순**으로. `patient_id` 없음 = 환자 미선택 대화만, 있으면 그 환자 대화만. `limit` 1~50(기본 20). `before`(시간대 필수)보다 이전 대화만 — 더 불러오기. **원문은 7일만 보관**. 토큰 없음 401, 남의 user_id 403, 남의 환자 404, 입력 오류 422, DB 오류 503 | `ChatHistoryResponse` |
 
 - `/feed…` 주소 3개(담당: 김한슬)는 [`users.md`](users.md) 참고.
 - `/feed/{user_id}`와 `/feed_user/{user_id}` 응답에는 최상위 `feed_refresh_days`를 포함한다.
@@ -102,6 +103,17 @@
       실행기가 없거나 실패하면 지금처럼 검색 방식으로 응답한다.
     - **검색 방식 결과는 저장하지 않는다.** 실행기가 `None`이면(지금 기본값) 저장본도 보지 않는다.
     - 저장본 읽기·저장이 실패해도(예: `009` 미적용) 경고 로그만 남기고, 새로 만들거나 저장 없이 응답한다.
+  - **피드 저장본 갱신 조건** (2026-11-07) — 기간이 남아 있어도 저장본 `generated_at` **이후에** 아래가 있으면 새로 만든다.
+    `feed_read.profile_changed_since(user_id, generated_at)` 쿼리 한 번(`EXISTS` 두 개)으로 확인하고, 저장본이 있을 때만 부른다.
+    확인이 실패하면 경고 로그 후 새로 만든다.
+    - 간병인 프로필(`caregiver_profiles.updated_at`)이 바뀜
+    - 그 사용자의 환자 중 `created_at` 또는 `updated_at`이 이후인 환자가 있음 (환자 추가·수정)
+    - 같은 시각은 변경이 아니다. 하위 기록(복약·평가·진료·안전 기록·돌봄 기록)은 환자 `updated_at`을 바꾸지 않아 보지 않는다.
+    - **환자 삭제는 아직 감지하지 못한다.** 행이 지워지면 남는 흔적이 없고(삭제 시각을 기록하는 칸·트리거가 없다),
+      저장본에도 그때의 환자 목록이 없어서 마이그레이션 없이는 판단할 수 없다. 지금 앱에는 환자 삭제 API도 없다.
+      제안 — 새 마이그레이션에서 `patient_profiles`에 `AFTER DELETE` 트리거로 `users`의 "환자 목록 변경 시각"을 찍고
+      위 쿼리에 `OR users.<그 칸> > generated_at`을 더한다 (쿼리 한 번 유지).
+    - 알려진 틈: AI가 프로필을 읽은 뒤 저장하기 전(수십 초)에 바뀐 내용은 `updated_at < generated_at`이라 다음 요청에서 잡히지 않는다.
   - `k`는 1~5 (AI 결과가 최대 5개). 404 판정은 두 방식 공통이고 AI를 부르기 전에 끝난다.
   - bge-m3는 **서버 시작 때 미리 불러온다**(`main.py` lifespan, 걸린 시간은 시작 로그에). `PRELOAD_EMBEDDING_MODEL=0`이면 건너뛰고 첫 요청 때 불러온다(테스트는 `tests/__init__.py`가 끈다). 예열이 실패해도 서버는 뜨고 경고만 남긴다.
   - 테스트: `backend/`에서 `python -m unittest tests.test_recommendations` (실 DB 필요. 저장 기간은 `FeedCacheTests`가 DB 없이 확인).
@@ -133,6 +145,19 @@
      "sources": [{"evidence_type": "new_research", "title": "…", "pmid": "12345678", "doi": null,
                   "journal": "…", "publication_year": 2025, "study_type": "rct", "organization": null,
                   "source_url": null, "full_text_available": false}]}
+    ```
+  - **대화 조회 `GET /chat/{user_id}/history`** (2026-11-07) — 화면이 저장된 대화를 다시 그릴 때 쓴다.
+    - `chat_store.list_chat_turns()`: `turn_id`로 질문·답변 행을 묶은 쌍만. `turn_id`가 없는 옛 행(013 이전 저장분)과
+      답변 없는 질문은 빠진다. 범위는 `/chat` 이전 대화 기억과 같은 `IS NOT DISTINCT FROM`.
+    - **원문은 7일만 보관한다** (`scripts/summarize_chats.py`가 매일 지운다). 7일 지난 대화는 나오지 않고 하루 요약은 이 API로 주지 않는다.
+    - 더 불러오기: 받은 `turns[0].answered_at`을 `before`로 다시 부른다 (`has_more=false`면 끝).
+      `before`는 시간대가 있어야 하고(`+09:00`의 `+`는 URL에서 `%2B`), 없으면 422.
+    - 권한은 `POST /chat`과 같다 (`require_user_access` 후 `patient_id`가 있으면 `is_caregiver_of()`로 404).
+    ```json
+    // GET /chat/{user_id}/history?limit=2
+    {"turns": [{"turn_id": "…", "question": "어머니가 밤에 잠을 못 주무세요", "answer": "…", "sources": [],
+                "asked_at": "2026-11-07T21:03:10.120+09:00", "answered_at": "2026-11-07T21:03:10.121+09:00"}],
+     "has_more": false}
     ```
   - 테스트: `backend/`에서 `python -m unittest tests.test_chat` (DB·실제 LLM 없이 가짜 실행기·가짜 LLM),
     DB 쪽은 `tests.test_chat_store_db`(실 DB, 012·013 적용 확인).
@@ -167,6 +192,8 @@
   `generated_at?`(★2026-10-15 추가, tz 포함 시각) — 저장된 AI 피드 묶음의 생성 시각. 저장본을 다시 줄 때도 **처음 만든 시각**이다.
   `search`이거나 저장에 실패했으면 `None`. 화면에서 "○일 전 추천" 표시에 쓸 수 있다.
 - **ChatResponse** (`POST /chat`): `answer`(str), `sources`(`ChatSource` 목록 — **답변이 인용한 순서 그대로**, 0개도 정상).
+- **ChatHistoryResponse** (`GET /chat/{user_id}/history`): `turns`(오래된 것부터), `has_more`(bool).
+  `ChatHistoryTurn` = `turn_id, question, answer, sources(ChatSource 목록), asked_at, answered_at`(tz 포함 시각).
   - **ChatSource** = AI 쪽 `outputs.ResolvedEvidence`에서 `source_ref`만 뺀 것 (화면 `frontend/src/types/index.ts`의 `ChatSource`와 같다):
     `evidence_type`(`new_research`/`guideline`), `title`, `pmid?, doi?, journal?, publication_year?, study_type?, organization?, source_url?`, `full_text_available`.
     검색 원본에서 서버가 복사한 값이고 없는 값은 `null` 그대로다.

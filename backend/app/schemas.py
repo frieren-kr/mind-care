@@ -432,6 +432,24 @@ class ChatResponse(BaseModel):
     sources: list[ChatSource] = Field(description="답변이 인용한 순서 그대로. 근거 없이 답하면 빈 목록")
 
 
+class ChatHistoryTurn(BaseModel):
+    """GET /chat/{user_id}/history 의 질문·답변 한 쌍."""
+
+    turn_id: UUID
+    question: str
+    answer: str
+    sources: list[ChatSource] = Field(description="그 답변이 인용한 출처 (POST /chat 응답과 같은 형식)")
+    asked_at: datetime = Field(description="질문 저장 시각")
+    answered_at: datetime = Field(description="답변 저장 시각. 더 불러오기의 before에 쓴다")
+
+
+class ChatHistoryResponse(BaseModel):
+    """GET /chat/{user_id}/history 응답. turns는 오래된 것부터 최신 순."""
+
+    turns: list[ChatHistoryTurn]
+    has_more: bool = Field(description="turns보다 이전 대화가 더 있으면 true (첫 턴의 answered_at을 before로)")
+
+
 # ------------------------------------------------------------
 # 근거 등급 전용 (paper_analysis의 study_type / evidence_level) — 2026-10-09 추가
 # 등급(김현서)과 요약(허웅)이 같은 줄을 쓰기 때문에, 서로의 칸을 지우지 않게 경로를 나눴다.
