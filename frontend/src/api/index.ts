@@ -5,6 +5,7 @@ import { ApiError, request } from '@/api/client';
 import { clearSession, getSession, saveSession, updateSessionUser } from '@/api/session';
 import type {
   AuthUser,
+  ChatHistoryResponse,
   ChatResponse,
   FeedSettings,
   LoginResponse,
@@ -145,6 +146,20 @@ export async function updateUserName(userId: string, name: string): Promise<{ id
   const session = getSession();
   if (session) updateSessionUser({ ...session.user, name: saved.name });
   return saved;
+}
+
+/**
+ * 지난 챗봇 대화 — GET /chat/{user_id}/history?patient_id=&limit=&before=
+ * patient_id가 없으면 환자를 고르지 않은 대화만, 있으면 그 환자 대화만 (POST /chat과 같은 범위). 원문은 7일만 보관.
+ */
+export function getChatHistory(
+  userId: string,
+  patientId: string | null,
+  options: { before?: string; limit?: number } = {},
+): Promise<ChatHistoryResponse> {
+  return request(`/chat/${userId}/history`, {
+    query: { patient_id: patientId, limit: options.limit, before: options.before },
+  });
 }
 
 /** PATCH /users/{user_id}/feed-settings — 피드 갱신 주기(1~7일) 저장 */

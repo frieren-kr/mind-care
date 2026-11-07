@@ -1,9 +1,9 @@
 import { useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
-import { currentUserId, getUserProfile, sendChatMessage } from '@/api';
+import { currentUserId, getChatHistory, getUserProfile, sendChatMessage } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Chip, Disclaimer, EvidenceBadge, SectionLabel, TextField } from '@/components/ui';
@@ -11,7 +11,35 @@ import { studyTypeLabel } from '@/constants/labels';
 import { MaxContentWidth, Radius, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useTheme } from '@/hooks/use-theme';
-import type { ChatMessage, ChatSource } from '@/types';
+import type { ChatHistoryTurn, ChatMessage, ChatSource } from '@/types';
+
+/** 지난 대화를 한 번에 불러오는 턴 수 (서버 최대 50) */
+const HISTORY_PAGE = 20;
+
+/** 대화별 지난 대화 불러오기 상태 */
+type HistoryState = {
+  status: 'loading' | 'done' | 'error';
+  hasMore: boolean;
+  /** 가장 오래된 턴의 답변 시각 = 더 불러오기의 before */
+  oldest?: string;
+  loadingMore?: boolean;
+};
+
+/** 저장된 질문·답변 쌍 → 말풍선 두 개 */
+function turnsToMessages(turns: ChatHistoryTurn[]): ChatMessage[] {
+  return turns.flatMap((t) => [
+    { id: `h-${t.turn_id}-q`, role: 'user' as const, text: t.question, at: t.asked_at },
+    { id: `h-${t.turn_id}-a`, role: 'assistant' as const, text: t.answer, sources: t.sources, at: t.answered_at },
+  ]);
+}
+
+/** 날짜 구분선 글자: '11월 7일 (토)'. 시각이 없거나 잘못되면 null */
+function dayLabel(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getMonth() + 1}월 ${d.getDate()}일 (${'일월화수목금토'[d.getDay()]})`;
+}
 
 const suggestedQuestions = ['밤에 잠을 안 주무세요', '식사를 거부하세요', '간병이 너무 지쳐요'];
 
@@ -111,7 +139,9 @@ export default function ChatScreen() {
   // 어느 분에 대한 질문인지. 고르면 서버가 그분의 기록(프로필·복약·진료·검사·안전사고·돌봄 기록) Tool을 붙인다.
   // undefined = 아직 안 고름 → 돌보는 분이 1명이면 그분, 아니면 '기본'(특정 환자 없이)
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
-  const { data: profile } = useApi(loadProfile);
+  const { data: profile, error: profileError } = useApi(loadProfile);
+  // 돌보는 분 목록을 받아야 기본 대상(1명이면 그분)이 정해진다. 그 전에 지난 대화를 부르면 엉뚱한 대화를 한 번 더 부른다
+  const profileSettled = profile !== null || profileError !== null;
   const patients = profile?.patients ?? [];
   const [chosenPatient, setChosenPatient] = useState<string | null | undefined>(undefined);
   const patientId = chosenPatient !== undefined ? chosenPatient : patients.length === 1 ? patients[0].patient.id : null;
@@ -124,6 +154,49 @@ export default function ChatScreen() {
     setThreads((t) => ({ ...t, [key]: update(t[key] ?? []) }));
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
+
+  // 지난 대화 (GET /chat/{user_id}/history). 대화(환자)마다 처음 열 때 한 번 불러와 앞에 붙인다
+  const [history, setHistory] = useState<Record<string, HistoryState>>({});
+  const requested = useRef(new Set<string>());
+  // 이전 대화를 위에 붙일 때는 맨 아래로 스크롤하지 않는다
+  const keepScroll = useRef(false);
+
+  const loadHistory = useCallback(async (key: string, pid: string | null, before?: string) => {
+    setHistory((h) => ({
+      ...h,
+      [key]: before ? { ...h[key], loadingMore: true } : { status: 'loading', hasMore: false },
+    }));
+    try {
+      const res = await getChatHistory(currentUserId(), pid, { limit: HISTORY_PAGE, before });
+      const older = turnsToMessages(res.turns);
+      const ids = new Set(older.map((m) => m.id));
+      if (before) keepScroll.current = true;
+      setThreads((t) => ({ ...t, [key]: [...older, ...(t[key] ?? []).filter((m) => !ids.has(m.id))] }));
+      setHistory((h) => ({
+        ...h,
+        [key]: { status: 'done', hasMore: res.has_more, oldest: res.turns[0]?.answered_at ?? h[key]?.oldest },
+      }));
+    } catch {
+      // 지난 대화를 못 불러와도 새 질문은 할 수 있다. 더 불러오기 실패면 원래 상태로 둔다
+      setHistory((h) => ({
+        ...h,
+        [key]: before ? { ...h[key], loadingMore: false } : { status: 'error', hasMore: false },
+      }));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!profileSettled || requested.current.has(threadKey)) return;
+    requested.current.add(threadKey);
+    loadHistory(threadKey, patientId);
+  }, [profileSettled, threadKey, patientId, loadHistory]);
+
+  const retryHistory = () => loadHistory(threadKey, patientId);
+  const loadOlder = () => {
+    const h = history[threadKey];
+    if (h?.oldest && !h.loadingMore) loadHistory(threadKey, patientId, h.oldest);
+  };
+  const historyState = history[threadKey];
 
   // 논문 상세의 '이 연구에 대해 질문하기'로 들어오면 질문을 미리 채운다 (보내기는 사용자가 누른다)
   const { paperTitle } = useLocalSearchParams<{ paperTitle?: string }>();
@@ -140,10 +213,10 @@ export default function ChatScreen() {
     const key = threadKey;
     setInput('');
     setPending(true);
-    setMessages((m) => [...m.filter((x) => !x.failed), { id: nextId('u'), role: 'user', text }], key);
+    setMessages((m) => [...m.filter((x) => !x.failed), { id: nextId('u'), role: 'user', text, at: new Date().toISOString() }], key);
     try {
       const res = await sendChatMessage(currentUserId(), text, patientId);
-      setMessages((m) => [...m, { id: nextId('a'), role: 'assistant', text: res.answer, sources: res.sources }], key);
+      setMessages((m) => [...m, { id: nextId('a'), role: 'assistant', text: res.answer, sources: res.sources, at: new Date().toISOString() }], key);
     } catch (e) {
       setMessages(
         (m) => [
@@ -165,14 +238,52 @@ export default function ChatScreen() {
     send(lastUser.text);
   };
 
-  const empty = messages.length === 0;
+  // 지난 대화를 불러오는 중에는 첫 안내를 띄우지 않는다 (불러온 뒤 대화가 있으면 사라져서 깜빡인다)
+  const empty = messages.length === 0 && historyState?.status !== 'loading';
 
   return (
     <View style={[styles.container, { backgroundColor: theme.background }]}>
       <ScrollView
         ref={scrollRef}
         contentContainerStyle={styles.list}
-        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}>
+        onContentSizeChange={() => {
+          if (keepScroll.current) {
+            keepScroll.current = false;
+            return;
+          }
+          scrollRef.current?.scrollToEnd({ animated: true });
+        }}>
+        {/* 지난 대화: 불러오는 중 / 실패 / 더 불러오기 / 보관 기간 안내 */}
+        {historyState?.status === 'loading' ? (
+          <View style={styles.historyRow}>
+            <ActivityIndicator color={theme.primary} />
+            <ThemedText type="small" themeColor="textSecondary">
+              지난 대화를 불러오고 있어요
+            </ThemedText>
+          </View>
+        ) : null}
+        {historyState?.status === 'error' ? (
+          <View style={styles.historyRow}>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.flex}>
+              지난 대화를 불러오지 못했어요.
+            </ThemedText>
+            <Button label="다시 시도" variant="secondary" onPress={retryHistory} />
+          </View>
+        ) : null}
+        {historyState?.status === 'done' && historyState.hasMore ? (
+          <Button
+            label={historyState.loadingMore ? '불러오는 중…' : '이전 대화 더 보기'}
+            variant="secondary"
+            disabled={historyState.loadingMore}
+            onPress={loadOlder}
+          />
+        ) : null}
+        {historyState?.status === 'done' && !historyState.hasMore && messages.some((m) => m.id.startsWith('h-')) ? (
+          <ThemedText type="small" themeColor="textSecondary" style={styles.center}>
+            대화는 최근 7일 동안 보관돼요
+          </ThemedText>
+        ) : null}
+
         {empty ? (
           <View style={styles.intro}>
             <SectionLabel>마인드 케어에게 묻기</SectionLabel>
@@ -188,9 +299,25 @@ export default function ChatScreen() {
           </View>
         ) : null}
 
-        {messages.map((m) => (
-          <Bubble key={m.id} message={m} onRetry={m.failed ? retry : undefined} />
-        ))}
+        {messages.map((m, index) => {
+          // 날짜가 바뀌는 곳마다 구분선
+          const day = dayLabel(m.at);
+          const prevDay = index > 0 ? dayLabel(messages[index - 1].at) : null;
+          return (
+            <View key={m.id} style={styles.messageBlock}>
+              {day && day !== prevDay ? (
+                <View style={styles.dayRow}>
+                  <View style={[styles.dayLine, { backgroundColor: theme.border }]} />
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {day}
+                  </ThemedText>
+                  <View style={[styles.dayLine, { backgroundColor: theme.border }]} />
+                </View>
+              ) : null}
+              <Bubble message={m} onRetry={m.failed ? retry : undefined} />
+            </View>
+          );
+        })}
 
         {pending ? (
           <View style={[styles.bubble, styles.assistant, { backgroundColor: theme.backgroundElement, borderColor: theme.border }]}>
@@ -263,6 +390,29 @@ const styles = StyleSheet.create({
     width: '100%',
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
+  },
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  flex: {
+    flex: 1,
+  },
+  center: {
+    textAlign: 'center',
+  },
+  messageBlock: {
+    gap: Spacing.three,
+  },
+  dayRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  dayLine: {
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
   },
   intro: {
     gap: Spacing.two,

@@ -225,6 +225,22 @@ export type ChatResponse = {
   sources: ChatSource[];
 };
 
+/** GET /chat/{user_id}/history 의 질문·답변 한 쌍 (ChatHistoryTurn). 시각은 시간대 포함 ISO */
+export type ChatHistoryTurn = {
+  turn_id: string;
+  question: string;
+  answer: string;
+  sources: ChatSource[];
+  asked_at: string;
+  answered_at: string;
+};
+
+/** GET /chat/{user_id}/history — turns는 오래된 것부터. has_more면 turns[0].answered_at을 before로 더 불러온다 */
+export type ChatHistoryResponse = {
+  turns: ChatHistoryTurn[];
+  has_more: boolean;
+};
+
 export type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
@@ -233,5 +249,7 @@ export type ChatMessage = {
   sources?: ChatSource[];
   /** 답변을 받지 못한 경우 (오류 안내 말풍선) */
   failed?: boolean;
+  /** 보낸·받은 시각 (ISO). 날짜 구분선에 쓴다 */
+  at?: string;
 };
 
