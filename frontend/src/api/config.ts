@@ -9,8 +9,3 @@ const DEFAULT_API_URL = Platform.OS === 'android' ? 'http://10.0.2.2:8000' : 'ht
 
 export const API_URL = (process.env.EXPO_PUBLIC_API_BASE_URL || DEFAULT_API_URL).replace(/\/+$/, '');
 
-/**
- * 로그인 기능 전까지 쓰는 간병인 id (users.id).
- * backend/에서 `python -m scripts.list_users`로 확인해 EXPO_PUBLIC_DEV_USER_ID에 넣는다.
- */
-export const DEV_USER_ID = process.env.EXPO_PUBLIC_DEV_USER_ID?.trim() || null;

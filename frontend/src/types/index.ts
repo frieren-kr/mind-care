@@ -166,6 +166,23 @@ export type UserProfileContext = {
   generated_at: string;
 };
 
+/** GET /auth/me, 로그인 응답의 user (auth_schemas.AuthUser) */
+export type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+  feed_refresh_days: number;
+};
+
+/** POST /auth/login (LoginOut). expires_at은 ISO 시각 (기본 15분 뒤) */
+export type LoginResponse = {
+  access_token: string;
+  token_type: 'bearer';
+  expires_in: number;
+  expires_at: string;
+  user: AuthUser;
+};
+
 /** GET·PATCH /users/{user_id}/feed-settings */
 export type FeedSettings = {
   user_id: string;

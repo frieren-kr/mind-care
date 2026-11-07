@@ -2,13 +2,15 @@ import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useRef, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
-import { currentUserId, getUserProfile, updateFeedSettings } from '@/api';
+import { NAME_MAX_LENGTH, currentUserId, getUserProfile, logout, updateFeedSettings, updateUserName } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, Chip, ErrorView, LoadingView, Screen } from '@/components/ui';
+import { Button, Card, Chip, ErrorView, LoadingView, Screen, TextField } from '@/components/ui';
 import { Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
+import { useAuth } from '@/hooks/use-auth';
 import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
+import { useTheme } from '@/hooks/use-theme';
 import type { PatientContext } from '@/types';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
@@ -50,6 +52,88 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
   );
 }
 
+/** 이름(닉네임) 보기·수정. 홈 인사말 등 다른 화면은 다시 불러올 때 새 이름이 나온다 */
+function NameCard({ name, onSaved }: { name: string; onSaved: () => void }) {
+  const theme = useTheme();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trimmed = draft.trim();
+
+  const startEdit = () => {
+    setDraft(name);
+    setError(null);
+    setEditing(true);
+  };
+
+  const save = async () => {
+    if (saving) return;
+    if (!trimmed) {
+      setError('이름을 입력해 주세요.');
+      return;
+    }
+    if (trimmed === name) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await updateUserName(currentUserId(), trimmed);
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      setError(toApiError(e).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <Card>
+        <View style={styles.headerRow}>
+          <ThemedText type="subtitle" style={styles.flex}>
+            {name}님
+          </ThemedText>
+          <Button label="이름 수정" variant="secondary" onPress={startEdit} />
+        </View>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <ThemedText type="smallBold">앱에서 부를 이름</ThemedText>
+      <TextField
+        value={draft}
+        onChangeText={setDraft}
+        placeholder="이름 또는 별명"
+        accessibilityLabel="이름"
+        maxLength={NAME_MAX_LENGTH}
+        autoFocus
+        returnKeyType="done"
+        onSubmitEditing={save}
+        editable={!saving}
+      />
+      {error ? (
+        <ThemedText type="small" accessibilityRole="alert" style={{ color: theme.accent }}>
+          {error}
+        </ThemedText>
+      ) : null}
+      <View style={styles.headerRow}>
+        <View style={styles.flex}>
+          <Button label="취소" variant="secondary" onPress={() => setEditing(false)} disabled={saving} />
+        </View>
+        <View style={styles.flex}>
+          <Button label={saving ? '저장하는 중…' : '저장'} onPress={save} disabled={saving || !trimmed} />
+        </View>
+      </View>
+    </Card>
+  );
+}
+
 export default function MyScreen() {
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error, loading, reload } = useApi(loadProfile);
@@ -65,6 +149,8 @@ export default function MyScreen() {
     }, [reload]),
   );
   const { scale: textScale, setScale: setTextScale } = useTextScale();
+  const { session } = useAuth();
+  const [loggingOut, setLoggingOut] = useState(false);
   const [savedDays, setSavedDays] = useState<number | null>(null);
   const [savingDays, setSavingDays] = useState<number | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -91,13 +177,8 @@ export default function MyScreen() {
 
       {profile ? (
         <>
-          <Card>
-            <ThemedText type="subtitle">{profile.name}님</ThemedText>
-            <ThemedText themeColor="textSecondary">
-              간병인
-              {profile.caregiver_profile?.relationship ? ` · ${profile.caregiver_profile.relationship}` : ''}
-            </ThemedText>
-          </Card>
+          {/* 관계(며느리 등)는 화면에는 안 보여 주지만 AI 추천·챗봇 입력에는 그대로 쓰인다 */}
+          <NameCard name={profile.name} onSaved={() => reload()} />
 
           <View style={styles.headerRow}>
             <ThemedText type="subtitle" style={styles.flex}>
@@ -164,6 +245,22 @@ export default function MyScreen() {
         <ThemedText type="subtitle">도움이 필요하면</ThemedText>
         <ThemedText>치매상담콜센터 1899-9988 (24시간)</ThemedText>
         <ThemedText>가까운 치매안심센터에서 무료 검사를 받을 수 있어요</ThemedText>
+      </Card>
+
+      {/* 프로필을 못 불러와도(토큰 문제 등) 로그아웃은 할 수 있어야 해서 맨 아래 따로 둔다 */}
+      <Card>
+        <ThemedText type="subtitle">계정</ThemedText>
+        {session ? <ThemedText themeColor="textSecondary">{session.user.email}</ThemedText> : null}
+        <Button
+          label={loggingOut ? '로그아웃하는 중…' : '로그아웃'}
+          variant="secondary"
+          disabled={loggingOut}
+          onPress={() => {
+            setLoggingOut(true);
+            // 끝나면 세션이 지워져 로그인 화면으로 바뀐다 (이 화면은 닫힌다)
+            logout();
+          }}
+        />
       </Card>
     </Screen>
   );

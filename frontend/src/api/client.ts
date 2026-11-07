@@ -1,4 +1,5 @@
 import { API_URL } from '@/api/config';
+import { clearSession, getSession } from '@/api/session';
 
 /** 화면에 그대로 보여줄 수 있는 오류. status가 없으면 서버에 닿지 못한 경우다. */
 export class ApiError extends Error {
@@ -22,6 +23,8 @@ type RequestOptions = {
   body?: unknown;
   /** 첫 추천 요청은 임베딩 모델을 불러오느라 오래 걸려서 넉넉하게 둔다 */
   timeoutMs?: number;
+  /** false면 토큰을 보내지 않고, 401이 와도 로그아웃하지 않는다 (로그인 요청: 401 = 비밀번호 틀림) */
+  auth?: boolean;
 };
 
 function buildUrl(path: string, query: RequestOptions['query']): string {
@@ -46,14 +49,22 @@ async function errorMessage(response: Response): Promise<string> {
   } catch {
     // 본문이 JSON이 아니면 상태 코드로 안내한다
   }
+  if (response.status === 401) return '로그인이 필요해요. 다시 로그인해 주세요.';
+  if (response.status === 403) return '본인의 정보만 볼 수 있어요.';
   if (response.status === 404) return '요청한 정보를 찾을 수 없어요.';
+  if (response.status === 409) return '이미 가입된 이메일이나 휴대폰 번호예요.';
+  if (response.status === 429) return '요청이 너무 많아요. 잠시 후 다시 시도해 주세요.';
   if (response.status === 422) return '요청 형식이 올바르지 않아요.';
   if (response.status >= 500) return '서버에 문제가 생겼어요. 잠시 후 다시 시도해 주세요.';
   return `요청에 실패했어요. (${response.status})`;
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', query, body, timeoutMs = 30_000 } = options;
+  const { method = 'GET', query, body, timeoutMs = 30_000, auth = true } = options;
+  const token = auth ? getSession()?.accessToken : undefined;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (token) headers.Authorization = `Bearer ${token}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -61,7 +72,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   try {
     response = await fetch(buildUrl(path, query), {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
@@ -76,6 +87,9 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   }
 
   if (!response.ok) {
+    // 토큰 만료·로그아웃된 세션: 저장된 세션을 지우면 _layout이 로그인 화면으로 보낸다.
+    // 요청 도중 다시 로그인했으면(토큰이 바뀌었으면) 새 세션은 지우지 않는다
+    if (response.status === 401 && token && getSession()?.accessToken === token) clearSession();
     throw new ApiError(await errorMessage(response), response.status);
   }
   return (await response.json()) as T;
