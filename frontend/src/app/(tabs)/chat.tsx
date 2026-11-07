@@ -1,14 +1,15 @@
 import { useLocalSearchParams } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
-import { currentUserId, sendChatMessage } from '@/api';
+import { currentUserId, getUserProfile, sendChatMessage } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Chip, Disclaimer, EvidenceBadge, SectionLabel, TextField } from '@/components/ui';
 import { studyTypeLabel } from '@/constants/labels';
 import { MaxContentWidth, Radius, Spacing } from '@/constants/theme';
+import { useApi } from '@/hooks/use-api';
 import { useTheme } from '@/hooks/use-theme';
 import type { ChatMessage, ChatSource } from '@/types';
 
@@ -19,6 +20,9 @@ const MAX_QUESTION_LENGTH = 4000;
 
 // 면책 문구는 UI 고정 책임이다 (agent README)
 const CHAT_DISCLAIMER = '답변은 수집된 논문과 공식 지침을 바탕으로 한 정보이며, 의학적 진단이나 치료를 대신하지 않습니다.';
+
+/** 환자를 고르지 않은 대화의 키. 서버도 patient_id 없음끼리 대화를 이어 간다 (chat_history.py) */
+const NO_PATIENT = 'none';
 
 let messageSeq = 0;
 const nextId = (prefix: string) => `${prefix}-${Date.now()}-${messageSeq++}`;
@@ -104,7 +108,20 @@ function Bubble({ message, onRetry }: { message: ChatMessage; onRetry?: () => vo
 export default function ChatScreen() {
   const theme = useTheme();
   const scrollRef = useRef<ScrollView>(null);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // 어느 분에 대한 질문인지. 고르면 서버가 그분의 기록(프로필·복약·진료·검사·안전사고·돌봄 기록) Tool을 붙인다.
+  // undefined = 아직 안 고름 → 돌보는 분이 1명이면 그분, 아니면 '특정 분 없이'
+  const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
+  const { data: profile } = useApi(loadProfile);
+  const patients = profile?.patients ?? [];
+  const [chosenPatient, setChosenPatient] = useState<string | null | undefined>(undefined);
+  const patientId = chosenPatient !== undefined ? chosenPatient : patients.length === 1 ? patients[0].patient.id : null;
+
+  // 서버가 대화를 환자별로 따로 저장·기억하므로 화면도 환자별로 따로 보여 준다
+  const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({});
+  const threadKey = patientId ?? NO_PATIENT;
+  const messages = threads[threadKey] ?? [];
+  const setMessages = (update: (m: ChatMessage[]) => ChatMessage[], key = threadKey) =>
+    setThreads((t) => ({ ...t, [key]: update(t[key] ?? []) }));
   const [input, setInput] = useState('');
   const [pending, setPending] = useState(false);
 
@@ -119,17 +136,22 @@ export default function ChatScreen() {
   const send = async (raw: string) => {
     const text = raw.trim();
     if (!text || pending) return;
+    // 답을 기다리는 동안 대상은 못 바꾸지만, 혹시 바뀌어도 보낸 쪽 대화에 답을 넣는다
+    const key = threadKey;
     setInput('');
     setPending(true);
-    setMessages((m) => [...m.filter((x) => !x.failed), { id: nextId('u'), role: 'user', text }]);
+    setMessages((m) => [...m.filter((x) => !x.failed), { id: nextId('u'), role: 'user', text }], key);
     try {
-      const res = await sendChatMessage(currentUserId(), text);
-      setMessages((m) => [...m, { id: nextId('a'), role: 'assistant', text: res.answer, sources: res.sources }]);
+      const res = await sendChatMessage(currentUserId(), text, patientId);
+      setMessages((m) => [...m, { id: nextId('a'), role: 'assistant', text: res.answer, sources: res.sources }], key);
     } catch (e) {
-      setMessages((m) => [
-        ...m,
-        { id: nextId('a'), role: 'assistant', text: `답변을 받지 못했어요. ${toApiError(e).message}`, failed: true },
-      ]);
+      setMessages(
+        (m) => [
+          ...m,
+          { id: nextId('a'), role: 'assistant', text: `답변을 받지 못했어요. ${toApiError(e).message}`, failed: true },
+        ],
+        key,
+      );
     } finally {
       setPending(false);
     }
@@ -158,6 +180,11 @@ export default function ChatScreen() {
             <ThemedText themeColor="textSecondary">
               수집된 논문과 공식 지침을 근거로 답하고, 답변 아래에 근거 자료를 함께 보여 드려요.
             </ThemedText>
+            {patients.length > 0 ? (
+              <ThemedText themeColor="textSecondary">
+                아래에서 돌보는 분을 고르면 그분의 증상·복약·진료 기록을 참고해서 답해요.
+              </ThemedText>
+            ) : null}
           </View>
         ) : null}
 
@@ -181,6 +208,24 @@ export default function ChatScreen() {
       </ScrollView>
 
       <View style={[styles.composer, { backgroundColor: theme.backgroundElement, borderColor: theme.border }]}>
+        {patients.length > 0 ? (
+          <View style={styles.target}>
+            <ThemedText type="smallBold" themeColor="textSecondary">
+              누구에 대해 묻나요?
+            </ThemedText>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.targetChips}>
+              {patients.map(({ patient }, index) => (
+                <Chip
+                  key={patient.id}
+                  label={patient.name || `환자 ${index + 1}`}
+                  selected={patientId === patient.id}
+                  onPress={() => !pending && setChosenPatient(patient.id)}
+                />
+              ))}
+              <Chip label="특정 분 없이" selected={patientId === null} onPress={() => !pending && setChosenPatient(null)} />
+            </ScrollView>
+          </View>
+        ) : null}
         {empty ? (
           <View style={styles.suggestions}>
             {suggestedQuestions.map((s) => (
@@ -259,6 +304,12 @@ const styles = StyleSheet.create({
   composer: {
     borderTopWidth: StyleSheet.hairlineWidth,
     padding: Spacing.two,
+    gap: Spacing.two,
+  },
+  target: {
+    gap: Spacing.one,
+  },
+  targetChips: {
     gap: Spacing.two,
   },
   suggestions: {
