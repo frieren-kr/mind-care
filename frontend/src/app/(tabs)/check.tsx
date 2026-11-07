@@ -4,6 +4,7 @@ import { Linking, StyleSheet, View } from 'react-native';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Card, Chip, Disclaimer, Screen, SectionLabel } from '@/components/ui';
 import {
+  KDSQ_C_DOMAINS,
   KDSQ_C_INSTRUCTION,
   KDSQ_C_MAX_SCORE,
   KDSQ_C_QUESTIONS,
@@ -24,6 +25,45 @@ function SourceNotice() {
       <Disclaimer text={MEDICAL_DISCLAIMER} />
       <Disclaimer text={`출처: ${KDSQ_C_SOURCE}`} />
     </View>
+  );
+}
+
+/** 영역별 소계 표. 영역별 판정 기준은 없어서 점수와 막대만 보여 준다 */
+function DomainScores({ answers }: { answers: Record<string, number> }) {
+  const theme = useTheme();
+  return (
+    <Card>
+      <ThemedText type="subtitle">영역별 점수</ThemedText>
+      {KDSQ_C_DOMAINS.map((domain) => {
+        const score = domain.questionIds.reduce((sum, id) => sum + (answers[id] ?? 0), 0);
+        const max = domain.questionIds.length * 2;
+        return (
+          <View
+            key={domain.label}
+            style={[styles.domainRow, { borderTopColor: theme.border }]}
+            accessible
+            accessibilityLabel={`${domain.label} ${score}점, ${max}점 만점`}>
+            <View style={styles.domainHeader}>
+              <View style={styles.flex}>
+                <ThemedText type="bold">{domain.label}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {domain.description}
+                </ThemedText>
+              </View>
+              <ThemedText type="bold">
+                {score} / {max}점
+              </ThemedText>
+            </View>
+            <View style={[styles.progressTrack, { backgroundColor: theme.border }]}>
+              <View style={[styles.progressFill, { backgroundColor: theme.primary, width: `${(score / max) * 100}%` }]} />
+            </View>
+          </View>
+        );
+      })}
+      <ThemedText type="small" themeColor="textSecondary">
+        영역별 점수는 어느 쪽 변화가 큰지 보기 위한 참고용이에요. 정밀검사 권유는 총점으로 판단해요.
+      </ThemedText>
+    </Card>
   );
 }
 
@@ -89,6 +129,7 @@ export default function SelfCheckScreen() {
               : '1년 전과 비교해 새로운 변화가 느껴지면 다시 점검해 보세요.'}
           </ThemedText>
         </View>
+        <DomainScores answers={answers} />
         {suspected && (
           <Button label="치매상담콜센터 1899-9988 전화하기" onPress={() => Linking.openURL('tel:18999988')} />
         )}
@@ -179,5 +220,18 @@ const styles = StyleSheet.create({
   },
   notice: {
     gap: Spacing.two,
+  },
+  domainRow: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.two,
+    gap: Spacing.one,
+  },
+  domainHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  flex: {
+    flex: 1,
   },
 });

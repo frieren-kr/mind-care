@@ -52,3 +52,17 @@ export const KDSQ_C_QUESTIONS: SelfCheckQuestion[] = items.map((item, index) => 
   ...item,
   options,
 }));
+
+/**
+ * 결과 화면에서 영역별 소계를 보여 주기 위한 묶음 (11/4 주현 님 의견: 총점만 보다 영역별로 나누면 눈에 잘 들어온다).
+ * 서식에는 영역 구분이 없다. KDSQ 문항 구성(1~5 기억력, 6~10 언어·판단 등, 11~15 일상생활)을 따른 화면용 묶음이며,
+ * 영역별 판정 기준은 없으므로 소계만 보여 주고 "의심" 판정은 총점(KDSQ_C_REFERRAL_SCORE)으로만 한다.
+ */
+export const KDSQ_C_DOMAINS: { label: string; description: string; questionIds: string[] }[] = [
+  { label: '기억력', description: '날짜·물건·약속 등을 기억하기', range: [1, 5] },
+  { label: '인지기능', description: '말하기·이해·길 찾기·계산·성격', range: [6, 10] },
+  { label: '일상생활', description: '기구 사용·정리·옷 입기·외출', range: [11, 15] },
+].map(({ range: [from, to], ...domain }) => ({
+  ...domain,
+  questionIds: Array.from({ length: to - from + 1 }, (_, i) => `kdsq-c-${from + i}`),
+}));
