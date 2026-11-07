@@ -1,11 +1,11 @@
 import { useCallback, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 
-import { currentUserId, getRecommendations, getUserProfile } from '@/api';
+import { currentUserId, getRecommendations } from '@/api';
 import { PaperCard } from '@/components/paper-card';
 import { SkeletonPaperList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
-import { Chip, ErrorView, Screen } from '@/components/ui';
+import { ErrorView, Screen } from '@/components/ui';
 import { CategoryLabel } from '@/constants/labels';
 import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
@@ -17,19 +17,15 @@ const categoryOrder: Category[] = ['treatment', 'care', 'prevention', 'diagnosis
 
 export default function FeedScreen() {
   const theme = useTheme();
-  // null = 관리 환자 전체 기준
-  const [patientId, setPatientId] = useState<string | null>(null);
   const [filter, setFilter] = useState<Category | 'all'>('all');
 
-  const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
-  const profile = useApi(loadProfile);
-  const loadFeed = useCallback(() => getRecommendations(currentUserId(), { patientId }), [patientId]);
+  // 돌보는 분별 칩은 숨겼다 (11/7): AI 추천은 항상 돌보는 분 모두를 함께 보고 만들어 환자를 골라도 결과가 같다
+  const loadFeed = useCallback(() => getRecommendations(currentUserId()), []);
   const feed = useApi(loadFeed);
 
   const refresh = () =>
-    feed.reload(() => getRecommendations(currentUserId(), { patientId, refresh: true }));
+    feed.reload(() => getRecommendations(currentUserId(), { refresh: true }));
 
-  const patients = profile.data?.patients ?? [];
   const data = feed.data;
   // category는 AI 추천(mode="ai")에만 있다. 검색 방식이면 필터를 숨긴다
   const categories = categoryOrder.filter((c) => data?.items.some((i) => i.category === c));
@@ -39,33 +35,14 @@ export default function FeedScreen() {
 
   return (
     <Screen refreshing={feed.loading && data !== null} onRefresh={refresh}>
-      {patients.length >= 2 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
-          <Chip label="모든 분" selected={patientId === null} onPress={() => setPatientId(null)} />
-          {patients.map(({ patient }, index) => (
-            <Chip
-              key={patient.id}
-              label={patient.name || `환자 ${index + 1}`}
-              selected={patientId === patient.id}
-              onPress={() => setPatientId(patient.id)}
-            />
-          ))}
-        </ScrollView>
-      )}
-
       {data && (
         <ThemedText type="smallBold" themeColor="textSecondary">
           {feedCaption(data)}
         </ThemedText>
       )}
-      {data?.mode === 'ai' && patientId !== null && (
-        <ThemedText type="small" themeColor="textSecondary">
-          맞춤 추천은 돌보시는 모든 분을 함께 고려해서 만들어요.
-        </ThemedText>
-      )}
 
       {categories.length > 1 && (
-        // 카테고리는 신문 섹션처럼 밑줄 탭 (돌보는 분 선택은 위의 둥근 칩)
+        // 카테고리는 신문 섹션처럼 밑줄 탭
         <View style={[styles.tabs, { borderBottomColor: theme.rule }]} accessibilityRole="tablist">
           {(['all', ...categories] as const).map((c) => {
             const selected = activeFilter === c;
@@ -121,9 +98,6 @@ export default function FeedScreen() {
 }
 
 const styles = StyleSheet.create({
-  chips: {
-    gap: Spacing.two,
-  },
   tabs: {
     flexDirection: 'row',
     flexWrap: 'wrap',

@@ -109,14 +109,13 @@ export function ErrorView({ message, onRetry }: { message: string; onRetry?: () 
   );
 }
 
+/**
+ * 한 덩어리의 내용. 신문 지면 테마라 상자 대신 위쪽 먹색 선 하나로 구역을 나눈다
+ * (기사 단락처럼 바탕은 종이색 그대로).
+ */
 export function Card({ style, ...rest }: ViewProps) {
   const theme = useTheme();
-  return (
-    <View
-      style={[styles.card, { backgroundColor: theme.backgroundElement, borderColor: theme.border }, style]}
-      {...rest}
-    />
-  );
+  return <View style={[styles.card, { borderTopColor: theme.rule }, style]} {...rest} />;
 }
 
 type ButtonProps = {
@@ -403,9 +402,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   card: {
-    borderRadius: Radius.card,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: Spacing.three,
+    borderTopWidth: 1,
+    paddingTop: Spacing.three,
+    paddingBottom: Spacing.two,
     gap: Spacing.two,
   },
   button: {

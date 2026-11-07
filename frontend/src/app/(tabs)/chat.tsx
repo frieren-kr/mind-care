@@ -75,7 +75,7 @@ function SourceItem({ source, no }: { source: ChatSource; no: number }) {
         {guideline ? (
           <EvidenceBadge level="guideline" />
         ) : (
-          <ThemedText type="smallBold" themeColor="primary">
+          <ThemedText type="smallBold" themeColor="accent">
             최신 연구
           </ThemedText>
         )}
@@ -91,7 +91,7 @@ function SourceItem({ source, no }: { source: ChatSource; no: number }) {
       {/* 원문 링크가 없으면 버튼을 숨긴다 (가짜 URL을 만들지 않는다) */}
       {url ? (
         <Pressable accessibilityRole="link" onPress={() => WebBrowser.openBrowserAsync(url)}>
-          <ThemedText type="smallBold" themeColor="primary">
+          <ThemedText type="smallBold" themeColor="accent">
             원문 보기
           </ThemedText>
         </Pressable>
@@ -286,7 +286,6 @@ export default function ChatScreen() {
 
         {empty ? (
           <View style={styles.intro}>
-            <SectionLabel>마인드 케어에게 묻기</SectionLabel>
             <ThemedText type="subtitle">돌봄 중 궁금한 점을 물어보세요</ThemedText>
             <ThemedText themeColor="textSecondary">
               수집된 논문과 공식 지침을 근거로 답하고, 답변 아래에 근거 자료를 함께 보여 드려요.
@@ -334,7 +333,7 @@ export default function ChatScreen() {
         <Disclaimer text={CHAT_DISCLAIMER} />
       </ScrollView>
 
-      <View style={[styles.composer, { backgroundColor: theme.backgroundElement, borderColor: theme.border }]}>
+      <View style={[styles.composer, { backgroundColor: theme.background, borderColor: theme.rule }]}>
         {patients.length > 0 ? (
           <View style={styles.target}>
             <ThemedText type="smallBold" themeColor="textSecondary">
@@ -452,7 +451,7 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   composer: {
-    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopWidth: 1,
     padding: Spacing.two,
     gap: Spacing.two,
   },

@@ -11,16 +11,17 @@ import { Platform } from 'react-native';
 import type { EvidenceLevel } from '@/types';
 
 /**
- * "신문 지면" 테마 (11/7, 시안 A안). 따뜻한 종이색 바탕 + 먹색 글자, 카드 대신 선으로 나눈다.
+ * "신문 지면" 테마 (11/7, 시안 A안). 옅은 미색 바탕 + 먹색 글자, 카드 대신 선으로 나눈다.
  * 강조색(버튼·선택)은 남색 대신 먹색 — 남색 배경은 "AI 앱" 느낌이 나서 뺐다.
  * 포인트는 적갈색(accent) 한 가지: 섹션 머리말, "우리 상황에서", 요약 번호.
  */
 export const Colors = {
   light: {
     text: '#1E1C18',
-    background: '#F5F1E8',
-    /** 입력칸·등급 설명처럼 바탕보다 살짝 떠 보여야 하는 면 */
-    backgroundElement: '#FBF9F4',
+    // 11/8 확정: 종이색 #F5F1E8과 흰색 #FFFFFF의 중간 (종이색은 너무 누렇고, 흰색은 차가워서)
+    background: '#FAF8F4',
+    /** 입력칸·등급 설명처럼 바탕보다 살짝 떠 보여야 하는 면 (바탕이 옅어져서 흰색으로) */
+    backgroundElement: '#FFFFFF',
     backgroundSelected: '#EDE6D6',
     textSecondary: '#5E5A52',
     primary: '#1E1C18',

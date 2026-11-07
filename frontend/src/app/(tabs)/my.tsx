@@ -14,6 +14,7 @@ import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
 import { useResolvedColorScheme, useThemeMode } from '@/hooks/use-theme-mode';
 import { useTheme } from '@/hooks/use-theme';
 import type { PatientContext } from '@/types';
+import { formatDate } from '@/utils/date';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
 const DEFAULT_REFRESH_DAYS = 3;
@@ -51,7 +52,8 @@ function ThemeModeCard() {
           accessibilityLabel="화면 모드 자동"
           value={auto}
           onValueChange={(on) => setMode(on ? 'system' : resolved)}
-          trackColor={{ true: theme.primary, false: theme.border }}
+          // 꺼진 상태도 어두운 화면에서 보이도록 회색 글자색을 쓴다
+          trackColor={{ true: theme.primary, false: theme.textSecondary }}
           thumbColor={theme.backgroundElement}
           // 웹에서 켜진 상태의 손잡이 색
           {...({ activeThumbColor: theme.backgroundElement } as object)}
@@ -90,7 +92,7 @@ function ThemeModeCard() {
 function PatientCard({ context, index }: { context: PatientContext; index: number }) {
   const { patient, current_medications, upcoming_visits } = context;
   const nextVisit = upcoming_visits[0];
-  const stage = [patient.dementia_stage, patient.diagnosis_date && `${patient.diagnosis_date} 진단`]
+  const stage = [patient.dementia_stage, patient.diagnosis_date && `${formatDate(patient.diagnosis_date)} 진단`]
     .filter(Boolean)
     .join(' · ');
 
@@ -109,7 +111,7 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
       )}
       {nextVisit ? (
         <ThemedText>
-          다음 진료: {nextVisit.visit_date}
+          다음 진료: {formatDate(nextVisit.visit_date)}
           {nextVisit.hospital_name ? ` · ${nextVisit.hospital_name}` : ''}
         </ThemedText>
       ) : null}

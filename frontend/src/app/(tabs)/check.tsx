@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { Linking, StyleSheet, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, Chip, Disclaimer, Screen, SectionLabel } from '@/components/ui';
+import { Button, Card, Disclaimer, Screen, SectionLabel } from '@/components/ui';
 import {
   KDSQ_C_DOMAINS,
   KDSQ_C_INSTRUCTION,
@@ -156,22 +156,46 @@ export default function SelfCheckScreen() {
       <ThemedText type="small" themeColor="textSecondary">
         1년 전과 비교해 지금은 어떤가요?
       </ThemedText>
-      <ThemedText type="title">{q.text}</ThemedText>
+      <ThemedText type="headline">{q.text}</ThemedText>
       {q.note ? (
         <ThemedText type="small" themeColor="textSecondary">
           ({q.note})
         </ThemedText>
       ) : null}
 
-      <View style={styles.options}>
-        {q.options.map((o) => (
-          <Chip
-            key={o.label}
-            label={o.label}
-            selected={answers[q.id] === o.score}
-            onPress={() => setAnswers({ ...answers, [q.id]: o.score })}
-          />
-        ))}
+      {/* 보기는 화면 너비만큼 큰 줄로 (어르신도 누르기 쉽게). 고른 줄은 먹색으로 채운다 */}
+      <View style={[styles.options, { borderTopColor: theme.rule }]} accessibilityRole="radiogroup">
+        {q.options.map((o) => {
+          const selected = answers[q.id] === o.score;
+          return (
+            <Pressable
+              key={o.label}
+              accessibilityRole="radio"
+              accessibilityState={{ checked: selected }}
+              onPress={() => setAnswers({ ...answers, [q.id]: o.score })}
+              style={({ pressed }) => [
+                styles.option,
+                { borderBottomColor: theme.border },
+                selected
+                  ? { backgroundColor: theme.primary }
+                  : pressed && { backgroundColor: theme.backgroundSelected },
+              ]}>
+              <View
+                style={[
+                  styles.radio,
+                  { borderColor: selected ? theme.onPrimary : theme.rule },
+                  selected && { backgroundColor: theme.onPrimary },
+                ]}
+              />
+              <ThemedText type="bold" style={[styles.flex, selected && { color: theme.onPrimary }]}>
+                {o.label}
+              </ThemedText>
+              <ThemedText type="small" style={{ color: selected ? theme.onPrimary : theme.textSecondary }}>
+                {o.score}점
+              </ThemedText>
+            </Pressable>
+          );
+        })}
       </View>
 
       <View style={styles.nav}>
@@ -204,7 +228,21 @@ const styles = StyleSheet.create({
     height: '100%',
   },
   options: {
-    gap: Spacing.two,
+    borderTopWidth: 1,
+  },
+  option: {
+    minHeight: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  radio: {
+    width: 18,
+    height: 18,
+    borderRadius: Radius.pill,
+    borderWidth: 2,
   },
   nav: {
     flexDirection: 'row',

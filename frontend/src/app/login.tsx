@@ -6,8 +6,8 @@ import { KeyboardAvoidingView, Platform, StyleSheet, View } from 'react-native';
 import { login } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, Checkbox, Disclaimer, Screen, SectionLabel, TextField } from '@/components/ui';
-import { Spacing } from '@/constants/theme';
+import { Button, Card, Checkbox, Disclaimer, DoubleRule, Screen, SectionLabel, TextField } from '@/components/ui';
+import { FontSize, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
 /** '아이디 저장'을 켜면 이메일만 이 기기에 저장한다. 비밀번호는 저장하지 않는다 */
@@ -64,12 +64,18 @@ export default function LoginScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <Screen>
         <View style={styles.header}>
-          <SectionLabel>마인드 케어</SectionLabel>
-          <ThemedText type="title">로그인</ThemedText>
+          {/* 신문 제호처럼: 명조 앱 이름 + 이중선 */}
+          <ThemedText type="headline" style={styles.masthead}>
+            마인드 케어
+          </ThemedText>
+          <DoubleRule />
           <ThemedText themeColor="textSecondary">돌보는 분에게 맞춘 최신 치매 연구를 전해 드려요.</ThemedText>
         </View>
 
-        <Card>
+        <SectionLabel>로그인</SectionLabel>
+
+        {/* 위의 머리말 선과 겹치지 않게 Card의 위쪽 선은 뺀다 */}
+        <Card style={styles.form}>
           <ThemedText type="smallBold">이메일</ThemedText>
           <TextField
             value={email}
@@ -128,6 +134,15 @@ const styles = StyleSheet.create({
   header: {
     gap: Spacing.two,
     paddingTop: Spacing.five,
+  },
+  // 제호는 기사 제목보다 크게. 화면 머리말이라 글자 크기 설정과 상관없이 고정
+  masthead: {
+    fontSize: FontSize.headline + 9,
+    lineHeight: 44,
+  },
+  form: {
+    borderTopWidth: 0,
+    paddingTop: 0,
   },
   signup: {
     gap: Spacing.two,
