@@ -109,7 +109,7 @@ export default function ChatScreen() {
   const theme = useTheme();
   const scrollRef = useRef<ScrollView>(null);
   // 어느 분에 대한 질문인지. 고르면 서버가 그분의 기록(프로필·복약·진료·검사·안전사고·돌봄 기록) Tool을 붙인다.
-  // undefined = 아직 안 고름 → 돌보는 분이 1명이면 그분, 아니면 '특정 분 없이'
+  // undefined = 아직 안 고름 → 돌보는 분이 1명이면 그분, 아니면 '기본'(특정 환자 없이)
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile } = useApi(loadProfile);
   const patients = profile?.patients ?? [];
@@ -222,7 +222,7 @@ export default function ChatScreen() {
                   onPress={() => !pending && setChosenPatient(patient.id)}
                 />
               ))}
-              <Chip label="특정 분 없이" selected={patientId === null} onPress={() => !pending && setChosenPatient(null)} />
+              <Chip label="기본" selected={patientId === null} onPress={() => !pending && setChosenPatient(null)} />
             </ScrollView>
           </View>
         ) : null}
