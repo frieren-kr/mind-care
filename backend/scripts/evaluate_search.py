@@ -45,6 +45,7 @@ from app.db.functions import get_papers_by_ids, search_similar
 
 EVAL_DIR = Path(__file__).resolve().parents[1] / "app" / "ai" / "eval"
 GOLD_CSV = EVAL_DIR / "goldset_labels_901x3.csv"
+GOLD_V2_CSV = EVAL_DIR / "goldset_labels_901x3_v2.csv"  # scripts/make_goldset_v2.py로 생성
 RESULT_DIR = EVAL_DIR / "results"
 
 ALL_K = 100_000  # DB 전체 순위를 받기 위한 큰 값
@@ -97,10 +98,10 @@ def recall2_at(labels: list[int], all_labels: list[int], k: int) -> float:
 
 
 # ---------------------------------------------------------------- 데이터
-def load_gold() -> dict[str, dict[str, int]]:
+def load_gold(path: Path = GOLD_CSV) -> dict[str, dict[str, int]]:
     """{프로필 코드: {PMID: 판단}}"""
     gold: dict[str, dict[str, int]] = defaultdict(dict)
-    with open(GOLD_CSV, encoding="utf-8-sig") as f:
+    with open(path, encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             gold[row["profile_id"]][row["pmid"].strip()] = int(row["label"])
     return gold
@@ -128,9 +129,12 @@ def main() -> None:
     parser.add_argument("--tag", default="baseline", help="결과 파일 이름에 붙일 이름")
     parser.add_argument("--no-dementia-filter", action="store_true",
                         help="치매 필터 끄기 (필터 넣기 전 before 결과 재현용)")
+    parser.add_argument("--gold", choices=["v1", "v2"], default="v1",
+                        help="정답지 버전: v1=AI 라벨 그대로, v2=환자 중심 규칙+사람 검수 반영")
     args = parser.parse_args()
 
-    gold = load_gold()
+    gold = load_gold(GOLD_CSV if args.gold == "v1" else GOLD_V2_CSV)
+    print(f"정답지: {args.gold}")
     gold_pmids = set().union(*[set(v) for v in gold.values()])
 
     rows, top_rows = [], []

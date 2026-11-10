@@ -19,7 +19,7 @@ from collections import Counter
 from app.ai.retrieval.embedding import MODEL_NAME, embed_query
 from app.ai.retrieval.evidence import classify, is_caregiver_focused, is_dementia_related
 from app.db.functions import get_papers_by_ids, search_similar
-from scripts.evaluate_search import ALL_K, PROFILES, load_gold, ndcg_at, precision_at
+from scripts.evaluate_search import ALL_K, GOLD_CSV, GOLD_V2_CSV, PROFILES, load_gold, ndcg_at, precision_at
 
 QUERIES = {
     "P1": [
@@ -61,8 +61,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--show", type=int, default=0)
     ap.add_argument("--pick", type=float, default=0.05, help="--show에서 비교할 감점")
+    ap.add_argument("--gold", choices=["v1", "v2"], default="v1", help="정답지 버전 (v2=환자 중심+사람 검수)")
     a = ap.parse_args()
-    gold = load_gold()
+    gold = load_gold(GOLD_CSV if a.gold == "v1" else GOLD_V2_CSV)
+    print(f"정답지: {a.gold}")
 
     # 1) 판별 점검
     cache = {pid: [(q, ranked_with_scores(q)) for q in qs] for pid, qs in QUERIES.items()}
