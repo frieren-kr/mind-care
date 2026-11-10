@@ -41,8 +41,8 @@ class AuthDbTests(TestCase):
         migrations = Path(__file__).resolve().parents[1] / "app/db/migrations"
         for name in ("001_init.sql", "004_patient_management.sql", "005_medical_visits_detail.sql",
                      "010_user_feed_refresh_days.sql", "011_authentication.sql"):
-            self.conn.execute((migrations / name).read_text())
-        self.migration = (migrations / "011_authentication.sql").read_text()
+            self.conn.execute((migrations / name).read_text(encoding="utf-8"))
+        self.migration = (migrations / "011_authentication.sql").read_text(encoding="utf-8")
         self.uid = self.conn.execute(
             "INSERT INTO users(name,email) VALUES ('인증 테스트','db-auth@example.com') RETURNING id"
         ).fetchone()[0]

@@ -36,6 +36,9 @@
 - `tests/test_recent_care_logs_db.py`는 테스트 전용 스키마에서 실제 조회·권한·기간 경계·동시 변경·읽기 전용 제약과
   운영 챗봇 도구 연결을 검증한 뒤 스키마를 삭제한다. public 데이터는 수정하지 않는다.
 - 검증: `python -m unittest tests.test_recent_care_logs_db tests.test_chat`.
+- Windows에서 인증 테스트 SQL을 읽을 때 발생하는 `UnicodeDecodeError`는
+  `tests/test_auth_db.py`의 두 `read_text()`에 `encoding="utf-8"`을 명시해 수정했다.
+  검증: `python -m unittest tests.test_auth_db tests.test_chat_store_db`.
 
 ## 사용자별 피드 갱신 주기
 
