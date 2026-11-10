@@ -23,6 +23,20 @@
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
 - 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
 
+## 챗봇 최근 돌봄 기록 조회 (2026-11-10)
+
+- 공용 관문 `app/db/functions.py`의 `get_recent_care_logs()`를 추가했다. 구현은 `user_functions.py`다.
+  입력·반환 계약은 [`db.md`](db.md)의 챗봇 최근 돌봄 기록 표를 따른다.
+- 기존 일반 사용자 조회 함수와 달리, 이 함수는 **환자 소속을 직접 확인**한다. 확인·건수·목록 조회는
+  하나의 읽기 전용 REPEATABLE READ 트랜잭션이다. 권한 실패·조회 장애는 빈 성공으로 반환하지 않는다.
+- 사용자·환자가 일치하는 `patient_care` 기록만 `[start_at, end_at)`에 포함하며
+  `logged_at DESC, id DESC` 정렬, limit 적용 전 전체 건수, 원문·null 보존을 보장한다.
+- `app/api/chat.py`의 요청별 `build_chat_tool_registry()`에서 기존 어댑터에 DB 함수를 주입한다.
+  환자를 선택한 요청에서만 도구가 노출된다. 기본 최근 14일·10건이며 최대 90일·30건 정책은 기존 챗봇과 같다.
+- `tests/test_recent_care_logs_db.py`는 테스트 전용 스키마에서 실제 조회·권한·기간 경계·동시 변경·읽기 전용 제약과
+  운영 챗봇 도구 연결을 검증한 뒤 스키마를 삭제한다. public 데이터는 수정하지 않는다.
+- 검증: `python -m unittest tests.test_recent_care_logs_db tests.test_chat`.
+
 ## 사용자별 피드 갱신 주기
 
 새 코드를 실행하기 전에 `010_user_feed_refresh_days.sql`을 적용한다. 기존 DB에서는 backend/에서 실행:

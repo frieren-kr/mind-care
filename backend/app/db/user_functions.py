@@ -20,7 +20,8 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 - [이 모듈 규칙] DB 제약 위반(없는 환자·사용자 = 외래키, 이메일·번호 중복 = UNIQUE)도
   의미 있는 ValueError로 바꿔 던진다 (사용자 입력이라 API가 메시지를 그대로 보여줄 수 있게).
 - 날짜의 "미래" 판정은 한국 시간 기준이다 (user_schemas.today()).
-- 권한(이 사용자가 이 환자의 간병인인가)은 보지 않는다. API가 is_caregiver_of()로 먼저 확인한다.
+- 일반 함수의 권한은 API가 is_caregiver_of()로 먼저 확인한다.
+  get_recent_care_logs()는 빈 결과에서도 같은 스냅샷 안에서 환자 소속을 확인한다.
 
 테이블 정의는 migrations/001_init.sql(users, patient_profiles, caregiver_profiles)
 + 004_patient_management.sql(phone_number, clinical_assessments, safety_events, medications, medical_visits)
@@ -28,16 +29,17 @@ AI/백엔드 팀원은 DB에 직접 SQL을 쓰지 않는다.
 + 010_user_feed_refresh_days.sql(users 피드 갱신 주기)이 정본이다.
 """
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, TypeVar
 from uuid import UUID
 
-from psycopg import sql
+from psycopg import IsolationLevel, sql
 from psycopg.errors import ForeignKeyViolation, UniqueViolation
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ValidationError
 
 from app.db.connection import get_connection
+from app.feed_schemas import FeedReadCareLog, FeedReadCollection
 from app.user_schemas import (
     APP_TIMEZONE,
     ASSESSMENT_TYPES,
@@ -81,6 +83,60 @@ from app.user_schemas import (
 logger = logging.getLogger(__name__)
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def get_recent_care_logs(
+    *,
+    user_id: UUID | str,
+    patient_id: UUID | str,
+    start_at: datetime,
+    end_at: datetime,
+    limit: int = 10,
+) -> FeedReadCollection[FeedReadCareLog]:
+    """챗봇용 patient_care 기록을 권한·건수와 같은 읽기 전용 스냅샷에서 조회한다.
+
+    기간은 시간대가 있는 [start_at, end_at), 정렬은 logged_at DESC, id DESC다.
+    total_count는 limit(정수 1~30) 적용 전 건수다. 원문과 nullable 필드를 보존한다.
+    없는 환자·담당 외 환자·잘못된 UUID는 LookupError, 잘못된 기간·limit는
+    ValueError다. DB 실패를 빈 목록으로 바꾸지 않는다. 관문은 functions.py다.
+    """
+    user_id, patient_id = _parse_uuid(user_id), _parse_uuid(patient_id)
+    if user_id is None or patient_id is None:
+        raise LookupError("환자 돌봄 기록을 조회할 수 없습니다.")
+    for name, value in (("start_at", start_at), ("end_at", end_at)):
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise ValueError(f"{name}은 시간대가 있는 datetime이어야 합니다.")
+    start_at, end_at = start_at.astimezone(timezone.utc), end_at.astimezone(timezone.utc)
+    if start_at >= end_at:
+        raise ValueError("start_at은 end_at보다 앞이어야 합니다.")
+    if type(limit) is not int or not 1 <= limit <= 30:
+        raise ValueError("limit는 1~30 사이 정수여야 합니다.")
+
+    params = {"user_id": user_id, "patient_id": patient_id,
+              "start_at": start_at, "end_at": end_at, "limit": limit}
+    where = """
+        WHERE user_id = %(user_id)s AND patient_id = %(patient_id)s
+          AND log_type = 'patient_care'
+          AND logged_at >= %(start_at)s AND logged_at < %(end_at)s
+    """
+    with get_connection() as conn:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
+        conn.read_only = True
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("""
+                SELECT id FROM patient_profiles
+                 WHERE id = %(patient_id)s AND caregiver_id = %(user_id)s
+            """, params)
+            if cur.fetchone() is None:
+                raise LookupError("환자 돌봄 기록을 조회할 수 없습니다.")
+            cur.execute("SELECT count(*) AS total FROM care_logs " + where, params)
+            total_count = cur.fetchone()["total"]
+            cur.execute("""
+                SELECT user_id, patient_id, log_type, content, mood_tag, logged_at
+                  FROM care_logs
+            """ + where + " ORDER BY logged_at DESC, id DESC LIMIT %(limit)s", params)
+            items = [FeedReadCareLog(**row) for row in cur.fetchall()]
+    return FeedReadCollection[FeedReadCareLog](items=items, total_count=total_count)
 
 
 # ============================================================

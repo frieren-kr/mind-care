@@ -9,14 +9,15 @@ GET  /chat/{user_id}/history   ?patient_id=&limit=20&before=   저장된 대화(
        이전 대화는 chat_history.ChatStoreHistoryReader가 읽는다 (최근 완료 턴 5개 + 오늘 이전 하루 요약).
        조회가 실패하거나 2초를 넘으면 이전 대화 없이 진행한다 (경고 로그만).
      chat_execution  = ChatExecutionV1(OpenAIClient, 요청별 Tool 목록)  (LLM + Tool 반복)
-       Tool 목록은 요청마다 build_chat_registry(context)로 만든다.
+       Tool 목록은 요청마다 build_chat_tool_registry(context)로 만들고 DB 조회 함수를 주입한다.
        항상: search_evidence·search_guidelines·get_caregiver_profile
        환자를 고른 요청만: 환자 프로필·돌봄 기록·복약·진료·평가·안전 사건
      backend_handoff = 답변·출처를 화면 형식으로 옮김
   ③ 실행기가 없거나 실패하면 503 (검색 대체 응답은 없다)
 
-아직 DB 함수가 없는 Tool 경로(돌봄 기록 get_recent_care_logs, 다가오는 진료 get_patient_medical_visits
-status=upcoming)는 부르면 그 Tool만 실패하고 답변은 계속 만든다.
+돌봄 기록은 functions.get_recent_care_logs를 주입해 조회한다.
+아직 DB 함수가 없는 다가오는 진료(get_patient_medical_visits status=upcoming)는
+부르면 그 Tool만 실패하고 답변은 계속 만든다.
 답변에 성공하면 질문·답변을 chat_store.save_chat_turn()으로 저장한다 (7일 보관 → 하루 요약, scripts/summarize_chats.py).
 저장이 실패해도 답변은 그대로 돌려주고 로그만 남긴다.
 라우터 공통 의존성(require_user_access)이 로그인·본인 확인을 실행기 조립과 데이터 조회보다 먼저 한다
@@ -33,7 +34,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from openai import OpenAI
 
 from app.ai.agent.clients.openai_client import OpenAIClient
+from app.ai.agent.adapters.recent_care_logs import RecentCareLogsAdapter
 from app.ai.agent.composition import build_chat_registry
+from app.ai.agent.registry import ToolRegistry
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.chat import ChatWorkflow, ChatWorkflowError
@@ -43,7 +46,7 @@ from app.ai.agent.workflows.chat_execution import ChatExecutionV1
 from app.ai.agent.workflows.chat_history_context import chat_history_token_counter
 from app.auth.dependencies import require_user_access
 from app.config import settings
-from app.db import chat_store, user_functions
+from app.db import chat_store, functions, user_functions
 from app.schemas import ChatHistoryResponse, ChatHistoryTurn, ChatRequest, ChatResponse, ChatSource
 
 logger = logging.getLogger(__name__)
@@ -83,6 +86,12 @@ def _example(detail: str) -> dict:
     return {"description": detail, "content": {"application/json": {"example": {"detail": detail}}}}
 
 
+def build_chat_tool_registry(context: AgentContext) -> ToolRegistry:
+    """요청별 Tool에 공용 DB 관문의 돌봄 기록 조회 함수를 연결한다."""
+    return build_chat_registry(context, care_logs_reader=RecentCareLogsAdapter(
+        query_fn=functions.get_recent_care_logs))
+
+
 @lru_cache(maxsize=1)
 def get_chat_execution() -> Optional[ChatExecution]:
     """ChatWorkflow의 2단계(chat_execution)를 돌려주는 FastAPI 의존성. get_feed_execution()과 같은 설정.
@@ -106,7 +115,7 @@ def get_chat_execution() -> Optional[ChatExecution]:
         client = OpenAIClient(sdk, model=model, timeout_seconds=LLM_TIMEOUT_SECONDS)
         # 요청마다 새 Tool 목록. 환자를 고르지 않으면 환자 Tool을 빼는 것은 build_chat_registry가 하고
         # ChatExecutionV1이 한 번 더 검사한다. 어댑터는 상태가 없어 요청마다 만들어도 DB에 가지 않는다.
-        return ChatExecutionV1(client, build_chat_registry,
+        return ChatExecutionV1(client, build_chat_tool_registry,
                                request_timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     except Exception as exc:
         if sdk is not None:

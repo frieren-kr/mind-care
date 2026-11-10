@@ -148,6 +148,20 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 | `search_similar_guidelines(query_embedding, k=5)` | `query_embedding`: `list[float]`(길이=`EMBEDDING_DIM`=**1024**), `k`: int | `list[GuidelineSearchResult]` — `id` + `score`만 |
 | `get_guidelines_by_ids(ids: list[UUID])` | `guideline_knowledge.id` 목록 (`search_similar_guidelines()`가 돌려주는 `id`) | `list[GuidelineChunkOut]` — **입력 순서 그대로** |
 
+**챗봇 최근 돌봄 기록 조회** — 공용 관문 `backend/app/db/functions.py`, 구현 `user_functions.py` (김한슬):
+
+| 함수 | 입력 | 반환 |
+|------|------|------|
+| `get_recent_care_logs(*, user_id, patient_id, start_at, end_at, limit=10)` | 사용자·환자 UUID 또는 UUID 문자열, 시간대가 있는 datetime 기간, 정수 limit 1~30 | `FeedReadCollection[FeedReadCareLog]` (`app/feed_schemas.py`): `items`, limit 적용 전 `total_count` |
+
+- 환자의 `caregiver_id` 확인부터 목록·별도 건수 조회까지 하나의 읽기 전용 REPEATABLE READ 트랜잭션이다.
+- 해당 사용자·환자의 `patient_care`만 `[start_at, end_at)` 기간으로 조회하고 `logged_at DESC, id DESC` 정렬한다.
+  원문·공백·null을 보존한다. 기록이 없으면 `items=[]`, `total_count=0`이다.
+- 없는 환자·담당 외 환자·잘못된 UUID는 `LookupError`, 잘못된 기간·limit는 `ValueError`다.
+  빈 결과에서도 권한을 확인하며 DB 장애를 정상 0건으로 바꾸지 않는다.
+- `/chat`의 `build_chat_tool_registry()`가 `RecentCareLogsAdapter(query_fn=functions.get_recent_care_logs)`를 주입한다.
+  새 API·패키지·마이그레이션은 없다. 상세 검증은 [`users.md`](users.md)의 최근 돌봄 기록 항목 참고.
+
 **피드 개인화 조회·쓰기** — `backend/app/db/feed_read.py` (담당 박주현, 입출력 정본은 `app/feed_schemas.py`):
 
 | 함수 | 입력 | 반환 |

@@ -124,11 +124,14 @@
   - **AI 연결: `get_chat_execution()`** — `get_feed_execution()`과 같은 설정(`OPENAI_API_KEY`, `OPENAI_AGENT_MODEL`, 없으면 `OPENAI_SUMMARY_MODEL`).
     없거나 조립이 실패하면 `None` → **503** `"지금은 답변을 만들 수 없어요. …"`. 검색 대체 응답은 없다.
     전체 실행 상한 80초, LLM 1회 30초 (화면 대기 시간 90초 안).
-  - **Tool은 요청마다** `build_chat_registry(context)`로 만든다.
+  - **Tool은 요청마다** API의 `build_chat_tool_registry(context)`에서 `build_chat_registry()`를 호출해 만든다.
     항상 `search_evidence`·`search_guidelines`·`get_caregiver_profile`, `patient_id`를 고른 요청에만 환자 Tool
     (`get_patient_profile`·`get_recent_care_logs`·`get_patient_medications`·`get_patient_medical_visits`·
     `get_patient_assessments`·`get_patient_safety_events`)이 붙는다.
-  - 아직 DB 함수가 없는 경로 — `get_recent_care_logs`(돌봄 기록 조회), `get_patient_medical_visits`의 `status=upcoming`
+  - `get_recent_care_logs`는 공용 DB 관문의 조회 함수를 어댑터에 주입해 해당 환자의 `patient_care` 기록을 조회한다.
+    환자 소속 확인, 기간 필터, 최신순 정렬, limit 적용 전 전체 건수는 같은 읽기 전용 스냅샷에서 처리한다.
+    상세 계약은 [`db.md`](db.md)의 챗봇 최근 돌봄 기록 표를 따른다.
+  - 아직 DB 함수가 없는 경로 — `get_patient_medical_visits`의 `status=upcoming`
     (다가오는 예약, 한슬 님 담당) — 는 부르면 **그 Tool만 실패 결과**가 되고 LLM이 나머지로 답한다(200). 챗봇 전체가 503이 되지는 않는다.
   - **이전 대화 기억**: 답한 대화는 `chat_store.save_chat_turn()`으로 저장(7일 보관 → 하루 요약)하고,
     다음 질문 때 `app/api/chat_history.py`의 Reader가 같은 사용자·같은 환자 범위(`patient_id` 없음은 없음끼리)의

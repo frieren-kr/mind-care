@@ -14,7 +14,6 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.ai.agent.composition import build_chat_registry
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.registry import ToolName
 from app.ai.agent.schemas import ModelTurn
@@ -26,6 +25,7 @@ from app.api.chat_history import ChatStoreHistoryReader
 from app.db.chat_store import ChatDailySummary, ChatTurn, ChatTurnRecord
 from app.auth.dependencies import get_current_user
 from app.auth_schemas import AuthUser
+from app.feed_schemas import FeedReadCareLog, FeedReadCollection
 from main import app
 
 USER_ID = uuid4()
@@ -215,9 +215,9 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(snap.daily_summaries[0].summary, "요약")
 
     def real_execution(self, turns):
-        """실제 ChatExecutionV1 + 운영과 같은 build_chat_registry. LLM만 가짜."""
+        """실제 ChatExecutionV1 + 운영 API의 DB 연결 구성. LLM만 가짜."""
         self.llm = FakeLLMClient(turns)
-        return ChatExecutionV1(self.llm, build_chat_registry)
+        return ChatExecutionV1(self.llm, chat.build_chat_tool_registry)
 
     def tool_names(self, request_index=0):
         return sorted(tool["name"] for tool in self.llm.requests[request_index][1])
@@ -229,8 +229,8 @@ class ChatApiTests(unittest.TestCase):
         self.assertEqual(self.post({"message": "안녕", "patient_id": str(PATIENT_ID)}, execution).status_code, 200)
         self.assertEqual(self.tool_names(1), sorted(name.value for name in ToolName))
 
-    def test_unbound_db_tools_fail_alone_and_answer_still_returns(self):
-        # 돌봄 기록 조회·다가오는 진료 조회는 아직 DB 함수가 없다 (NotImplementedError).
+    def test_db_failure_and_unbound_visits_fail_alone_and_answer_still_returns(self):
+        # 돌봄 조회 장애·미연결 예약 도구 실패를 정상 0건으로 바꾸지 않는다.
         # 그 Tool만 오류 결과가 되고, LLM은 다음 라운드에서 답을 만든다.
         patient = SimpleNamespace(id=PATIENT_ID, caregiver_id=USER_ID)
         execution = self.real_execution([
@@ -239,7 +239,9 @@ class ChatApiTests(unittest.TestCase):
                                             args={"status": "upcoming"})]),
             chat_final("기록을 확인하지 못했지만 일반적인 방법을 알려드릴게요."),
         ])
-        with patch("app.db.user_functions.get_patient", return_value=patient):
+        with patch("app.db.user_functions.get_patient", return_value=patient), patch.object(
+            chat.functions, "get_recent_care_logs", side_effect=RuntimeError("PRIVATE DB failure")
+        ):
             res = self.post({"message": "최근 상태는요?", "patient_id": str(PATIENT_ID)}, execution)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["answer"], "기록을 확인하지 못했지만 일반적인 방법을 알려드릴게요.")
@@ -248,6 +250,45 @@ class ChatApiTests(unittest.TestCase):
         for output in outputs:
             self.assertEqual(json.loads(output.content)["error"]["code"], "tool_exception")
         self.save.assert_called_once()
+
+    def test_recent_care_logs_reach_llm_through_production_db_binding(self):
+        for empty in (False, True):
+            with self.subTest(empty=empty):
+                execution = self.real_execution([
+                    ModelTurn(tool_calls=[chat_call(ToolName.RECENT_CARE_LOGS, args={"days": 7, "limit": 2})]),
+                    chat_final("등록한 돌봄 기록을 확인했어요."),
+                ])
+                def query(**kwargs):
+                    self.assertEqual((kwargs["user_id"], kwargs["patient_id"], kwargs["limit"]),
+                                     (USER_ID, PATIENT_ID, 2))
+                    self.assertEqual(kwargs["end_at"] - kwargs["start_at"], timedelta(days=7))
+                    items = [] if empty else [FeedReadCareLog(
+                        user_id=USER_ID, patient_id=PATIENT_ID, log_type="patient_care",
+                        logged_at=kwargs["start_at"], content="  산책 후 편안해하심\n", mood_tag=None)]
+                    return FeedReadCollection[FeedReadCareLog](items=items, total_count=0 if empty else 3)
+                with patch.object(chat.functions, "get_recent_care_logs", side_effect=query) as lookup:
+                    response = self.post({"message": "최근 돌봄 기록 알려줘", "patient_id": str(PATIENT_ID)}, execution)
+                self.assertEqual(response.status_code, 200, response.text)
+                lookup.assert_called_once()
+                output = next(item for item in self.llm.requests[1][0] if item.type == "function_call_output")
+                payload = json.loads(output.content)
+                self.assertTrue(payload["success"], payload)
+                self.assertEqual(payload["data"]["total_count"], 0 if empty else 3)
+                if empty:
+                    self.assertEqual(payload["data"]["logs"], [])
+                else:
+                    self.assertEqual(payload["data"]["logs"][0]["content"], "  산책 후 편안해하심\n")
+
+    def test_execution_uses_bound_registry_factory(self):
+        chat.get_chat_execution.cache_clear()
+        self.addCleanup(chat.get_chat_execution.cache_clear)
+        self.model.return_value = "m"
+        fake_settings = SimpleNamespace(openai_api_key="test-key", openai_agent_model="m", openai_summary_model="m")
+        with patch.object(chat, "settings", fake_settings), patch.object(chat, "OpenAI"), \
+             patch.object(chat, "chat_history_token_counter"), patch.object(chat, "OpenAIClient"), \
+             patch.object(chat, "ChatExecutionV1") as execution:
+            self.assertIs(chat.get_chat_execution(), execution.return_value)
+        self.assertIs(execution.call_args.args[1], chat.build_chat_tool_registry)
 
     def test_missing_key_gives_no_execution(self):
         chat.get_chat_execution.cache_clear()

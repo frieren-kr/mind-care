@@ -17,6 +17,7 @@ from pgvector.psycopg import Vector
 from psycopg.rows import dict_row
 
 from app.db.connection import get_connection
+from app.db.user_functions import get_recent_care_logs
 from app.db.auth_functions import (
     create_auth_session,
     get_auth_credentials,
