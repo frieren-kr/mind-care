@@ -334,6 +334,7 @@ $DC ps
 $DC exec backend python -m scripts.seed_dev_auth --all-dev-profiles --dry-run   # 저장 후 되돌림 (점검)
 $DC exec backend python -m scripts.seed_dev_auth --all-dev-profiles
 # 한 명만: $DC exec backend python -m scripts.seed_dev_auth --email dev-seed-1@example.com
+$DC exec -T backend python -m scripts.seed_demo_care_logs   # 시연 돌봄 기록(최근 14일, 환자당 8~12건). 재실행 시 이 스크립트 기록만 교체, --dry-run 가능
 ```
 
 ### 10-4. 확인
