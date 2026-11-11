@@ -36,6 +36,34 @@ CREATE INDEX idx_chat_messages_user_time ON chat_messages (user_id, created_at D
 """
 SOURCE = {"evidence_type": "guideline", "title": "지침", "pmid": None, "full_text_available": True}
 DAY = date(2026, 11, 5)
+PAPER = {"evidence_type": "new_research", "title": "Sleep RCT", "pmid": "123", "doi": "10.1/x",
+         "journal": "J Sleep", "publication_year": 2025, "study_type": "rct", "organization": None,
+         "source_url": None, "full_text_available": False}
+PAPER_SHORT = {"citation_number": 1, "evidence_type": "new_research", "title": "Sleep RCT", "pmid": "123",
+               "source": "J Sleep", "publication_year": 2025}
+GUIDELINE_SHORT = {"citation_number": 2, "evidence_type": "guideline", "title": "지침", "pmid": None,
+                   "source": None, "publication_year": None}
+
+
+class HistorySourcesTests(unittest.TestCase):
+    """DB 없이 도는 출처 요약 규칙."""
+
+    def test_paper_guideline_and_field_choice(self):
+        guideline = {**SOURCE, "pmid": "999", "journal": "무시", "organization": "WHO", "publication_year": 2024}
+        self.assertEqual(chat_store.history_sources([PAPER, guideline]), [
+            PAPER_SHORT,
+            {**GUIDELINE_SHORT, "source": "WHO", "publication_year": 2024},  # 가이드라인은 PMID 없음, 기관명
+        ])
+
+    def test_max_five_keeps_citation_numbers_and_skips_broken(self):
+        stored = ["깨진 값", {"title": ""}, *[PAPER] * 6]
+        result = chat_store.history_sources(stored)
+        self.assertEqual([s["citation_number"] for s in result], [3, 4, 5, 6, 7])
+        self.assertEqual(chat_store.history_sources([{"title": "제목만"}]),
+                         [{"citation_number": 1, "evidence_type": None, "title": "제목만", "pmid": None,
+                           "source": None, "publication_year": None}])
+        for value in (None, {}, "x"):
+            self.assertEqual(chat_store.history_sources(value), [])
 
 
 class ChatStoreDbTests(unittest.TestCase):
@@ -212,6 +240,14 @@ class ChatStoreDbTests(unittest.TestCase):
         self.assertEqual(chat_store.get_recent_chat_turns(self.user, self.patient, ago(5)), [])
         with self.assertRaises(ValueError):
             chat_store.get_recent_chat_turns(self.user, None, datetime(2026, 11, 7), 5)
+
+    def test_recent_turns_carry_compact_sources(self):
+        chat_store.save_chat_turn(self.user, None, "q", "a", [PAPER, SOURCE, *[PAPER] * 5])
+        self.turn("옛 q", "옛 a", datetime.now(KST) - timedelta(hours=1), datetime.now(KST) - timedelta(hours=1))
+        new, old = chat_store.get_recent_chat_turns(self.user, None, datetime.now(KST) + timedelta(seconds=1))
+        self.assertEqual(new.sources[:2], [PAPER_SHORT, GUIDELINE_SHORT])
+        self.assertEqual([s["citation_number"] for s in new.sources], [1, 2, 3, 4, 5])
+        self.assertEqual(old.sources, [])  # sources 칸 기본값/옛 행
 
     def test_list_chat_turns_for_screen(self):
         now = datetime.now(KST)

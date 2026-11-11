@@ -12,7 +12,7 @@ patient_id는 None = 환자를 고르지 않은 대화. 조회도 None끼리만 
 이 모듈은 `app/ai/`를 import 하지 않는다 (db → ai 방향 의존은 만들지 않는다).
 """
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Literal, Optional
 from uuid import UUID, uuid4
@@ -23,6 +23,7 @@ from app.db.connection import get_connection
 
 KST = timezone(timedelta(hours=9))  # 한국은 서머타임이 없어서 고정 +9로 충분하다
 RETENTION_DAYS = 7
+MAX_HISTORY_SOURCES = 5  # 이전 대화 한 턴에 붙이는 출처 최대 개수 (이력 크기 제한)
 
 
 @dataclass(frozen=True)
@@ -36,11 +37,15 @@ class ChatMessage:
 
 @dataclass(frozen=True)
 class ChatTurn:
-    """완료된 질문·답변 한 쌍. started_at = 질문 행 시각, completed_at = 답변 행 시각."""
+    """완료된 질문·답변 한 쌍. started_at = 질문 행 시각, completed_at = 답변 행 시각.
+
+    sources = 답변 출처 요약 (history_sources() 형식, 최대 5개). get_recent_chat_turns만 채운다.
+    """
     question: str
     answer: str
     started_at: datetime
     completed_at: datetime
+    sources: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,33 @@ def _aware(value: datetime, name: str) -> None:
         raise ValueError(f"{name}에는 시간대가 있어야 합니다")
 
 
+def history_sources(sources: Any) -> list[dict[str, Any]]:
+    """저장된 답변 출처(ChatSource.model_dump() 목록) → 이전 대화용 출처 요약, 인용 순서대로 최대 5개.
+
+    한 건 = {citation_number(1부터, 화면의 인용 번호), evidence_type("new_research"=논문 / "guideline"=가이드라인),
+    title, pmid(논문일 때만, 아니면 None), source(논문=journal, 가이드라인=organization), publication_year}.
+    저장된 값에 없는 칸은 None. 객체가 아니거나 제목이 없는 항목은 건너뛴다 (번호는 원래 위치 그대로).
+    """
+    if not isinstance(sources, list):
+        return []
+    result = []
+    for number, item in enumerate(sources, start=1):
+        if len(result) == MAX_HISTORY_SOURCES:
+            break
+        if not isinstance(item, dict) or not item.get("title"):
+            continue
+        is_paper = item.get("evidence_type") == "new_research"
+        result.append({
+            "citation_number": number,
+            "evidence_type": item.get("evidence_type"),
+            "title": item["title"],
+            "pmid": item.get("pmid") if is_paper else None,
+            "source": item.get("journal") if is_paper else item.get("organization"),
+            "publication_year": item.get("publication_year"),
+        })
+    return result
+
+
 def get_recent_chat_turns(user_id: UUID, patient_id: Optional[UUID], reference_time: datetime,
                           limit: int = 5, *, conn=None) -> list[ChatTurn]:
     """reference_time 전에 완료된 질문·답변 쌍을 최신순으로 최대 limit개 ("이전 대화 기억"용).
@@ -114,10 +146,12 @@ def get_recent_chat_turns(user_id: UUID, patient_id: Optional[UUID], reference_t
     turn_id로 질문·답변 행을 묶는다. turn_id가 NULL인 옛 행(012)과 짝이 없는 행은 빠진다.
     patient_id 범위는 정확히 같은 것만 (None이면 환자 미선택 대화만). 같은 완료 시각은 turn_id 순.
     conn을 넘기면 그 트랜잭션 안에서 조회한다 (read_chat_history 참고).
+    답변 출처는 history_sources()로 줄여 ChatTurn.sources에 담는다.
     """
     _aware(reference_time, "reference_time")
     rows = _select_turns(user_id, patient_id, reference_time, limit, conn)
-    return [ChatTurn(question, answer, asked, answered) for _, question, answer, _, asked, answered in rows]
+    return [ChatTurn(question, answer, asked, answered, history_sources(sources))
+            for _, question, answer, sources, asked, answered in rows]
 
 
 def list_chat_turns(user_id: UUID, patient_id: Optional[UUID], *, before: Optional[datetime] = None,

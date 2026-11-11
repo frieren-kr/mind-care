@@ -67,21 +67,25 @@ DB 오류는 전파하며 인증 계층에서 503으로 변환한다. 오류를 
 `patient_id=None`은 환자를 고르지 않은 대화이며 조회도 None끼리만 묶는다(`IS NOT DISTINCT FROM`).
 환자를 지우면 그 환자의 대화 원문·요약도 지워진다(013, CASCADE). 그래서 NULL은 "원래 환자 미선택"뿐이다.
 질문·답변 두 행은 `turn_id`로 한 쌍이 된다(013). 반환 `ChatMessage(role, content, sources, created_at, patient_id)`,
-`ChatTurn(question, answer, started_at, completed_at)`(질문 행 시각·답변 행 시각), `ChatDailySummary(summary_date, summary)`.
+`ChatTurn(question, answer, started_at, completed_at, sources=[])`(질문 행 시각·답변 행 시각, 답변 출처 요약), `ChatDailySummary(summary_date, summary)`.
 
 | 함수 | 하는 일 |
 |---|---|
 | `save_chat_turn(user_id, patient_id, question, answer, sources)` | 질문·답변 두 행을 한 문장(트랜잭션)으로 저장, 같은 `turn_id`(uuid4). `sources`는 `ChatSource.model_dump()` 목록 |
-| `get_recent_chat_turns(user_id, patient_id, reference_time, limit=5, *, conn=None)` | `reference_time`(시간대 필수) 전에 완료된 질문·답변 쌍 `ChatTurn`, 최신순. `turn_id` self-join이라 옛 행·짝 없는 행은 빠진다. 같은 완료 시각은 `turn_id` 순 |
+| `get_recent_chat_turns(user_id, patient_id, reference_time, limit=5, *, conn=None)` | `reference_time`(시간대 필수) 전에 완료된 질문·답변 쌍 `ChatTurn`, 최신순. `turn_id` self-join이라 옛 행·짝 없는 행은 빠진다. 같은 완료 시각은 `turn_id` 순. `sources`는 `history_sources()`로 줄인 답변 출처 |
+| `history_sources(sources)` | 저장된 `ChatSource` 목록 → 이전 대화용 출처 요약, 인용 순서대로 **최대 5개**. 한 건 = `citation_number`(1부터, 원래 인용 위치), `evidence_type`(`new_research`/`guideline`), `title`, `pmid`(논문만, 아니면 null), `source`(논문=`journal`, 가이드라인=`organization`), `publication_year`. 없는 칸은 null, 객체가 아니거나 제목 없는 항목은 건너뜀 |
 | `get_daily_summaries_before(user_id, patient_id, before_day, limit=7, *, conn=None)` | `before_day`(한국 날짜)보다 이전 하루 요약 `ChatDailySummary`, 최신 날짜부터 |
 | `read_chat_history(user_id, patient_id, reference_time, max_turns=5)` | 위 두 조회를 커넥션·트랜잭션 하나로. 요약은 `reference_time`의 KST 오늘 이전만. `(turns, summaries)` 반환, 오류는 그대로 올린다. `/chat`의 이전 대화 Reader(`app/api/chat_history.py`)가 쓴다 |
 | `list_chat_turns(user_id, patient_id, *, before=None, limit=20)` | 화면용 `(ChatTurnRecord 목록, has_more)`. 답변 시각 `before` 미만 중 최신 limit개를 오래된 것부터. `ChatTurnRecord(turn_id, question, answer, sources, asked_at, answered_at)`. `GET /chat/{user_id}/history`가 쓴다 |
 | `get_recent_chat_messages(user_id, patient_id, limit=20)` | 최근 메시지 limit개를 오래된 것부터 (메시지 단위. `/chat`은 위의 턴 단위 조회를 쓴다) |
 | `list_chat_threads_for_day(day)` | 그날 대화가 있었던 `(user_id, patient_id)` 목록 (요약 배치용) |
 | `get_messages_for_day(user_id, patient_id, day)` | 그날 대화 전부(메시지 단위), 시간순 |
-| `get_turns_for_day(user_id, patient_id, day)` | 그날(KST, **답변 시각** 기준) 완료된 질문·답변 쌍 `ChatTurn` 전부, 시간순. 제외 규칙은 `get_recent_chat_turns`와 같다 (요약 배치용) |
+| `get_turns_for_day(user_id, patient_id, day)` | 그날(KST, **답변 시각** 기준) 완료된 질문·답변 쌍 `ChatTurn` 전부, 시간순. 제외 규칙은 `get_recent_chat_turns`와 같다 (요약 배치용, `sources`는 비어 있다) |
 | `save_daily_summary(user_id, patient_id, day, summary, model)` | 사용자·환자·날짜당 한 행, 다시 저장하면 덮어씀 |
 | `delete_old_chat_messages(days=7)` | 7일 지난 원문 삭제, 지운 행 수 반환. 요약은 남는다 |
+
+> 이전 대화 출처 연결 대기: `ChatTurn.sources`는 채워지지만, Agent 계약 `CompletedChatTurn`(extra=forbid)에 출처 칸이 아직 없어
+> Reader(`app/api/chat_history.py`)는 넘기지 않는다. 칸이 생기면 Reader에 `sources=t.sources` 한 줄을 더한다.
 
 `POST /chat`은 답변 성공 시 저장하고, 저장이 실패해도 답변은 그대로 준다(로그만).
 매일 `python -m scripts.summarize_chats`(기본 어제, `--date`, `--dry-run`)가 요약 → 저장 → 7일 지난 원문 삭제를 한다.
