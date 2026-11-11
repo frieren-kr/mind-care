@@ -359,6 +359,23 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", "\n".join(logs.output))
         self.search.assert_called_once()
 
+    def test_provider_error_logs_status_code_and_masked_message(self):
+        import httpx
+
+        def transport(request):
+            return httpx.Response(401, json={"error": {"message": "Key sk-proj-SECRET123 has expired",
+                                                       "type": "invalid_request_error", "code": "expired_secret_key"}})
+
+        self.use_real_dependency_with_mock_provider(transport)
+        with self.assertLogs("app.api.ai_failure_log", "WARNING") as logs:
+            response = self.get(refresh=True)
+        self.assertEqual(response.json()["mode"], "search")
+        text = "\n".join(logs.output)
+        for expected in ("추천 AI 실행 실패", "status=provider_error", "errors=['provider_error']",
+                         "AuthenticationError status=401 code=expired_secret_key", "sk-***"):
+            self.assertIn(expected, text)
+        self.assertNotIn("SECRET123", text)
+
     def test_handoff_keeps_db_title_summaries_grades_order_and_agent_reasons(self):
         pmids = [DB_PMIDS[0], None, DB_PMIDS[1], MISSING_PMID, DB_PMIDS[2]]
         result = make_result("offline", pmids)

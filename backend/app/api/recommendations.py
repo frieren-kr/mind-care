@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from openai import OpenAI
 
 from app.ai.agent.clients.openai_client import OpenAIClient
+from app.api.ai_failure_log import ErrorRecordingClient, logged_execution
 from app.ai.agent.composition import build_evidence_registry
 from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
@@ -99,7 +100,8 @@ def get_feed_execution() -> Optional[FeedExecution]:
     try:
         registry = build_evidence_registry()
         sdk = OpenAI(api_key=api_key, timeout=20.0, max_retries=0)
-        client = OpenAIClient(sdk, model=model, timeout_seconds=20.0)
+        # OpenAI 오류 코드를 실패 로그에 남기려고 감싼다 (api/ai_failure_log.py).
+        client = ErrorRecordingClient(OpenAIClient(sdk, model=model, timeout_seconds=20.0))
         return FeedExecutionV1(client=client, registry=registry)
     except Exception as exc:
         if sdk is not None:
@@ -322,7 +324,7 @@ def get_recommendations(
             context = AgentContext(request_id=str(uuid4()), user_id=user_id, patient_id=None)
             items = FeedWorkflow(
                 context_prepare=context_prepare,
-                feed_execution=feed_execution,
+                feed_execution=logged_execution("추천", feed_execution),
                 backend_handoff=lambda _ctx, result: backend_handoff(result),
             ).run(context)
             if items:

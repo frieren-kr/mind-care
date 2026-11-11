@@ -219,6 +219,29 @@ class ChatApiTests(unittest.TestCase):
         self.llm = FakeLLMClient(turns)
         return ChatExecutionV1(self.llm, chat.build_chat_tool_registry)
 
+    def test_provider_error_logged_with_openai_code_without_question_or_key(self):
+        import httpx
+        import openai
+        from app.api.ai_failure_log import ErrorRecordingClient
+
+        class ExpiredKeyLLM:
+            def generate(self, request):
+                response = httpx.Response(401, request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
+                raise openai.AuthenticationError("Incorrect API key provided: sk-proj-SECRET123", response=response,
+                                                 body={"code": "invalid_api_key", "message": "x"})
+
+        execution = ChatExecutionV1(ErrorRecordingClient(ExpiredKeyLLM()), chat.build_chat_tool_registry)
+        with self.assertLogs("app.api.ai_failure_log", "WARNING") as logs:
+            res = self.post({"message": "PRIVATE 질문 내용"}, execution)
+        self.assertEqual(res.status_code, 503)
+        text = "\n".join(logs.output)
+        self.assertIn("챗봇 AI 실행 실패", text)
+        self.assertIn("status=provider_error errors=['provider_error']", text)
+        self.assertIn("AuthenticationError status=401 code=invalid_api_key", text)
+        self.assertIn("sk-***", text)
+        for secret in ("SECRET123", "PRIVATE"):
+            self.assertNotIn(secret, text)
+
     def tool_names(self, request_index=0):
         return sorted(tool["name"] for tool in self.llm.requests[request_index][1])
 

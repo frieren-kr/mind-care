@@ -41,6 +41,7 @@ from app.ai.agent.outputs import StructuredAgentResult
 from app.ai.agent.schemas import AgentContext
 from app.ai.agent.workflows.chat import ChatWorkflow, ChatWorkflowError
 from app.ai.agent.workflows.chat_context_prepare import prepare_chat_input as _prepare_chat_input
+from app.api.ai_failure_log import ErrorRecordingClient, logged_execution
 from app.api.chat_history import ChatStoreHistoryReader
 from app.ai.agent.workflows.chat_execution import ChatExecutionV1
 from app.ai.agent.workflows.chat_history_context import chat_history_token_counter
@@ -112,7 +113,8 @@ def get_chat_execution() -> Optional[ChatExecution]:
     try:
         chat_history_token_counter(model)
         sdk = OpenAI(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=0)
-        client = OpenAIClient(sdk, model=model, timeout_seconds=LLM_TIMEOUT_SECONDS)
+        # OpenAI 오류 코드를 실패 로그에 남기려고 감싼다 (api/ai_failure_log.py).
+        client = ErrorRecordingClient(OpenAIClient(sdk, model=model, timeout_seconds=LLM_TIMEOUT_SECONDS))
         # 요청마다 새 Tool 목록. 환자를 고르지 않으면 환자 Tool을 빼는 것은 build_chat_registry가 하고
         # ChatExecutionV1이 한 번 더 검사한다. 어댑터는 상태가 없어 요청마다 만들어도 DB에 가지 않는다.
         return ChatExecutionV1(client, build_chat_tool_registry,
@@ -167,7 +169,7 @@ def post_chat(
     try:
         response = ChatWorkflow(
             context_prepare=prepare_chat_input,
-            chat_execution=chat_execution,
+            chat_execution=logged_execution("챗봇", chat_execution),
             backend_handoff=backend_handoff,
         ).run(context, body.message)
     except ChatWorkflowError as exc:
