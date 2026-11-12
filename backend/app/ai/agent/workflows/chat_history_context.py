@@ -3,12 +3,12 @@ import json
 import logging
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import UUID
 
 import tiktoken
 
-from pydantic import ConfigDict, Field, StrictStr, field_validator, model_validator
+from pydantic import ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
 from ..schemas import AgentModel
 
@@ -20,6 +20,34 @@ KST = timezone(timedelta(hours=9))
 logger = logging.getLogger(__name__)
 
 
+class ChatHistorySource(AgentModel):
+    model_config = ConfigDict(revalidate_instances='always')
+    citation_number: StrictInt = Field(ge=1)
+    title: StrictStr = Field(min_length=1, max_length=1000)
+    pmid: StrictStr | None = None
+    evidence_type: Literal['new_research', 'guideline']
+
+    @field_validator('title')
+    @classmethod
+    def nonblank_title(cls, value):
+        if not value.strip():
+            raise ValueError('Empty source title')
+        return value
+
+    @field_validator('pmid')
+    @classmethod
+    def valid_pmid(cls, value):
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError('Invalid PMID')
+        return value
+
+    @model_validator(mode='after')
+    def source_type(self):
+        if self.evidence_type == 'guideline' and self.pmid is not None:
+            raise ValueError('Guideline must not have PMID')
+        return self
+
+
 class CompletedChatTurn(AgentModel):
     model_config = ConfigDict(revalidate_instances='always')
     user_message: StrictStr = Field(min_length=1)
@@ -28,6 +56,7 @@ class CompletedChatTurn(AgentModel):
     # Optional server provenance for turns spanning KST midnight. Without it,
     # raw remains usable but summary overlap cannot be proven safe.
     started_at: datetime | None = None
+    sources: list[ChatHistorySource] = Field(default_factory=list, max_length=5)
 
     @field_validator('user_message', 'assistant_message')
     @classmethod
@@ -47,6 +76,9 @@ class CompletedChatTurn(AgentModel):
     def ordered_times(self):
         if self.started_at is not None and self.started_at > self.completed_at:
             raise ValueError('Turn starts after completion')
+        numbers = [source.citation_number for source in self.sources]
+        if any(current <= previous for previous, current in zip(numbers, numbers[1:])):
+            raise ValueError('History source numbers must be unique and ascending')
         return self
 
 
@@ -185,9 +217,16 @@ def build_chat_history(snapshot: ChatHistorySnapshot, *, user_id: UUID, patient_
                'messages': [{'role': 'user', 'content': question}, {'role': 'assistant', 'content': answer}]}
         if turn.started_at is not None:
             row['started_at'] = turn.started_at.isoformat()
+        if turn.sources:
+            row['sources'] = [source.model_dump() for source in turn.sources]
         proposed = [row] + recent
+        if turn.sources and _tokens(proposed, [], count_tokens) > RECENT_TOKEN_LIMIT:
+            # Identification metadata is optional; preserve the conversation first.
+            del row['sources']
         if _tokens(proposed, [], count_tokens) > RECENT_TOKEN_LIMIT:
-            break
+            proposed = [{key: value for key, value in item.items() if key != 'sources'} for item in proposed]
+            if _tokens(proposed, [], count_tokens) > RECENT_TOKEN_LIMIT:
+                break
         recent = proposed
     summaries = []
     for summary in sorted(snapshot.daily_summaries, key=lambda s: s.summary_date, reverse=True):
