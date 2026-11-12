@@ -108,6 +108,25 @@ class SearchEvidencePolicyTests(unittest.TestCase):
         self.assertEqual(result, package([]))
         retriever.search_evidence.assert_called_once_with(query=args.query, top_k=8, context=CONTEXT)
 
+    def test_chat_candidates_include_grades_with_deferred_interpretation_policy(self):
+        source = package(['A', 'B', 'C', 'D', 'E'])
+        grades = ['A', 'B', 'C', 'D', None]
+        for item, grade in zip(source.evidence, grades, strict=True):
+            item.evidence_grade = grade
+        before = deepcopy(source.model_dump())
+        result, wire = self.execute('chat', [response([function('graded', '{"query":"synthetic","top_k":5}')]),
+            self.final('chat', 5, (0, 1, 2, 3, 4))], lambda context, args: source)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assert_delivery(wire)
+        candidates = self.projection(wire[1], 'chat')['candidates']
+        self.assertEqual([item['evidence_grade'] for item in candidates], grades)
+        self.assertEqual(source.model_dump(), before)
+        self.assertEqual([item.pmid for item in result.sources], ['A', 'B', 'C', 'D', 'E'])
+        for meaning in ('evidence_grade', '공식 GRADE 평가', '등급이 없으면 추정하지 않으며',
+                        '환자에게 적용할 수 있는지를 확정하지 않는다'):
+            self.assertIn(meaning, SEARCH_EVIDENCE_DATA_POLICY)
+        self.assertTrue(all('evidence_grade' not in item['description'] for item in wire[0]['tools']))
+
     def test_initial_policies_keep_workflow_decisions_not_research_interpretation(self):
         chat = ChatPromptBuilder().build_system_prompt(CONTEXT) + build_structured_output_policy(ChatAnswerV1).content
         feed = FeedPromptBuilder().build_system_prompt(CONTEXT)

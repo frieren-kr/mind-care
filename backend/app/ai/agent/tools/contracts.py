@@ -126,6 +126,10 @@ class EvidenceItem(AgentModel):
     title: str
     publication_year: int | None = None
     study_type: str | None = None
+    evidence_grade: Literal["A", "B", "C", "D"] | None = Field(
+        default=None,
+        description="RAG가 제공한 내부 근거 등급. 공식 GRADE 평가와 구별하며, 미확인 시 None."
+    )
     # search_similar는 코사인 유사도 [-1, 1]을 반환한다.
     relevance_score: float = Field(ge=-1, le=1, description=(
         "BGE-M3 + cosine-similarity 기반 retrieval score [-1, 1]. "

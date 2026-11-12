@@ -20,6 +20,22 @@ from .test_workflows import CONTEXT, call, envelopes, tool_turn
 
 
 class EvidenceContractTests(TestCase):
+    def test_optional_evidence_grade_preserves_rag_values_without_reclassification(self):
+        for kind in ('new_research', 'guideline'):
+            payload = {'evidence_type': kind, 'title': '[FAKE]', 'study_type': 'other', 'relevance_score': 0.5}
+            self.assertIsNone(c.EvidenceItem(**payload).evidence_grade)
+            for grade in ('A', 'B', 'C', 'D', None):
+                with self.subTest(kind=kind, grade=grade):
+                    item = c.EvidenceItem(**payload, evidence_grade=grade)
+                    self.assertEqual(item.evidence_grade, grade)
+                    self.assertEqual(item.study_type, 'other')
+
+    def test_invalid_evidence_grades_are_rejected(self):
+        for grade in ('', 'a', 'E', 'A ', 'GRADE A', 1, True, [], {}):
+            with self.subTest(grade=grade), self.assertRaises(ValidationError):
+                c.EvidenceItem(evidence_type='new_research', title='[FAKE]', relevance_score=0.5,
+                               evidence_grade=grade)
+
     def package(self):
         return RAGEvidencePackage(query="synthetic", evidence=[
             RAGEvidenceItem(evidence_type="new_research", pmid="FAKE-PMID", title="[FAKE] research",
@@ -119,7 +135,9 @@ class EvidenceContractTests(TestCase):
 
     def test_rag_field_types_required_fields_and_defaults_match(self):
         self.assertEqual(list(c.EvidencePackage.model_fields), list(RAGEvidencePackage.model_fields))
-        self.assertEqual(list(c.EvidenceItem.model_fields), list(RAGEvidenceItem.model_fields))
+        # The optional grade can be deployed on either side first; all other fields must match.
+        self.assertEqual([name for name in c.EvidenceItem.model_fields if name != 'evidence_grade'],
+                         [name for name in RAGEvidenceItem.model_fields if name != 'evidence_grade'])
         for name, rag_field in RAGEvidenceItem.model_fields.items():
             with self.subTest(field=name):
                 agent_field = c.EvidenceItem.model_fields[name]
@@ -130,6 +148,8 @@ class EvidenceContractTests(TestCase):
     def test_rag_payload_roundtrip_including_nulls_and_guideline(self):
         payload = self.package().model_dump(mode="json")
         validated = c.EvidencePackage.model_validate(payload)
+        for item in payload['evidence']:
+            item.setdefault('evidence_grade', None)
         self.assertEqual(validated.model_dump(mode="json"), payload)
         self.assertEqual(json.loads(validated.model_dump_json()), payload)
         guideline = validated.evidence[1]
@@ -159,6 +179,8 @@ class EvidenceContractTests(TestCase):
                 self.assertEqual(result.errors, [])
                 self.assertEqual(result.total_tool_calls, 1)
                 payload = package.model_dump(mode="json")
+                for item in payload['evidence']:
+                    item.setdefault('evidence_grade', None)
                 self.assertEqual(envelopes(client)[0]["data"], payload)
                 messages = [message for message in client.requests[-1][0] if message.kind == "evidence"]
                 self.assertEqual(len(messages), 1)

@@ -11,9 +11,27 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from app.ai.agent.workflows.chat_history_context import (
-    ChatHistorySnapshot, CompletedChatTurn, DailyChatSummary)
+    ChatHistorySnapshot, ChatHistorySource, CompletedChatTurn, DailyChatSummary)
 from app.db import chat_store
+
+
+def project_history_sources(raw_sources):
+    """Project identification fields only; omit invalid entries without renumbering."""
+    sources = []
+    for raw in raw_sources:
+        try:
+            item = ChatHistorySource.model_validate({
+                key: raw[key] for key in ('citation_number', 'title', 'pmid', 'evidence_type')
+            })
+        except (KeyError, TypeError, ValidationError):
+            continue
+        if sources and item.citation_number <= sources[-1].citation_number:
+            continue
+        sources.append(item)
+    return sources
 
 
 class ChatStoreHistoryReader:
@@ -26,7 +44,8 @@ class ChatStoreHistoryReader:
             user_id=user_id,
             patient_id=patient_id,
             recent_turns=[CompletedChatTurn(user_message=t.question, assistant_message=t.answer,
-                                            started_at=t.started_at, completed_at=t.completed_at)
+                                            started_at=t.started_at, completed_at=t.completed_at,
+                                            sources=project_history_sources(t.sources))
                           for t in turns],
             daily_summaries=[DailyChatSummary(summary_date=s.summary_date, summary=s.summary)
                              for s in summaries],

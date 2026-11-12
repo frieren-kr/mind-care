@@ -44,7 +44,8 @@ class SearchGuidelinesAdapterTests(TestCase):
         before=[item.model_dump(mode='json') for item in raw]
         result=RagGuidelineRetriever(search_fn=Mock(return_value=raw)).search_guidelines(query='q',top_k=1,context=CONTEXT)
         # Runner owns caps and dedup; Adapter must neither truncate nor repair.
-        self.assertEqual([item.model_dump(mode='json') for item in result.evidence],before)
+        expected=[{'evidence_grade':None,**item} for item in before]
+        self.assertEqual([item.model_dump(mode='json') for item in result.evidence],expected)
         self.assertIsNone(result.evidence[1].source_url)
         self.assertIsNone(result.evidence[1].publication_year)
         result.evidence[0].title='Changed copy'

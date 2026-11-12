@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
-from ..workflows.chat_history_context import (ChatHistorySnapshot, CompletedChatTurn, DailyChatSummary,
+from ..workflows.chat_history_context import (ChatHistorySnapshot, ChatHistorySource, CompletedChatTurn, DailyChatSummary,
     build_chat_history, serialize_chat_data, utf8_token_upper_bound)
 from .test_workflows import CONTEXT
 from ..workflows.chat_history_context import chat_history_token_counter
@@ -32,6 +32,104 @@ def build(data, **kwargs):
 
 def envelope(history):
     return serialize_chat_data({'previous_chat_context':history})
+
+
+def history_source(number=1, **updates):
+    return dict(citation_number=number, title='Stored study', pmid='12345678',
+                evidence_type='new_research') | updates
+
+
+class ChatHistorySourceTests(TestCase):
+    def test_source_contract_and_empty_turn_default(self):
+        self.assertEqual(set(ChatHistorySource.model_fields),
+                         {'citation_number', 'title', 'pmid', 'evidence_type'})
+        first, second = turn(), turn(2)
+        first.sources.append(ChatHistorySource(**history_source()))
+        self.assertEqual(second.sources, [])
+        self.assertNotIn('sources', build(snapshot([second]))['recent_turns'][0])
+        for kind in ('new_research', 'guideline'):
+            self.assertIsNone(ChatHistorySource(**history_source(pmid=None, evidence_type=kind)).pmid)
+
+    def test_invalid_source_fields_are_rejected(self):
+        invalid = [{'citation_number': v} for v in (0, -1, '2', True, 1.5)]
+        invalid += [{'title': v} for v in ('', '  ', 'x'*1001, 123)]
+        invalid += [{'pmid': v} for v in ('', ' ', ' 123', '123 ', 123)]
+        invalid += [{'evidence_type': 'other'}, {'evidence_type': 'guideline'},
+                    {'source': 'Journal'}, {'publication_year': 2025}]
+        for updates in invalid:
+            with self.subTest(updates=updates), self.assertRaises(ValidationError):
+                ChatHistorySource(**history_source(**updates))
+
+    def test_sources_remain_attached_to_turn_with_original_nonconsecutive_numbers(self):
+        sources = [history_source(3), history_source(5, title='Guide', pmid=None, evidence_type='guideline')]
+        raw = turn().model_copy(update={'sources': sources})
+        rows = build(snapshot([raw, turn(2), turn(3).model_copy(update={'sources': sources})]))['recent_turns']
+        self.assertEqual(rows[0]['representation'], 'verbatim_excerpt')
+        self.assertEqual(rows[0]['sources'], sources)
+        self.assertNotIn('sources', rows[1])
+        self.assertEqual(rows[2]['sources'], sources)
+
+    def test_duplicate_descending_and_oversized_source_lists_are_rejected(self):
+        for numbers in ([1, 1], [2, 1], list(range(1, 7))):
+            with self.subTest(numbers=numbers), self.assertRaises(ValidationError):
+                CompletedChatTurn(**(turn().model_dump() | {'sources': [history_source(n) for n in numbers]}))
+
+    def test_source_overflow_keeps_raw_turns_and_existing_older_selection(self):
+        turns = [turn(), turn(2), turn(3)]
+        expected = build(snapshot(turns))
+        turns[0] = turns[0].model_copy(update={'sources': [history_source(n, title='논'*1000) for n in (1, 2)]})
+        self.assertEqual(build(snapshot(turns)), expected)
+        too_large = turn(answer='x'*5500).model_copy(update={'sources': [history_source()]})
+        self.assertEqual(build(snapshot([too_large, turn(2)]))['recent_turns'], [])
+
+    def test_full_source_json_counts_toward_exact_budget_and_summary_budget_is_preserved(self):
+        raw = turn(answer='x').model_copy(update={'sources': [history_source(title='한글 "title"\n')]})
+        overhead = utf8_token_upper_bound(envelope(build(snapshot([raw])))) - 1
+        fitting = raw.model_copy(update={'assistant_message': 'x'*(5500-overhead)})
+        history = build(snapshot([fitting]))
+        self.assertEqual(utf8_token_upper_bound(envelope(history)), 5500)
+        self.assertEqual(history['recent_turns'][0]['sources'], [history_source(title='한글 "title"\n')])
+        overflow = fitting.model_copy(update={'assistant_message': fitting.assistant_message+'x'})
+        history = build(snapshot([overflow]))
+        self.assertEqual(history['recent_turns'][0]['messages'][1]['content'], overflow.assistant_message)
+        self.assertNotIn('sources', history['recent_turns'][0])
+        summary = DailyChatSummary(summary_date=date(2026, 11, 5), summary='Stored day.')
+        combined = build(snapshot([fitting], [summary]))
+        self.assertEqual(combined['daily_summaries'][0]['summary'], summary.summary)
+        self.assertLessEqual(utf8_token_upper_bound(envelope(combined)), 7000)
+
+    def test_retained_sources_are_removed_before_dropping_an_older_raw_turn(self):
+        newest = turn(1, answer='a'*2200).model_copy(update={'sources':[history_source(title='T'*1000)]})
+        older = turn(2, answer='b'*2200)
+        expected = build(snapshot([turn(1, answer='a'*2200), older]))
+        self.assertEqual(len(expected['recent_turns']), 2)
+        for sources in ([], [history_source()]):
+            with self.subTest(older_sources=sources):
+                data = snapshot([newest, older.model_copy(update={'sources':sources})])
+                original = data.model_dump()
+                result = build(data)
+                self.assertEqual(result, expected)
+                self.assertLessEqual(utf8_token_upper_bound(envelope(result)), 5500)
+                self.assertEqual(data.model_dump(), original)
+
+    def test_raw_overflow_still_stops_and_preserves_previously_selected_sources(self):
+        newest = turn(1, answer='a'*2200).model_copy(update={'sources':[history_source(title='T'*1000)]})
+        older = turn(2, answer='b'*3000)
+        expected = build(snapshot([newest]))
+        self.assertIn('sources', expected['recent_turns'][0])
+        raw_rows = [build(snapshot([raw]))['recent_turns'][0] for raw in (older, turn(1, answer='a'*2200))]
+        self.assertGreater(utf8_token_upper_bound(envelope({'recent_turns':raw_rows, 'daily_summaries':[]})), 5500)
+        result = build(snapshot([newest, older, turn(3)]))
+        self.assertEqual(result, expected)
+        self.assertLessEqual(utf8_token_upper_bound(envelope(result)), 5500)
+
+    def test_source_mutations_and_scope_mismatch_still_fail_validation(self):
+        raw = turn().model_copy(update={'sources': [ChatHistorySource(**history_source()).model_copy(update={'title': ' '})]})
+        with self.assertRaises(ValidationError):
+            build(snapshot([raw]))
+        data = snapshot([turn().model_copy(update={'sources': [history_source()]})])
+        with self.assertRaises(ValueError):
+            build(data.model_copy(update={'patient_id': None}))
 
 
 class ChatHistoryContextTests(TestCase):
