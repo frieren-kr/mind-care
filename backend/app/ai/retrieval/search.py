@@ -40,12 +40,10 @@ from pydantic import BaseModel, Field
 
 from app.ai.retrieval.embedding import MODEL_NAME, embed_query
 from app.ai.retrieval.evidence import (
-    LEVEL,
     classify,
     is_caregiver_focused,
     is_dementia_related,
     query_targets_caregiver,
-    to_grade,
 )
 from app.db.functions import (
     get_guidelines_by_ids,
@@ -55,15 +53,6 @@ from app.db.functions import (
 )
 
 PUBMED_URL = "https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
-
-def evidence_grade(study_type: Optional[str]) -> Optional[str]:
-    """연구 유형 → 근거 등급 A~D. 피드의 _derived_grade()와 같은 규칙(LEVEL → to_grade).
-    챗봇이 말하는 등급과 앱 화면의 등급이 같게 나오도록 한 곳에서 계산한다.
-    프로토콜·기타처럼 등급이 없는 유형은 None."""
-    if not study_type:
-        return None
-    return to_grade(LEVEL.get(study_type))
 
 
 class EvidenceItem(BaseModel):
@@ -77,10 +66,6 @@ class EvidenceItem(BaseModel):
         default=None,
         description="meta_analysis / systematic_review / guideline / rct / clinical_trial / "
         "observational / qualitative / review / case_report / expert_opinion / protocol / other",
-    )
-    evidence_grade: Optional[str] = Field(
-        default=None,
-        description="근거 등급 A~D (study_type으로 계산, 앱 화면과 같은 규칙). 등급이 없으면 null",
     )
     relevance_score: float = Field(description="질문과의 코사인 유사도 (0~1, 클수록 관련)")
     ai_summary: Optional[str] = Field(default=None, description="웅님 요약. 아직 연결 전이라 None")
@@ -150,7 +135,6 @@ def _candidates(
                 title=p.title,
                 publication_year=p.published_date.year if p.published_date else None,
                 study_type=ev.study_type,
-                evidence_grade=evidence_grade(ev.study_type),
                 relevance_score=round(score, 4),
                 abstract=p.abstract,
                 journal=p.journal,
@@ -206,7 +190,6 @@ def _guideline_candidates(query_vec: list[float], n: int) -> list[EvidenceItem]:
                 title=f"{g.doc_title} — {g.section}" if g.section else g.doc_title,
                 publication_year=g.published_year,
                 study_type="guideline",
-                evidence_grade=evidence_grade("guideline"),
                 relevance_score=round(float(score_by_id[g.id]), 4),
                 abstract=g.content,  # 가이드라인 조각 본문
                 organization=g.source,
@@ -364,7 +347,5 @@ if __name__ == "__main__":
             tag = "가이드라인" if e.evidence_type == "guideline" else e.study_type
             if e.evidence_type != "guideline" and is_caregiver_focused(e.title):
                 tag += "·보호자"
-            if e.evidence_grade:
-                tag += f"·{e.evidence_grade}"
             print(f"{i}. [{e.relevance_score:.3f}] [{tag}] {e.title}")
             print(f"   {e.journal or e.organization or '-'} ({e.publication_year or '-'})  {e.source_url}\n")
