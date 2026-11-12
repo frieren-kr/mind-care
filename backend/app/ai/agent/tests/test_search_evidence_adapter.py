@@ -29,12 +29,39 @@ def package():
 
 
 class SearchEvidenceAdapterTests(TestCase):
+    def test_serialized_rag_grades_pass_through_existing_adapter(self):
+        from app.ai.retrieval.evidence import to_grade
+        for level, expected in ((1, 'A'), (2, 'B'), (3, 'C'), (4, 'C'), (5, 'D'), (6, 'D'), (None, None)):
+            with self.subTest(level=level):
+                # Simulate the additional serialized RAG field, pending its upstream implementation.
+                payload = package().model_dump(mode='json')
+                payload['evidence'][0]['evidence_grade'] = to_grade(level)
+                search = Mock(return_value=Mock(model_dump=Mock(return_value=payload)))
+                result = RagEvidenceRetriever(search_fn=search).search_evidence(
+                    query='synthetic', top_k=5, context=CONTEXT)
+                self.assertEqual(result.evidence[0].evidence_grade, expected)
+                self.assertIsNone(result.evidence[1].evidence_grade)
+                self.assertEqual(result.evidence[0].study_type, payload['evidence'][0]['study_type'])
+                search.assert_called_once_with(query='synthetic', k=5)
+
     def test_protocol_signature_and_agent_return_type(self):
         self.assertEqual(inspect.signature(RagEvidenceRetriever.search_evidence),
                          inspect.signature(EvidenceRetriever.search_evidence))
         result = RagEvidenceRetriever(search_fn=Mock(return_value=package())).search_evidence(
             query="synthetic", top_k=5, context=CONTEXT)
         self.assertIs(type(result), EvidencePackage)
+
+    def test_missing_grade_is_none_and_invalid_upstream_grade_is_rejected(self):
+        payload = package().model_dump(mode='json')
+        for item in payload['evidence']:
+            item.pop('evidence_grade', None)
+        search = Mock(return_value=Mock(model_dump=Mock(return_value=payload)))
+        result = RagEvidenceRetriever(search_fn=search).search_evidence(
+            query='synthetic', top_k=5, context=CONTEXT)
+        self.assertTrue(all(item.evidence_grade is None for item in result.evidence))
+        payload['evidence'][0]['evidence_grade'] = 'E'
+        with self.assertRaises(ValidationError):
+            RagEvidenceRetriever(search_fn=search).search_evidence(query='synthetic', top_k=5, context=CONTEXT)
 
     def test_query_and_k_are_forwarded_without_identity_or_filter_overrides(self):
         query = " \t치매 돌봄 연구\n "
@@ -54,7 +81,8 @@ class SearchEvidenceAdapterTests(TestCase):
             query="synthetic", top_k=1, context=CONTEXT)
         # No re-ranking, dedup or additional cap even when the upstream returns
         # more rows: top_k semantics belong to RAG, not a new Adapter policy.
-        self.assertEqual(result.model_dump(mode="json"), before)
+        expected = dict(before, evidence=[{'evidence_grade': None, **item} for item in before['evidence']])
+        self.assertEqual(result.model_dump(mode="json"), expected)
         self.assertEqual(raw.model_dump(mode="json"), before)
         self.assertEqual(result.evidence[0].relevance_score, -0.4)
         self.assertEqual(result.evidence[0].evidence_type, "new_research")
@@ -138,7 +166,10 @@ class SearchEvidenceAdapterTests(TestCase):
         with patch.object(rag, "search", return_value=package()) as search:
             result = source.search_evidence(query="synthetic", top_k=20, context=CONTEXT)
         search.assert_called_once_with(query="synthetic", k=20)
-        self.assertEqual(result.model_dump(mode="json"), package().model_dump(mode="json"))
+        expected = package().model_dump(mode="json")
+        for item in expected['evidence']:
+            item.setdefault('evidence_grade', None)
+        self.assertEqual(result.model_dump(mode="json"), expected)
 
     def test_real_rag_strip_and_empty_result_with_mocked_embedding_and_db(self):
         with patch.object(rag, "embed_query", return_value=[0.0]) as embed, \
@@ -174,4 +205,7 @@ class SearchEvidenceAdapterTests(TestCase):
         with patch.object(rag, "search", side_effect=AssertionError("Live RAG must not run")):
             result = RagEvidenceRetriever(search_fn=Mock(return_value=package())).search_evidence(
                 query="synthetic", top_k=5, context=CONTEXT)
-        self.assertEqual(json.loads(result.model_dump_json()), package().model_dump(mode="json"))
+        expected = package().model_dump(mode="json")
+        for item in expected['evidence']:
+            item.setdefault('evidence_grade', None)
+        self.assertEqual(json.loads(result.model_dump_json()), expected)

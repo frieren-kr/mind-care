@@ -238,6 +238,7 @@ class ChatSourcePolicyTests(unittest.TestCase):
                  'organization': 'Synthetic Organization C', 'full_text_available': False},
             ]
             for index, (item, fields) in enumerate(zip(source.evidence, expected, strict=True)):
+                fields['evidence_grade'] = None
                 for name, value in fields.items():
                     setattr(item, name, value)
                 item.doi = f'10.synthetic/{index}'

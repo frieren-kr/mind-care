@@ -44,7 +44,10 @@ class SearchEvidenceIntegrationTests(TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.total_tool_calls, 1)
         self.assertEqual(result.errors, [])
-        self.assertEqual(envelopes(client)[0]["data"], package().model_dump(mode="json"))
+        expected = package().model_dump(mode="json")
+        for item in expected['evidence']:
+            item.setdefault('evidence_grade', None)
+        self.assertEqual(envelopes(client)[0]["data"], expected)
         self.assertEqual(client.requests[0][1], registry.definitions())
         search.assert_called_once_with(query="Dementia sleep research", k=5)
         self.assertEqual(production_registry().definitions(), [])

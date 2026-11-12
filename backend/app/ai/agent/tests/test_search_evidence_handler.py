@@ -49,7 +49,10 @@ class SearchEvidenceHandlerTests(TestCase):
             {"query": "synthetic", "top_k": 1}), CONTEXT.model_copy(update={"patient_id": None}))
         self.assertTrue(outcome.success)
         self.assertIsNone(outcome.error)
-        self.assertEqual(outcome.data, package().model_dump(mode="json"))
+        expected = package().model_dump(mode="json")
+        for item in expected['evidence']:
+            item.setdefault('evidence_grade', None)
+        self.assertEqual(outcome.data, expected)
         self.assertEqual((outcome.call_id, outcome.tool_name), ("call_1", "search_evidence"))
         self.assertEqual((trace.success, trace.result_count, trace.error_type), (True, 2, None))
         search.assert_called_once_with(query="synthetic", k=1)
