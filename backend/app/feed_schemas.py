@@ -44,6 +44,7 @@ DEFAULT_CAPS = {
     "visits": 20,
     "visits_upcoming": 5,  # 방문 20건 중 '앞으로의 예약'에 먼저 주는 자리
     "care_logs": 200,
+    "chat_summaries": 5,
 }
 
 # 적격 기간 (reference_date 기준, 일 단위)
@@ -52,6 +53,7 @@ SAFETY_WINDOW_DAYS = 180
 MEDICATION_STOPPED_WITHIN_DAYS = 90
 VISIT_PAST_WINDOW_DAYS = 365
 VISIT_FUTURE_WINDOW_DAYS = 90
+CHAT_SUMMARY_WINDOW_DAYS = 7  # 챗봇 하루 요약: [reference_date - 7일, reference_date) — 오늘(KST)은 아직 요약 전
 
 # 최근 추천 이력 (reference_time 기준) — 스냅샷의 recently_recommended, get_recent_feed_papers() 기본값
 RECENT_FEED_WINDOW_DAYS = 7  # 피드는 3일마다 갱신 → 직전 1~2번 피드만 뺀다 (DB가 작아 길게 빼면 좋은 논문이 바닥남)
@@ -202,6 +204,17 @@ class FeedReadLongTermSummary(FeedReadModel):
     generated_at: AwareDatetime
 
 
+class FeedReadChatDailySummary(FeedReadModel):
+    """챗봇 대화 하루 요약 1건 (chat_daily_summaries). 환자 이름은 넣지 않는다.
+
+    patient_id가 None이면 환자를 고르지 않은 대화다.
+    """
+
+    patient_id: Optional[UUID]
+    summary_date: date = Field(description="한국 날짜(KST)")
+    summary: StrictStr
+
+
 class FeedRecentPaper(BaseModel):
     """get_recent_feed_papers() 항목 1개 = 최근 이 사용자에게 추천한 논문 1편 (논문별로 묶음)."""
 
@@ -225,6 +238,10 @@ class FeedReadSnapshot(FeedReadModel):
     long_term_summary: Optional[FeedReadLongTermSummary]
     # 최근 RECENT_FEED_WINDOW_DAYS일 안에 추천한 논문 (최근 순, 최대 RECENT_FEED_LIMIT편). 반복 추천 방지용.
     recently_recommended: list[FeedRecentPaper] = Field(default_factory=list)
+    # 최근 CHAT_SUMMARY_WINDOW_DAYS일 챗봇 하루 요약 (오늘 제외). 기본값은 이 칸을 모르는 기존 호출부용.
+    recent_chat_summaries: FeedReadCollection[FeedReadChatDailySummary] = Field(
+        default_factory=lambda: FeedReadCollection[FeedReadChatDailySummary](items=[], total_count=0)
+    )
 
 
 # ============================================================

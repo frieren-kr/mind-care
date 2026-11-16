@@ -225,7 +225,8 @@ candidates = [c for c in candidates if c.pmid not in seen]
 
 
 피드 개인화 스키마 (`app/feed_schemas.py`) — AI 쪽 `Source*` DTO와 **필드 이름·타입이 1:1**이다:
-- **FeedReadSnapshot**: `caregiver_profile?`, `managed_patients`, `recent_care_logs`, `long_term_summary?`
+- **FeedReadSnapshot**: `caregiver_profile?`, `managed_patients`, `recent_care_logs`, `long_term_summary?`, `recently_recommended`, `recent_chat_summaries`
+- **FeedReadChatDailySummary**: `patient_id?`(None = 환자 미선택 대화), `summary_date`(KST 날짜), `summary`. 환자 이름은 넣지 않는다.
 - **FeedReadCollection[T]**: `items`(실제로 담은 기록 = I) + `total_count`(적격 조건을 모두 적용한 뒤,
   **상한으로 자르기 전** 건수 = E). `len(items) <= total_count`를 모델이 검증하고,
   `is_truncated`로 잘렸는지 알 수 있다. `total_count`는 **항상 별도 집계 쿼리**로 센다
@@ -338,6 +339,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
   | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
   | 최근 추천 (`recently_recommended`, 2026-10-26) | 이 사용자의 `feed_items.created_at` ∈ `(reference_time - 7일, reference_time]`, **논문별로 묶음**. `get_recent_feed_papers()`와 같은 SQL을 **같은 트랜잭션**에서 실행 | `last_recommended_at DESC, paper_id` | 50편 (`total_count` 없음, 없으면 `[]`) |
+  | 챗봇 하루 요약 (`recent_chat_summaries`, 2026-11-16) | 이 사용자의 `chat_daily_summaries.summary_date` ∈ `[reference_date - 7일, reference_date)` (**오늘 제외**) **AND** (`patient_id IS NULL` **또는** 현재 관리 환자). `created_at` 기준 시각 조건은 **없다** (요약을 다시 만들면 갱신돼 그날 요약이 사라지므로) | `summary_date DESC, patient_id NULLS LAST, id` | 5 (로그에는 건수만 남기고 요약 내용은 남기지 않는다) |
 - **안전 이벤트: 플래그가 전부 false인 날(= 확인했고 사건 없음)은 적격이 아니다** (`total_count`에도 안 들어간다).
 - **★ 조건 변경 (2026-10-13) — 진료·복약은 상태와 날짜가 맞는 기록만 적격이다.** 허웅 님
   `ProductionFeedContextSource`는 아래 조합이 하나라도 오면 **스냅샷 전체를 거부**한다. 그래서 조회와

@@ -538,6 +538,46 @@ class LongTermSummaryTests(FeedReadTestBase):
             save_profile_summary(self.user_id, date(2026, 9, 30), date(2026, 9, 1), "거꾸로", [])
 
 
+class ChatSummaryTests(FeedReadTestBase):
+    def _summary(self, days_ago: int, patient_id=None, user_id=None, text="요약"):
+        self._insert("chat_daily_summaries", user_id=user_id or self.user_id, patient_id=patient_id,
+                     summary_date=REFERENCE_DATE - timedelta(days=days_ago), summary=text, model="test")
+
+    def test_window_scope_and_count(self):
+        """[오늘-7일, 오늘) + (환자 미선택 또는 내 환자)만. 오늘 것·8일 전·남의 환자·남의 요약은 빠진다."""
+        mine = self._add_patient()
+        other_user = self._create_user()
+        other_patient = self._add_patient(caregiver_id=other_user)
+        self._summary(1, text="미선택")
+        self._summary(1, mine, text="내 환자")
+        self._summary(7, text="7일 전")
+        self._summary(0, text="오늘")
+        self._summary(8, text="8일 전")
+        self._summary(2, other_patient, text="남의 환자")  # 내 user_id + 남의 환자 조합
+        self._summary(1, user_id=other_user, text="남의 요약")
+        col = snapshot(self.user_id).recent_chat_summaries
+        self.assertEqual(col.total_count, 3)
+        # 같은 날은 환자 요약 먼저, 미선택(NULL)은 뒤 (NULLS LAST)
+        self.assertEqual([(s.summary, s.patient_id) for s in col.items],
+                         [("내 환자", mine), ("미선택", None), ("7일 전", None)])
+
+    def test_cap_5_keeps_full_total_count(self):
+        self._summary(1, self._add_patient())
+        for day in range(1, 8):
+            self._summary(day)
+        col = snapshot(self.user_id).recent_chat_summaries
+        self.assertEqual((len(col.items), col.total_count), (5, 8))
+        self.assertEqual([s.summary_date for s in col.items],
+                         [REFERENCE_DATE - timedelta(days=d) for d in (1, 1, 2, 3, 4)])
+
+    def test_summary_text_is_not_logged(self):
+        self._summary(1, text="PRIVATE_CHAT_SUMMARY")
+        with self.assertLogs("app.db.feed_read", level="INFO") as logs:
+            snapshot(self.user_id)
+        self.assertNotIn("PRIVATE_CHAT_SUMMARY", "\n".join(logs.output))
+        self.assertIn("대화 요약 1/1건", "\n".join(logs.output))
+
+
 class SaveCareLogTests(FeedReadTestBase):
     def test_rejects_patient_of_another_caregiver(self):
         other_patient = self._add_patient(caregiver_id=self._create_user())
