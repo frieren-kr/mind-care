@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StringConstraints, model_validator
+from pydantic_core import PydanticCustomError
 
 from .schemas import AgentModel, AgentResult
 from .tools.contracts import EvidencePackage
@@ -15,7 +16,7 @@ def _nonblank(value: str) -> str:
     # 글꼴에 따라 표시될 수 있으므로 제거하거나 정규화하지 않는다.
     if not any(not char.isspace() and unicodedata.category(char) not in {"Cc", "Cf", "Cs", "Cn"}
                for char in value):
-        raise ValueError("Text must not be blank")
+        raise PydanticCustomError('content_blank', "Text must not be blank")
     return value  # 원문을 보존한다. 길이 검증 전에 임의로 잘라내지 않는다.
 
 

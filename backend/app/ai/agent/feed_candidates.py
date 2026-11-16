@@ -4,9 +4,11 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
 
 from ..retrieval.evidence import LEVEL, to_grade
+from .error_diagnostics import summarize_json_error, summarize_validation_error
 from .outputs import (Category, ContentText, FeedAnswerV2, FeedContentItemV2,
                       ResolvedEvidence, _json_object, _reject_constant)
 from .schemas import AgentModel, Message
@@ -66,7 +68,7 @@ class _FeedDecision(AgentModel):
     @classmethod
     def strict_include(cls, value):
         if isinstance(value, Mapping) and type(value.get("include")) is not bool:
-            raise ValueError("include must be a boolean")
+            raise PydanticCustomError('feed_include_type', "include must be a boolean")
         return value
 
 
@@ -93,13 +95,15 @@ class FeedReview(FeedDecisionDraft):
     @model_validator(mode="after")
     def retained_limit(self):
         if sum(decision.include for decision in self.decisions) > MAX_FEED_RETAINED_CANDIDATES:
-            raise ValueError("Too many retained candidates")
+            raise PydanticCustomError('feed_retained_limit', "Too many retained candidates",
+                                      {'max_retained': MAX_FEED_RETAINED_CANDIDATES})
         return self
 
 
 class FeedDecisionError(ValueError):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, diagnostic: dict | None = None):
         self.code = code
+        self.diagnostic = diagnostic or {}
         super().__init__(code)  # Fixed diagnostic only; no Provider/evidence/profile text.
 
 
@@ -202,14 +206,25 @@ class FeedCandidates:
         self._validate_snapshot(snapshot)
         if not self._review_ready:
             if review is not None:
-                raise FeedDecisionError("invalid_feed_review")
+                raise FeedDecisionError("invalid_feed_review", diagnostic=dict(
+                    reason="unexpected_review", field="review", expected="omit review before first search"))
             return
         try:
             review = FeedReview.model_validate(review.model_dump(warnings=False)) if review is not None else None
-        except (ValueError, TypeError, AttributeError):
-            raise FeedDecisionError("invalid_feed_review") from None
-        if review is None or len(review.decisions) != self.count:
-            raise FeedDecisionError("invalid_feed_review")
+        except ValidationError as exc:
+            raise FeedDecisionError("invalid_feed_review",
+                diagnostic=summarize_validation_error(exc, FeedReview)) from exc
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise FeedDecisionError("invalid_feed_review", diagnostic=dict(
+                reason="invalid_review_object", field="review", expected="FeedReview object")) from exc
+        if review is None:
+            raise FeedDecisionError("invalid_feed_review", diagnostic=dict(
+                reason="review_required", field="review", expected=f"review of all {self.count} current candidates"))
+        if len(review.decisions) != self.count:
+            raise FeedDecisionError("invalid_feed_review", diagnostic=dict(
+                reason="review_count_mismatch", field="review.decisions",
+                expected=f"exactly {self.count} decisions", expected_count=self.count,
+                actual_count=len(review.decisions)))
         retained = [(candidate, decision) for candidate, decision in zip(self._items, review.decisions, strict=True)
                     if decision.include]
         self._retained = [candidate for candidate, _ in retained]
@@ -260,15 +275,24 @@ class FeedCandidates:
             if not isinstance(text, str) or len(text) > 65536:
                 raise ValueError("Invalid Feed response size")
             payload = json.loads(text, object_pairs_hook=_json_object, parse_constant=_reject_constant)
-        except (ValueError, TypeError, RecursionError):
-            raise FeedDecisionError("invalid_feed_json") from None
+        except json.JSONDecodeError as exc:
+            raise FeedDecisionError("invalid_feed_json", diagnostic=summarize_json_error(exc)) from exc
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise FeedDecisionError("invalid_feed_json", diagnostic=dict(
+                reason="invalid_feed_json", field="<root>", expected="one JSON object <=65536 characters, no duplicate keys or non-finite values")) from exc
         if (isinstance(payload, dict) and isinstance(payload.get("decisions"), list)
                 and len(payload["decisions"]) != len(self._items)):
-            raise FeedDecisionError("candidate_count_mismatch")
+            raise FeedDecisionError("candidate_count_mismatch", diagnostic=dict(
+                reason="candidate_count_mismatch", field="decisions", expected=f"exactly {len(self._items)} decisions",
+                expected_count=len(self._items), actual_count=len(payload["decisions"])))
         try:
             draft = FeedDecisionDraft.model_validate(payload)
-        except (ValueError, TypeError, RecursionError):
-            raise FeedDecisionError("invalid_feed_decision") from None
+        except ValidationError as exc:
+            raise FeedDecisionError("invalid_feed_decision",
+                diagnostic=summarize_validation_error(exc, FeedDecisionDraft)) from exc
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise FeedDecisionError("invalid_feed_decision", diagnostic=dict(
+                reason="invalid_feed_decision", field="decisions", expected="FeedDecisionDraft contract")) from exc
         if sum(decision.include for decision in draft.decisions) > MAX_FEED_RECOMMENDATIONS:
             raise FeedDecisionError("too_many_selected")
         try:

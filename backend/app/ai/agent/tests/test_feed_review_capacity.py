@@ -150,12 +150,15 @@ class FeedReviewCapacityTests(unittest.TestCase):
         for excessive_retain in (False, True):
             reached = []
             second = search(['next'], 'second', 10, range(6)) if excessive_retain else ModelTurn(text=json.dumps(decisions(10, range(6))))
-            client = FakeLLMClient([search(['a', 'b', 'c'], 'first'), second])
+            client = FakeLLMClient([search(['a', 'b', 'c'], 'first'), second] +
+                ([ModelTurn(text=json.dumps(decisions(10, range(6))))] if excessive_retain else []))
             result = FeedExecutionV1(client, registry(lambda c, a: reached.append(a.query) or package([f'{a.query}-{i}' for i in range(8)])))(CONTEXT, '{}')
             self.assertIsNone(result.output)
             self.assertEqual(result.sources, [])
             self.assertEqual(len(reached), 3)
-            self.assertEqual(result.execution.errors[-1].code, 'invalid_arguments' if excessive_retain else 'too_many_selected')
+            self.assertEqual(result.execution.errors[-1].code, 'too_many_selected')
+            if excessive_retain:
+                self.assertTrue(any(e.code == 'invalid_arguments' for e in result.execution.errors))
 
     def test_excluded_last_candidate_snapshot_still_checked_and_requests_are_isolated(self):
         table, sources = self.table()

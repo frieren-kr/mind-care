@@ -338,7 +338,7 @@ class SearchEvidencePolicyTests(unittest.TestCase):
                         self.assertFalse(json.loads(output['output'])['success'])
                     else:
                         self.assertNotEqual(result.execution.status, 'completed')
-                        self.assertEqual(len(wire), 1)
+                        self.assertEqual(len(wire), 2 if mode == 'input' else 1)
                     if mode == 'input':
                         handler.assert_not_called()
 

@@ -274,7 +274,8 @@ class FeedReviewRoundsTests(unittest.TestCase):
             result, _ = self.run_feed([search(['sleep disturbances in people with dementia'], 'one'), search([query], 'two', 1),
                 ModelTurn(text=json.dumps(decisions(1, (0,))))], lambda c, a: reached.append(a.query) or package([a.query]))
             self.assertEqual(len(reached), 2 if accepted else 1)
-            self.assertEqual(result.execution.status, 'completed' if accepted else 'failed')
+            self.assertEqual(result.execution.status, 'completed')
+            if not accepted: self.assertEqual(result.execution.errors[-1].code, 'invalid_arguments')
 
     def test_invalid_review_cannot_start_followup_or_invent_source(self):
         good = review(1, (0,))
@@ -288,10 +289,11 @@ class FeedReviewRoundsTests(unittest.TestCase):
                 next_turn = search(['b'], 'two')
                 if payload is not None: next_turn.tool_calls[0].arguments['review'] = payload
                 reached = []
-                result, client = self.run_feed([search(['a'], 'one'), next_turn], lambda c, a: reached.append(a.query) or package(['a']))
-                self.assertEqual((result.execution.total_tool_calls, reached, len(client.requests)), (1, ['a'], 2))
-                self.assertIsNone(result.output)
-                self.assertEqual(result.sources, [])
+                result, client = self.run_feed([search(['a'], 'one'), next_turn, ModelTurn(text=json.dumps(decisions(1, (0,))))], lambda c, a: reached.append(a.query) or package(['a']))
+                self.assertEqual((result.execution.total_tool_calls, reached, len(client.requests)), (1, ['a'], 3))
+                self.assertEqual(result.execution.status, 'completed')
+                self.assertEqual([s.pmid for s in result.sources], ['a'])
+                self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:1:0:0')
         result, _ = self.run_feed([search(['a'], 'one', 1)], lambda c, a: self.fail('Unexpected I/O'))
         self.assertEqual(result.execution.total_tool_calls, 0)
 
@@ -315,8 +317,8 @@ class FeedReviewRoundsTests(unittest.TestCase):
             if conflicting: second.arguments['review'] = review(1)
             reached = []
             result, client = self.run_feed([search(['a'], 'first'), ModelTurn(tool_calls=[one, second]),
-                ModelTurn(text=json.dumps(decisions(3, range(3))))], lambda c, a: reached.append(a.query) or package([a.query]))
-            self.assertEqual(result.execution.status, 'failed' if conflicting else 'completed')
+                ModelTurn(text=json.dumps(decisions(1 if conflicting else 3, range(1 if conflicting else 3))))], lambda c, a: reached.append(a.query) or package([a.query]))
+            self.assertEqual(result.execution.status, 'completed')
             self.assertEqual(len(reached), 1 if conflicting else 3)
             if not conflicting:
                 self.assertEqual([m.call_id for m in client.requests[-1][0] if m.type == "function_call_output"], ['first', 'second', 'third'])
@@ -354,7 +356,7 @@ class FeedReviewRoundsTests(unittest.TestCase):
             return package(['late'])
         box = {}
         def run():
-            box['result'], box['client'] = self.run_feed([search(['first'], 'first'), search(['slow', 'fail'], 'next', 1, (0,))],
+            box['result'], box['client'] = self.run_feed([search(['first'], 'first'), search(['slow', 'fail'], 'next', 1, (0,)), ModelTurn(text=json.dumps(decisions(1, [0])))],
                 handler, tool_timeout_seconds=3, request_timeout_seconds=4)
         worker = Thread(target=run, daemon=True)
         worker.start()
@@ -363,10 +365,11 @@ class FeedReviewRoundsTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertFalse(finished.is_set())
             result = box['result']
-            self.assertEqual(result.execution.status, 'failed')
-            self.assertIsNone(result.output)
-            self.assertEqual(result.sources, [])
-            self.assertEqual(len(box['client'].requests), 2)
+            self.assertEqual(result.execution.status, 'completed')
+            self.assertEqual([s.pmid for s in result.sources], ['a'])
+            self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:1:0:0')
+            self.assertEqual(len(box['client'].requests), 3)
+            self.assertEqual(box['client'].options[-1].tool_choice, 'none')
             snapshot = result.model_dump_json()
         finally: release.set()
         self.assertTrue(finished.wait(1))
@@ -397,3 +400,99 @@ class FeedReviewRoundsTests(unittest.TestCase):
         self.assertEqual([p['tool_choice'] for p in wire], ['required', 'auto', 'auto'])
         self.assertTrue(all('reasoning' not in p for p in wire))
         self.assertNotIn('feed-rag:', json.dumps(wire))
+
+    def test_argument_recovery_exhaustion_finalizes_unchanged_existing_snapshot(self):
+        reached = []
+        turns = [search(['first'], 'first')]
+        turns += [search([], f'bad-{i}') for i in range(3)]
+        turns.append(ModelTurn(text=json.dumps(decisions(1, [0]))))
+        result, client = self.run_feed(turns, lambda c,a: reached.append(a.query) or package(['original']))
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual((result.execution.tool_rounds, result.execution.total_tool_calls), (1,1))
+        self.assertEqual(reached, ['first'])
+        self.assertEqual([s.pmid for s in result.sources], ['original'])
+        self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:1:0:0')
+        self.assertEqual([o.tool_choice for o in client.options], ['required','auto','auto','auto','none'])
+        projections = [json.loads(request[0][-1].content) for request in client.requests[1:]]
+        self.assertTrue(all(p['candidates']==projections[0]['candidates'] for p in projections))
+        progress = projections[-1]['search_progress']
+        self.assertEqual((progress['argument_recoveries_used'], progress['argument_recoveries_remaining']), (2,0))
+        self.assertEqual(progress['successful_searches'], 1)
+        self.assertEqual(progress['failed_searches'], 0)
+        outputs = [m for m in client.requests[-1][0] if m.type=='function_call_output']
+        self.assertEqual([m.call_id for m in outputs], ['first','bad-0','bad-1','bad-2'])
+
+    def test_recovery_turns_do_not_reduce_three_round_nine_search_limit(self):
+        turns = [search([], 'invalid-first')]
+        turns += [search([f'{r}-{i}' for i in range(3)], f'round-{r}', 3 if r else None)
+                  for r in range(3)]
+        turns.append(ModelTurn(text=json.dumps(decisions(3, [0]))))
+        result, client = self.run_feed(turns, lambda c,a: package([a.query]))
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual((result.execution.tool_rounds, result.execution.total_tool_calls), (3,9))
+        self.assertEqual(len(client.requests), 5)
+        self.assertEqual(client.options[-1].tool_choice, 'none')
+
+    def test_failed_followup_keeps_pre_review_candidates_for_final_decision(self):
+        def handler(context, args):
+            if args.query=='initial': return package(['original'])
+            raise RuntimeError('PRIVATE')
+        result, client = self.run_feed([search(['initial'], 'first'), search(['broken'], 'second', 1),
+            ModelTurn(text=json.dumps(decisions(1, [0])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual([s.pmid for s in result.sources], ['original'])
+        progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
+        self.assertEqual((progress['successful_searches'],progress['failed_searches'],progress['search_calls_used']), (1,1,2))
+        self.assertEqual(client.options[-1].tool_choice, 'none')
+
+    def test_zero_additional_recoveries_still_allows_last_repair_and_normal_search(self):
+        turns = [search(['initial'],'first'), search([],'bad-1'), search([],'bad-2'),
+                 search(['fixed'],'last-repair',1), search(['normal'],'normal-followup',1),
+                 ModelTurn(text=json.dumps(decisions(1,[0])))]
+        reached = []
+        result, client = self.run_feed(turns, lambda c,a: reached.append(a.query) or package([a.query]))
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual(reached, ['initial','fixed','normal'])
+        self.assertEqual((result.execution.tool_rounds,result.execution.total_tool_calls), (3,3))
+        for index in (3,4):
+            progress = json.loads(client.requests[index][0][-1].content)['search_progress']
+            self.assertEqual((progress['argument_recoveries_used'],progress['argument_recoveries_remaining']), (2,0))
+            self.assertGreater(progress['search_calls_remaining'], 0)
+            self.assertGreater(progress['search_rounds_remaining'], 0)
+            self.assertEqual(client.options[index].tool_choice, 'auto')
+            policy = '\n'.join(m.content or '' for m in client.requests[index][0] if m.role == 'system')
+            self.assertIn('이미 배정한 기회 이외에 추가로 배정할 수 있는 수정 기회', policy)
+            self.assertIn('마지막 수정 기회나 정상적인 후속 검색을 금지하는 뜻은 아니다', policy)
+            self.assertNotIn('복구 한도 또는 검색 예산을 소진하면', policy)
+        self.assertEqual(client.options[-1].tool_choice, 'none')
+
+    def test_final_decision_validation_logs_original_fields_before_wrapper(self):
+        for payload, reason, field in (
+            ({'decisions':[{'include':True}]},'required_field_missing','decisions[0].personal_reason'),
+            ({'decisions':[{'include':True,'personal_reason':'synthetic','category':'PRIVATE'}]},
+             'invalid_literal','decisions[0].category'),
+            ({'decisions':[{'include':'PRIVATE'}]},'invalid_discriminator','decisions[0].include')):
+            with self.subTest(reason=reason), self.assertLogs('app.ai.agent.agent_loop_runner',level='INFO') as logs:
+                result,_=self.run_feed([search(['a'],'first'),ModelTurn(text=json.dumps(payload))],lambda c,a:package(['a']))
+            self.assertEqual(result.execution.status,'invalid_response')
+            self.assertEqual(result.execution.errors[-1].code,'invalid_feed_decision')
+            self.assertIsNone(result.output)
+            self.assertEqual(result.sources,[])
+            text='\n'.join(logs.output)
+            self.assertIn('stage=feed_final_decision',text)
+            self.assertIn('exception_type=ValidationError',text)
+            self.assertIn(reason,text)
+            self.assertIn(field,text)
+            self.assertNotIn('PRIVATE',text+result.model_dump_json())
+
+    def test_each_budget_diagnostic_identifies_the_violated_bound(self):
+        options=dict(turn=1,remaining_calls=9,remaining_budget=72,previous_queries=set(),reserved_ids=set())
+        cases=[([batch(['a','b']),batch(['c','d'],'two')],options,'feed_round_search_limit'),
+               ([batch(['a','b'])],{**options,'remaining_calls':1},'feed_remaining_search_limit'),
+               ([batch(['a','b'])],{**options,'remaining_budget':15},'feed_retrieval_limit')]
+        for calls,kwargs,reason in cases:
+            with self.subTest(reason=reason),self.assertRaises(FeedSearchBudgetExceeded) as caught:
+                prepare_feed_searches(calls,**kwargs)
+            diagnostic=caught.exception.diagnostic
+            self.assertEqual(diagnostic['reason'],reason)
+            self.assertEqual(diagnostic['requested_retrieval'],8*diagnostic['search_count'])

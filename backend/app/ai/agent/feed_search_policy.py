@@ -4,9 +4,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Annotated
 
-from pydantic import Field, StrictStr, field_validator
+from pydantic import Field, StrictStr, ValidationError, field_validator
+from pydantic_core import PydanticCustomError
 
-from .schemas import AgentModel, ToolCall, ToolOutcome
+from .error_diagnostics import diagnostic_message, summarize_json_error, summarize_validation_error
+from .schemas import AgentError, AgentModel, ToolCall, ToolOutcome
 from .feed_candidates import FeedReview
 from .outputs import _json_object, _reject_constant
 from .tools.contracts import EvidenceSearchInput
@@ -15,6 +17,7 @@ FEED_SEARCH_TOP_K = 8
 MAX_FEED_SEARCH_ROUNDS = 3
 MAX_FEED_SEARCHES_PER_ROUND = 3
 MAX_FEED_SEARCHES = 9
+MAX_FEED_ARGUMENT_RECOVERIES = 2
 MAX_FEED_RETRIEVAL = MAX_FEED_SEARCHES * FEED_SEARCH_TOP_K
 
 
@@ -33,17 +36,19 @@ class FeedSearchInput(AgentModel):
     @classmethod
     def json_array_only(cls, value):
         if type(value) is not list:
-            raise ValueError('Feed requires a JSON string array')
+            raise PydanticCustomError('feed_query_array', 'Feed requires a JSON string array')
         return value
 
     @field_validator('queries')
     @classmethod
     def independent_entries(cls, value):
         keys = [query_key(q) for q in value]
-        if any(not key for key in keys) or len(keys) != len(set(keys)):
-            raise ValueError('Blank or repeated Feed query')
+        if any(not key for key in keys):
+            raise PydanticCustomError('feed_query_blank', 'Blank Feed query')
+        if len(keys) != len(set(keys)):
+            raise PydanticCustomError('feed_query_duplicate', 'Repeated Feed query')
         if any(any(c in q for c in '\r\n;') for q in value):
-            raise ValueError('Use separate array entries, not line or semicolon delimiters')
+            raise PydanticCustomError('feed_query_delimiter', 'Use separate array entries, not line or semicolon delimiters')
         return value  # Valid query text is preserved; no rewriting/translation.
 
 
@@ -63,7 +68,29 @@ def feed_tool_definitions(definitions: list[dict]) -> list[dict]:
 
 
 class FeedSearchBudgetExceeded(ValueError):
-    pass
+    def __init__(self, message="Feed actual search budget exceeded", *, diagnostic=None):
+        super().__init__(message)
+        self.diagnostic = diagnostic or {}
+
+
+class FeedSearchInputError(ValueError):
+    """Original LLM input rejected before server conversion or execution."""
+    def __init__(self, call, *, stage="feed_search_plan",
+                 diagnostic=None, reason="invalid_search_plan", expected="valid Feed search input"):
+        super().__init__("Invalid Feed search input")
+        self.call_id = call.id
+        self.stage = stage
+        self.diagnostic = diagnostic or dict(reason=reason, expected=expected)
+        self.message = (diagnostic_message(diagnostic) if diagnostic else expected)
+
+
+def _validate_input(model, raw, call, *, stage="feed_search_input_validation"):
+    try:
+        return model.model_validate(raw)
+    except ValidationError as exc:
+        error = FeedSearchInputError(call, stage=stage,
+            diagnostic=summarize_validation_error(exc, model))
+        raise error from exc
 
 
 @dataclass(frozen=True)
@@ -83,12 +110,34 @@ class FeedSearchPlan:
                 return call.id
         raise ValueError("Search is not in the admitted batch")
 
-    def provider_outcomes(self, packages: dict) -> list[ToolOutcome]:
-        return [ToolOutcome(call_id=call.id, tool_name=call.name, success=True, data={
-            'candidate_list': 'See the latest untrusted_feed_candidates message',
-            'searches': [{'query_index': i, 'returned_evidence_count': len(packages[s.id].evidence)}
-                         for i, s in enumerate(searches)],
-        }) for call, searches in self.batches]
+    def provider_outcomes(self, packages: dict, failures: dict | None = None,
+                          unaccepted: dict | None = None) -> list[ToolOutcome]:
+        """One real Provider acknowledgement; only validated packages are successes.
+
+        Pending work is not called a failure/completion: a running Python thread
+        cannot be cancelled. Later, unstarted batches are explicitly cancelled.
+        """
+        failures, unaccepted = failures or {}, unaccepted or {}
+        partial = bool(failures or unaccepted)
+        outcomes = []
+        for call, searches in self.batches:
+            rows = []
+            for i, search in enumerate(searches):
+                if search.id in packages:
+                    row = dict(query_index=i, returned_evidence_count=len(packages[search.id].evidence))
+                    if partial:
+                        row['status'] = 'completed'
+                elif search.id in failures:
+                    row = dict(query_index=i, status='failed', error=failures[search.id].model_dump())
+                else:
+                    row = dict(query_index=i, status=unaccepted[search.id])
+                rows.append(row)
+            success = any(search.id in packages for search in searches)
+            outcomes.append(ToolOutcome(call_id=call.id, tool_name=call.name, success=success,
+                data={'candidate_list': 'See the latest untrusted_feed_candidates message', 'searches': rows},
+                error=None if success else AgentError(code='feed_search_failed',
+                    message='이 호출에서 수락된 검색 결과가 없습니다. 최신 후보와 검색 상태만 사용하세요.')))
+        return outcomes
 
 
 def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: int,
@@ -99,15 +148,22 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
     occupied = reserved_ids | {call.id for call in calls}
     for call_index, call in enumerate(calls):
         if call.name != 'search_evidence':
-            raise ValueError('Feed only supports search_evidence')
+            raise FeedSearchInputError(call, reason='unsupported_tool', expected='search_evidence only')
         if isinstance(call.arguments, str):
             if len(call.arguments) > 65536:
-                raise ValueError('Feed arguments too large')
-            raw = json.loads(call.arguments, object_pairs_hook=_json_object, parse_constant=_reject_constant)
+                raise FeedSearchInputError(call, reason='arguments_too_large', expected='JSON arguments <=65536 characters')
+            try:
+                raw = json.loads(call.arguments, object_pairs_hook=_json_object, parse_constant=_reject_constant)
+            except json.JSONDecodeError as exc:
+                raise FeedSearchInputError(call, stage="feed_search_arguments_json",
+                    diagnostic=summarize_json_error(exc)) from exc
+            except ValueError as exc:
+                raise FeedSearchInputError(call, stage="feed_search_arguments_json",
+                    reason="invalid_json_object", expected="JSON object without duplicate keys or non-finite values") from exc
         else:
             raw = call.arguments
         if isinstance(raw, dict) and 'queries' in raw:
-            parsed = FeedSearchInput.model_validate(raw)
+            parsed = _validate_input(FeedSearchInput, raw, call)
             queries = parsed.queries
             if parsed.review is not None:
                 reviews.append(parsed.review)
@@ -128,22 +184,41 @@ def prepare_feed_searches(calls: list[ToolCall], *, turn: int, remaining_calls: 
                 raw = dict(raw)
                 review = raw.pop('review', None)
                 if review is not None:
-                    reviews.append(FeedReview.model_validate(review))
-            searches = bounded_feed_searches([call.model_copy(update={'arguments': raw})])
+                    reviews.append(_validate_input(FeedReview, review, call, stage='feed_review_validation'))
+            # Validate the original input once, then apply the Feed-only default.
+            # Executor still validates the generated arguments at its boundary.
+            if not isinstance(raw, dict) or 'query' not in raw:
+                _validate_input(FeedSearchInput, raw, call)
+            original = _validate_input(EvidenceSearchInput, raw, call, stage="feed_legacy_input_validation")
+            if original.top_k > FEED_SEARCH_TOP_K:
+                raise FeedSearchInputError(call, reason="retrieval_limit", expected="top_k <=8")
+            arguments = original.model_dump()
+            if 'top_k' not in raw:
+                arguments['top_k'] = FEED_SEARCH_TOP_K
+            searches = [call.model_copy(deep=True, update={'arguments': arguments})]
+
         for search in searches:
             key = query_key(search.arguments['query'])
             if key in previous_queries or key in keys:
-                raise ValueError('Feed query already searched')
+                raise FeedSearchInputError(call, reason='duplicate_query', expected='use distinct queries not searched in this request')
             keys.add(key)
         batches.append((call, searches))
     if reviews and any(review != reviews[0] for review in reviews):
-        raise ValueError("Conflicting Feed reviews in one model turn")
+        raise FeedSearchInputError(call, reason="conflicting_reviews", expected="one consistent review for the current snapshot")
     plan = FeedSearchPlan(batches, keys, reviews[0] if reviews else None)
-    if (not 1 <= len(plan.searches) <= MAX_FEED_SEARCHES_PER_ROUND
-            or len(plan.searches) > remaining_calls or
-            sum(s.arguments['top_k'] for s in plan.searches) > remaining_budget):
-        raise FeedSearchBudgetExceeded('Feed actual search budget exceeded')
-    return plan
+    search_count = len(plan.searches)
+    retrieval = sum(s.arguments['top_k'] for s in plan.searches)
+    if not 1 <= search_count <= MAX_FEED_SEARCHES_PER_ROUND:
+        reason = "feed_round_search_limit"
+    elif search_count > remaining_calls:
+        reason = "feed_remaining_search_limit"
+    elif retrieval > remaining_budget:
+        reason = "feed_retrieval_limit"
+    else:
+        return plan
+    raise FeedSearchBudgetExceeded(diagnostic=dict(reason=reason,
+        search_count=search_count, per_round_limit=MAX_FEED_SEARCHES_PER_ROUND,
+        remaining_calls=remaining_calls, requested_retrieval=retrieval, remaining_retrieval=remaining_budget))
 
 
 def bounded_feed_searches(calls: list[ToolCall], *, remaining_budget: int = MAX_FEED_RETRIEVAL
