@@ -78,7 +78,7 @@ class EvidenceItem(BaseModel):
         description="meta_analysis / systematic_review / guideline / rct / clinical_trial / "
         "observational / qualitative / review / case_report / expert_opinion / protocol / other",
     )
-    evidence_grade: Optional[str] = Field(
+    evidence_grade: Optional[Literal["A", "B", "C", "D"]] = Field(
         default=None,
         description="근거 등급 A~D (study_type으로 계산, 앱 화면과 같은 규칙). 등급이 없으면 null",
     )
