@@ -372,7 +372,7 @@ class OfflineFeedHandoffTests(unittest.TestCase):
         self.assertEqual(response.json()["mode"], "search")
         text = "\n".join(logs.output)
         for expected in ("추천 AI 실행 실패", "status=provider_error", "errors=['provider_error']",
-                         "AuthenticationError status=401 code=expired_secret_key", "sk-***"):
+                         "AuthenticationError status=401 code=expired_secret_key"):
             self.assertIn(expected, text)
         self.assertNotIn("SECRET123", text)
 

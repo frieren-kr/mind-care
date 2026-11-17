@@ -20,7 +20,7 @@ from .feed_search_policy import (MAX_FEED_ARGUMENT_RECOVERIES, MAX_FEED_RETRIEVA
 from .feed_candidates import FeedCandidates, FeedDecisionError
 from .conversation import Conversation
 from .evidence import EvidenceStore
-from .outputs import (ChatAnswerV1, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
+from .outputs import (ChatAnswerV1, ChatDraft, FeedAnswerV2, FinalOutputModel, ResolvedEvidence,
                       StructuredAgentResult)
 from .prompts import DefaultPromptBuilder, PromptBuilder, build_structured_output_policy
 from .registry import ToolRegistry
@@ -267,12 +267,24 @@ class AgentLoopRunner:
                 state.total_tool_calls += count
             for start in range(0, len(calls), self.max_parallel_calls):
                 batch = calls[start:start + self.max_parallel_calls]
+                observed_results = {}
+                def record_result(index, raw):
+                    observed_results[index] = _validate_tool_result(batch[index], raw)
                 try:
                     raw_results = bounded_parallel([
                         partial(execute, call.model_copy(deep=True), context.model_copy(deep=True))
                         for call in batch], stop_on_result=(
                             lambda index, raw: timed_out(_validate_tool_result(batch[index], raw)[0]))
-                            if stop_on_timeout else None, on_started=record_started)
+                            if stop_on_timeout else None, on_started=record_started,
+                            on_result=record_result)
+                except RequestTimeout:
+                    # Preserve completed diagnostics only; never publish partial evidence.
+                    for index in sorted(observed_results):
+                        outcome, trace = observed_results[index]
+                        state.called_tools.append(trace)
+                        if outcome.error:
+                            state.errors.append(outcome.error)
+                    raise
                 except ParallelStopped as stopped:
                     if unaccepted is not None:
                         observed = {index for index, _ in stopped.results}
@@ -326,19 +338,22 @@ class AgentLoopRunner:
         diagnostic_token = tool_diagnostic_context.set({})
 
         def log_failure(exc, *, failure_stage=None, call_id=None, diagnostic=None,
-                        origin="server", action="abort", code=None):
+                        origin="server", action="abort", code=None, diagnostic_model=None, tool_name=None):
             call_id = ([diagnostic_call_id(identifier) for identifier in call_id] if isinstance(call_id, list)
                        else diagnostic_call_id(call_id) if call_id is not None else None)
             if diagnostic is None and isinstance(exc, (FeedDecisionError, ProviderResponseError)):
                 diagnostic = exc.diagnostic
             if diagnostic is None and isinstance(exc, ValidationError):
-                diagnostic = summarize_validation_error(exc, ModelTurn if failure_stage == "provider_response_validation" else
-                    EvidencePackage if stage == "evidence_validation_error" else None)
+                diagnostic = summarize_validation_error(exc, diagnostic_model or (
+                    ModelTurn if failure_stage == "provider_response_validation" else
+                    EvidencePackage if stage == "evidence_validation_error" else None))
+            if diagnostic is None and isinstance(exc, json.JSONDecodeError):
+                diagnostic = summarize_json_error(exc)
             logger.info("agent_error request_id=%r workflow=%s llm_turn=%s tool_name=%s "
                         "tool_call_id=%r stage=%s error_code=%s exception_type=%s "
                         "input_origin=%s recovery_action=%s diagnostic=%s",
                         context.request_id, "feed" if feed_candidates is not None else "chat", llm_turn,
-                        "search_evidence" if feed_candidates is not None else "<workflow>",
+                        tool_name or ("search_evidence" if feed_candidates is not None else "<workflow>"),
                         call_id, failure_stage or stage, code or stage,
                         type(exc.__cause__ or exc).__name__ if exc is not None else None,
                         origin, action, diagnostic or {})
@@ -515,7 +530,9 @@ class AgentLoopRunner:
                                 message="Feed 판단 형식 또는 서버 후보 출처가 계약과 일치하지 않습니다."))
                             return finish("invalid_response")
                         except (ValueError, TypeError, RecursionError) as exc:
-                            log_failure(exc, failure_stage="final_output_validation")
+                            log_failure(exc, failure_stage="final_output_validation",
+                                code="invalid_structured_output", origin="provider_output",
+                                diagnostic_model=ChatDraft)
                             state.errors.append(AgentError(code="invalid_structured_output",
                                 message="최종 답변의 구조 또는 출처 참조가 계약과 일치하지 않습니다."))
                             return finish("invalid_response")
@@ -644,9 +661,13 @@ class AgentLoopRunner:
                                for call in turn.tool_calls)
                 if feed_candidates is not None:
                     # Consume and validate the whole batch before exposing evidence.
-                    results = list(results)
-                    state.called_tools.extend(trace for _, _, trace in results)
-                    state.errors.extend(outcome.error for _, outcome, _ in results if outcome.error)
+                    collected = []
+                    for call, outcome, trace in results:
+                        state.called_tools.append(trace)
+                        if outcome.error:
+                            state.errors.append(outcome.error)
+                        collected.append((call, outcome, trace))
+                    results = collected
                     failures = {call.id: outcome.error for call, outcome, _ in results if not outcome.success}
                     # Timeouts, scope/contract violations and server defects remain hard stops.
                     # Ordinary search failures affect only that search. The model
@@ -714,6 +735,14 @@ class AgentLoopRunner:
                         if (output_model is ChatAnswerV1 and call.name in _CHAT_SEARCH_TYPES and outcome.success
                                 and (len(outcome.data["evidence"]) > call.arguments["top_k"]
                                      or any(item["evidence_type"] != _CHAT_SEARCH_TYPES[call.name] for item in outcome.data["evidence"]))):
+                            log_failure(None, failure_stage="chat_search_results", call_id=call.id,
+                                code="invalid_output", origin="handler_output", action="existing_chat_loop",
+                                tool_name=call.name,
+                                diagnostic=dict(reason="retrieval_limit_exceeded"
+                                    if len(outcome.data["evidence"]) > call.arguments["top_k"] else "evidence_type_mismatch",
+                                    returned_count=len(outcome.data["evidence"]), top_k=call.arguments["top_k"],
+                                    expected_type=_CHAT_SEARCH_TYPES[call.name],
+                                    returned_types=sorted({item["evidence_type"] for item in outcome.data["evidence"]})))
                             outcome = ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
                                 error=AgentError(code="invalid_output", message="검색 결과의 자료 유형 또는 반환 개수가 계약과 일치하지 않습니다."))
                             trace = trace.model_copy(update={"success": False, "error_type": "invalid_output", "result_count": None})

@@ -106,6 +106,7 @@ class ParallelStopped(Exception):
 
 def bounded_parallel(functions: Sequence[Callable[[], T]], *,
                      stop_on_result: Callable[[int, T], bool] | None = None,
+                     on_result: Callable[[int, T], None] | None = None,
                      on_started: Callable[[int], None] | None = None) -> list[T]:
     """Request-ordered success; optional completion-order early stop, no join.
 
@@ -113,6 +114,7 @@ def bounded_parallel(functions: Sequence[Callable[[], T]], *,
     polls completed results too, so a full slot pool cannot hide a known failure.
     on_started reports the final actual start count on the collector at exit,
     including timeout/admission failure; workers never mutate Agent state.
+    on_result observes accepted results on the collector before any early stop.
     """
     check_deadline()
     deadline = request_deadline.get()
@@ -144,6 +146,8 @@ def bounded_parallel(functions: Sequence[Callable[[], T]], *,
         if not success:
             raise value
         observed[index] = value
+        if on_result is not None:
+            on_result(index, value)
         if stop_on_result is not None and stop_on_result(index, value):
             with lock:
                 abandoned.set()

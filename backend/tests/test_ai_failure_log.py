@@ -37,10 +37,17 @@ class CleanMessageTests(unittest.TestCase):
         exc = openai.AuthenticationError("Key sk-live-SECRET expired", response=response,
                                          body={"error": {"code": "expired_secret_key"}})
         text = describe_provider_error(exc)
-        self.assertEqual(text, "AuthenticationError status=401 code=expired_secret_key message=Key sk-*** expired")
+        self.assertEqual(text, "AuthenticationError status=401 code=expired_secret_key")
 
-    def test_plain_exception_has_type_and_message_only(self):
-        self.assertEqual(describe_provider_error(TimeoutError("late")), "TimeoutError message=late")
+    def test_plain_exception_has_allowlisted_type_without_message(self):
+        self.assertEqual(describe_provider_error(TimeoutError("late")), "TimeoutError")
+
+    def test_unknown_provider_metadata_cannot_be_used_to_echo_input(self):
+        class SyntheticPrivateException(RuntimeError):
+            status_code = "PRIVATE"
+            code = {"PRIVATE": "input"}
+        self.assertEqual(describe_provider_error(SyntheticPrivateException("PRIVATE")),
+                         "ProviderError code=unknown")
 
 
 class LoggedExecutionTests(unittest.TestCase):
@@ -72,7 +79,7 @@ class LoggedExecutionTests(unittest.TestCase):
 
         with self.assertLogs(LOGGER, "WARNING") as logs:
             logged_execution("추천", execution)(CONTEXT, "x")
-        self.assertIn("provider=['RuntimeError message=upstream sk-*** down']", logs.output[0])
+        self.assertIn("provider=['RuntimeError']", logs.output[0])
 
     def test_raised_exception_is_logged_by_type_and_reraised(self):
         def boom(ctx, text):

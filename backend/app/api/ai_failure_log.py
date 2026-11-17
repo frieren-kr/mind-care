@@ -3,11 +3,10 @@
 ChatWorkflow/FeedWorkflow는 실패한 실행 결과를 backend_handoff에서 ValueError 하나로 바꾸고,
 에이전트 루프는 OpenAI 예외를 provider_error로 삼킨다. 그래서 API 쪽에서 두 곳을 감싼다.
   - logged_execution(): 실행 결과의 status, errors의 code 목록, 실패한 Tool의 error_type을 남긴다.
-  - ErrorRecordingClient: LLM 호출 예외에서 OpenAI 오류 종류·HTTP 상태·코드·메시지를 기록해 둔다.
+  - ErrorRecordingClient: LLM 호출 예외에서 OpenAI 오류 종류·HTTP 상태·코드를 정규화하여 기록해 둔다.
     (Tool 호출은 다른 스레드에서 copy_context()로 돌므로 ContextVar에 담은 list를 함께 쓴다.)
 
-남기지 않는 것: 키 값, 대화·질문 원문, 검색어, errors의 message. 오류 메시지는 OpenAI가 준 것만
-한 줄로 바꾸고 'sk-…'를 가린 뒤 300자로 자른다.
+남기지 않는 것: 키 값, 대화·질문 원문, 검색어, errors의 message. Provider 오류 원문도 기록하지 않는다.
 """
 import logging
 import re
@@ -22,26 +21,37 @@ _provider_errors: ContextVar[Optional[list[str]]] = ContextVar("mindcare_provide
 
 
 def clean_message(message: Any) -> str:
-    """한 줄로 바꾸고 sk-로 시작하는 값을 가린 뒤 300자로 자른다."""
+    """레거시 문자열 헬퍼. 개인정보 제거가 아니므로 Provider 로그에는 사용하지 않는다."""
     text = _SECRET.sub("sk-***", " ".join(str(message).split()))
     return text[:MAX_MESSAGE_CHARS]
 
 
+_PROVIDER_ERROR_TYPES = frozenset((
+    "APIError", "APIConnectionError", "APITimeoutError", "APIStatusError", "APIResponseValidationError",
+    "BadRequestError", "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+    "ConflictError", "UnprocessableEntityError", "RateLimitError", "InternalServerError",
+    "ProviderResponseError", "TimeoutError", "RuntimeError", "ValueError",
+))
+_PROVIDER_CODES = frozenset((
+    "invalid_api_key", "expired_secret_key", "insufficient_quota", "rate_limit_exceeded",
+    "model_not_found", "context_length_exceeded", "invalid_request_error", "invalid_value",
+    "unsupported_value", "server_error", "authentication_error", "permission_denied",
+))
+
+
 def describe_provider_error(exc: BaseException) -> str:
-    """OpenAI 예외 → '종류 status=401 code=invalid_api_key message=…' (없는 칸은 뺀다)."""
+    """Log only allowlisted labels and a numeric HTTP status, never message/body text."""
+    name = type(exc).__name__
+    parts = [name if name in _PROVIDER_ERROR_TYPES else "ProviderError"]
+    status = getattr(exc, "status_code", None)
+    if type(status) is int and 100 <= status <= 599:
+        parts.append(f"status={status}")
     code = getattr(exc, "code", None)
     body = getattr(exc, "body", None)
     if code is None and isinstance(body, dict):
         code = (body.get("error") if isinstance(body.get("error"), dict) else body).get("code")
-    parts = [type(exc).__name__]
-    status = getattr(exc, "status_code", None)
-    if status is not None:
-        parts.append(f"status={status}")
     if code is not None:
-        parts.append(f"code={clean_message(code)}")
-    message = getattr(exc, "message", None) or str(exc)
-    if message:
-        parts.append(f"message={clean_message(message)}")
+        parts.append("code=" + (code if type(code) is str and code in _PROVIDER_CODES else "unknown"))
     return " ".join(parts)
 
 
