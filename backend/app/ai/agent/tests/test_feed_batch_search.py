@@ -33,6 +33,53 @@ class FeedBatchSearchTests(unittest.TestCase):
         result = FeedExecutionV1(client, parallel.registry(handler), **options)(CONTEXT, '{"patients":[]}')
         return result, client
 
+    def test_exhausted_searches_without_success_fail_before_another_llm_call(self):
+        from psycopg import OperationalError
+        for rounds, budget, sizes in ((3,9,[1,1,1]), (3,9,[3,3,3]),
+                                      (3,2,[2]), (1,9,[1])):
+            with self.subTest(rounds=rounds, budget=budget, sizes=sizes):
+                queries = [[f'round-{r}-query-{i}' for i in range(size)] for r,size in enumerate(sizes)]
+                turns = [ModelTurn(tool_calls=[batch(group, f'call-{r}')]) for r,group in enumerate(queries)]
+                client = FakeLLMClient(turns + [RuntimeError('Unexpected extra LLM call')])
+                reached = []
+                def handler(context, args):
+                    reached.append(args.query)
+                    if args.query.endswith('1'): return None
+                    raise OperationalError('PRIVATE DB error')
+                runner = AgentLoopRunner(client, parallel.registry(handler), prompt_builder=FeedPromptBuilder(),
+                    max_tool_rounds=rounds, max_total_tool_calls=budget, allow_parallel_tools=True)
+                from ..outputs import FeedAnswerV2
+                with patch.object(FeedCandidates, 'add') as publish:
+                    result = runner.run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
+                    publish.assert_not_called()
+                flat = [q for group in queries for q in group]
+                self.assertEqual(result.execution.status, 'failed')
+                self.assertEqual(len(client.requests), len(sizes))
+                self.assertEqual(len(client.turns), 1)
+                self.assertCountEqual(reached, flat)
+                self.assertEqual(result.execution.total_tool_calls, len(flat))
+                self.assertEqual(result.execution.tool_rounds, len(sizes))
+                self.assertEqual([e.code for e in result.execution.errors],
+                                 ['empty_result' if q.endswith('1') else 'tool_exception' for q in flat])
+                self.assertEqual(len(result.execution.called_tools), len(flat))
+                self.assertTrue(all(not t.success for t in result.execution.called_tools))
+                self.assertIsNone(result.output)
+                self.assertIsNone(result.execution.final_answer)
+                self.assertEqual(result.sources, [])
+                self.assertNotIn('PRIVATE', result.model_dump_json())
+
+    def test_successful_zero_result_can_finalize_when_search_budget_is_exhausted(self):
+        from ..outputs import FeedAnswerV2
+        client = FakeLLMClient([ModelTurn(tool_calls=[batch(['empty'])]),
+                                ModelTurn(text=json.dumps(decisions(0)))])
+        runner = AgentLoopRunner(client, parallel.registry(lambda c,a: package([])),
+            prompt_builder=FeedPromptBuilder(), max_total_tool_calls=1, max_tool_rounds=1)
+        result = runner.run_structured('{}', CONTEXT, output_model=FeedAnswerV2)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual(result.execution.errors, [])
+        self.assertEqual(result.output.items, [])
+        self.assertEqual([o.tool_choice for o in client.options], ['required','none'])
+
     def test_one_two_three_queries_are_independent_parallel_searches_with_one_provider_call(self):
         for count in (1, 2, 3):
             with self.subTest(count=count):
@@ -84,37 +131,41 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources], ['0-0','1-0','2-0','0-1','1-1'])
         self.assertEqual([s.source_ref.evidence_index for s in result.sources], [0,0,0,1,1])
 
-    def test_batch_failure_returns_before_slow_peer_without_partial_or_late_publication(self):
-        barrier, release, finished = Barrier(2), Event(), Event()
+    def test_batch_failure_waits_for_slow_peer_before_publishing(self):
+        barrier, release, failed = Barrier(2), Event(), Event()
         def handler(context, args):
             barrier.wait(2)
-            if args.query == 'fail': raise RuntimeError('PRIVATE')
-            try: release.wait(4)
-            finally: finished.set()
-            return package(['late'])
+            if args.query == 'fail':
+                failed.set()
+                raise RuntimeError('PRIVATE')
+            self.assertTrue(release.wait(3))
+            return package(['verified-slow'])
         box = {}
         def run():
-            box['result'], box['client'] = self.run_turns([ModelTurn(tool_calls=[batch(['slow','fail'])])],
-                handler, tool_timeout_seconds=3, request_timeout_seconds=4)
-        with patch.object(FeedCandidates, 'add') as publish:
+            box['result'], box['client'] = self.run_turns([
+                ModelTurn(tool_calls=[batch(['slow','fail'])]),
+                ModelTurn(text=json.dumps(decisions(1, [0])))], handler,
+                tool_timeout_seconds=4, request_timeout_seconds=5)
+        original_add = FeedCandidates.add
+        with patch.object(FeedCandidates, 'add', autospec=True, side_effect=original_add) as publish:
             worker = Thread(target=run, daemon=True); worker.start()
             try:
-                worker.join(1)
-                self.assertFalse(worker.is_alive())
-                self.assertFalse(finished.is_set())
-                result = box['result']
-                self.assertEqual(result.execution.status, 'failed')
-                self.assertEqual(result.execution.total_tool_calls, 2)
-                self.assertEqual(len(box['client'].requests), 1)
-                self.assertEqual(result.sources, [])
-                self.assertIsNone(result.output)
-                snapshot = result.model_dump_json()
-                self.assertNotIn('PRIVATE', snapshot)
+                self.assertTrue(failed.wait(2))
+                worker.join(.1)
+                self.assertTrue(worker.is_alive(), 'A failed search must not abandon its slow peer')
                 publish.assert_not_called()
-            finally: release.set()
-            self.assertTrue(finished.wait(1))
-            self.assertEqual(box['result'].model_dump_json(), snapshot)
-            publish.assert_not_called()
+            finally:
+                release.set()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
+            result, client = box['result'], box['client']
+            self.assertEqual(result.execution.status, 'completed')
+            self.assertEqual(result.execution.total_tool_calls, 2)
+            self.assertEqual([t.success for t in result.execution.called_tools], [True, False])
+            self.assertEqual([s.pmid for s in result.sources], ['verified-slow'])
+            self.assertEqual(len(client.requests), 2)
+            publish.assert_called_once()
+            self.assertNotIn('PRIVATE', result.model_dump_json())
 
     def test_remaining_budget_is_actual_search_count_and_followup_has_one_real_ack(self):
         reached = []
@@ -156,6 +207,79 @@ class FeedBatchSearchTests(unittest.TestCase):
                 finally: release.set()
                 self.assertTrue(all(event.wait(1) for event in finished))
                 self.assertEqual(result.model_dump_json(), snapshot)
+
+    def test_tool_timeout_stops_before_next_sequential_search(self):
+        for options in ({'allow_parallel_tools': False}, {'max_parallel_calls': 1}):
+            with self.subTest(options=options):
+                release, finished = Event(), Event()
+                reached = []
+                def handler(context, args):
+                    reached.append(args.query)
+                    if args.query == 'good': return package(['verified'])
+                    try:
+                        release.wait(3)
+                        return package(['late'])
+                    finally: finished.set()
+                try:
+                    with patch.object(FeedCandidates, 'add') as publish:
+                        result, client = self.run_turns([
+                            ModelTurn(tool_calls=[batch(['good','timeout','never'])])], handler,
+                            tool_timeout_seconds=.1, request_timeout_seconds=2, **options)
+                        self.assertEqual(reached, ['good','timeout'])
+                        self.assertFalse(finished.is_set())
+                        self.assertEqual(result.execution.status, 'failed')
+                        self.assertEqual(result.execution.errors[-1].code, 'tool_timeout')
+                        self.assertEqual(result.execution.total_tool_calls, 2)
+                        self.assertEqual([t.success for t in result.execution.called_tools], [True,False])
+                        self.assertEqual(len(client.requests), 1)
+                        self.assertIsNone(result.output)
+                        self.assertEqual(result.sources, [])
+                        snapshot = result.model_dump_json()
+                        publish.assert_not_called()
+                        release.set()
+                        self.assertTrue(finished.wait(1))
+                        self.assertEqual(result.model_dump_json(), snapshot)
+                        publish.assert_not_called()
+                finally: release.set()
+
+    def test_tool_timeout_does_not_wait_for_peer_or_start_later_batch(self):
+        entered, release, finished = Barrier(2), Event(), Event()
+        reached, box = [], {}
+        def handler(context, args):
+            reached.append(args.query)
+            entered.wait(2)
+            if args.query == 'timeout': raise TimeoutError('PRIVATE')
+            try:
+                release.wait(4)
+                return package(['late'])
+            finally: finished.set()
+        def run():
+            box['result'], box['client'] = self.run_turns([
+                ModelTurn(tool_calls=[batch(['slow','timeout','never'])])], handler,
+                max_parallel_calls=2, tool_timeout_seconds=3, request_timeout_seconds=5)
+        with patch.object(FeedCandidates, 'add') as publish:
+            worker = Thread(target=run, daemon=True)
+            worker.start()
+            try:
+                worker.join(1)
+                self.assertFalse(worker.is_alive(), 'Tool timeout must stop without joining the slow peer')
+                self.assertFalse(finished.is_set())
+                self.assertCountEqual(reached, ['slow','timeout'])
+                result = box['result']
+                self.assertEqual(result.execution.status, 'failed')
+                self.assertEqual(result.execution.errors[-1].code, 'tool_timeout')
+                self.assertEqual(result.execution.total_tool_calls, 2)
+                self.assertEqual(len(box['client'].requests), 1)
+                self.assertIsNone(result.output)
+                self.assertEqual(result.sources, [])
+                snapshot = result.model_dump_json()
+                publish.assert_not_called()
+            finally:
+                release.set()
+                worker.join(2)
+            self.assertTrue(finished.wait(1))
+            self.assertEqual(box['result'].model_dump_json(), snapshot)
+            publish.assert_not_called()
 
     def test_excess_actual_search_budget_rejects_entire_turn_before_io(self):
         for turns, expected in (([ModelTurn(tool_calls=[batch(['a','b']), batch(['c','d'], 'second')])], 0),
@@ -373,82 +497,199 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual(result.execution.status, 'completed')
         self.assertEqual((reached, result.execution.total_tool_calls), (['initial'],1))
 
-    def test_partial_success_stops_fast_discards_late_peer_and_keeps_source(self):
-        from ..agent_loop_runner import _validate_tool_result
-        barrier, observed, release, finished = Barrier(3), Event(), Event(), Event()
-        def validate(call, raw):
-            result = _validate_tool_result(call, raw)
-            if result[0].success: observed.set()
-            return result
+    def test_partial_failure_collects_both_successes_and_keeps_search_available(self):
+        barrier, failed = Barrier(3), Event()
         def handler(context, args):
             barrier.wait(2)
-            if args.query == 'good': return package(['verified'])
             if args.query == 'fail':
-                self.assertTrue(observed.wait(2))
+                failed.set()
                 raise RuntimeError('PRIVATE')
-            try: release.wait(3)
+            if args.query == 'slow': self.assertTrue(failed.wait(2))
+            return package([args.query])
+        result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','fail','slow'])]),
+            ModelTurn(text=json.dumps(decisions(2, [0,1])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual([s.pmid for s in result.sources], ['good','slow'])
+        self.assertEqual([s.source_ref.tool_call_id for s in result.sources],
+                         ['feed-rag:1:0:0','feed-rag:1:0:2'])
+        self.assertEqual(result.execution.total_tool_calls, 3)
+        self.assertEqual([o.tool_choice for o in client.options], ['required','auto'])
+        output = next(m for m in client.requests[-1][0] if m.type=='function_call_output')
+        body = json.loads(output.content)
+        self.assertEqual(output.call_id, 'provider-real')
+        self.assertTrue(body['success'])
+        self.assertEqual([r['status'] for r in body['data']['searches']], ['completed','failed','completed'])
+        self.assertEqual(body['data']['searches'][1]['error']['code'], 'tool_exception')
+        progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
+        self.assertEqual((progress['successful_searches'], progress['failed_searches'], progress['search_calls_used']), (2,1,3))
+        self.assertEqual((progress['search_calls_remaining'], progress['search_rounds_remaining']), (6,2))
+        self.assertNotIn('PRIVATE', output.content + result.model_dump_json())
+
+    def test_failure_does_not_cancel_later_batch_or_sequential_search(self):
+        for options in ({'max_parallel_calls':2}, {'allow_parallel_tools':False}):
+            with self.subTest(options=options):
+                reached = []
+                def handler(context, args):
+                    reached.append(args.query)
+                    if args.query=='fail': raise RuntimeError('PRIVATE')
+                    return package([args.query])
+                result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','fail','later'])]),
+                    ModelTurn(text=json.dumps(decisions(2, [0,1])))], handler, **options)
+                self.assertEqual(result.execution.status, 'completed')
+                self.assertCountEqual(reached, ['good','fail','later'])
+                self.assertEqual(result.execution.total_tool_calls, 3)
+                self.assertEqual([s.pmid for s in result.sources], ['good','later'])
+                body = json.loads(next(m.content for m in client.requests[-1][0] if m.type=='function_call_output'))
+                self.assertEqual([r['status'] for r in body['data']['searches']], ['completed','failed','completed'])
+                progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
+                self.assertEqual(progress['search_calls_used'], 3)
+                self.assertEqual(progress['failed_searches'], 1)
+
+    def test_llm_can_choose_followup_after_partial_or_total_search_failure(self):
+        from psycopg import OperationalError
+        for first_queries in (['broken','good'], ['broken']):
+            with self.subTest(first_queries=first_queries):
+                reached = []
+                def handler(context, args):
+                    reached.append(args.query)
+                    if args.query == 'broken': raise OperationalError('PRIVATE DB error')
+                    return package([args.query])
+                followup = batch(['new topic'], 'followup')
+                if 'good' in first_queries:
+                    followup.arguments['review'] = {'decisions': [
+                        {'include': True, 'personal_reason': '기존 근거 유지', 'category': 'prevention'}]}
+                count = len(first_queries)
+                result, client = self.run_turns([
+                    ModelTurn(tool_calls=[batch(first_queries)]), ModelTurn(tool_calls=[followup]),
+                    ModelTurn(text=json.dumps(decisions(count, range(count))))], handler)
+                self.assertEqual(result.execution.status, 'completed')
+                self.assertCountEqual(reached, first_queries + ['new topic'])
+                self.assertEqual(reached.count('broken'), 1)
+                self.assertEqual([s.pmid for s in result.sources],
+                                 (['good'] if count == 2 else []) + ['new topic'])
+                self.assertEqual((result.execution.tool_rounds,result.execution.total_tool_calls), (2,count+1))
+                self.assertEqual(client.options[1].tool_choice, 'auto' if count == 2 else 'required')
+                progress = json.loads(client.requests[1][0][-1].content)['search_progress']
+                self.assertEqual((progress['failed_searches'],progress['search_calls_remaining']), (1,9-count))
+                outputs = [m for m in client.requests[-1][0] if m.type=='function_call_output']
+                self.assertEqual([m.call_id for m in outputs], ['provider-real','followup'])
+
+    def test_failures_still_consume_existing_round_and_retrieval_budgets(self):
+        from .test_feed_review_rounds import search
+        reached = []
+        def handler(context, args):
+            reached.append((args.query,args.top_k))
+            if args.query.endswith('bad'): raise RuntimeError('PRIVATE')
+            return package([args.query])
+        turns = [search([f'{r}-good',f'{r}-also-good',f'{r}-bad'], f'round-{r}',
+                        2 if r else None) for r in range(3)]
+        turns.append(ModelTurn(text=json.dumps(decisions(2, [0,1]))))
+        result, client = self.run_turns(turns, handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual((result.execution.tool_rounds,result.execution.total_tool_calls), (3,9))
+        self.assertEqual(len(set(query for query, _ in reached)), 9)
+        self.assertEqual(sum(top_k for _, top_k in reached), 72)
+        self.assertEqual([o.tool_choice for o in client.options], ['required','auto','auto','none'])
+        progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
+        self.assertEqual((progress['successful_searches'],progress['failed_searches']), (6,3))
+        self.assertEqual((progress['search_calls_remaining'],progress['search_rounds_remaining']), (0,0))
+        self.assertEqual([s.pmid for s in result.sources], ['2-good','2-also-good'])
+
+    def test_failed_query_is_not_automatically_retried_or_readmitted(self):
+        from .test_feed_review_rounds import search
+        reached = []
+        def handler(context, args):
+            reached.append(args.query)
+            if args.query == 'broken': raise RuntimeError('PRIVATE')
+            return package([args.query])
+        result, client = self.run_turns([
+            search(['good','broken'], 'first'), search(['broken'], 'duplicate', 1, (0,)),
+            ModelTurn(text=json.dumps(decisions(1, [0])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertCountEqual(reached, ['good','broken'])
+        self.assertEqual(result.execution.total_tool_calls, 2)
+        self.assertEqual([e.code for e in result.execution.errors], ['tool_exception','invalid_arguments'])
+        self.assertEqual([s.pmid for s in result.sources], ['good'])
+        self.assertEqual(client.options[-1].tool_choice, 'auto')
+
+    def test_fatal_failure_is_applied_after_all_peer_results_are_collected(self):
+        from ..schemas import AgentError, ToolOutcome, ToolTrace
+        from ..executor import PERMISSION_FAILURE_MESSAGE
+        for code, message in (('tool_exception', PERMISSION_FAILURE_MESSAGE),
+                              ('patient_context_mismatch', 'scope violation'),
+                              ('invalid_output', 'invalid contract')):
+            with self.subTest(code=code):
+                barrier, failed, release = Barrier(3), Event(), Event()
+                client = FakeLLMClient([ModelTurn(tool_calls=[batch(['good','fatal','slow'])])])
+                execution = FeedExecutionV1(client, parallel.registry(lambda c,a: None),
+                                            request_timeout_seconds=5)
+                def execute(call, context):
+                    query = call.arguments['query']
+                    barrier.wait(2)
+                    if query == 'fatal':
+                        failed.set()
+                        return ToolOutcome(call_id=call.id, tool_name=call.name, success=False,
+                            error=AgentError(code=code, message=message)), ToolTrace(
+                                tool_name=call.name, success=False, duration_ms=0, error_type=code)
+                    if query == 'slow': self.assertTrue(release.wait(3))
+                    return ToolOutcome(call_id=call.id, tool_name=call.name, success=True,
+                        data=package([query]).model_dump()), ToolTrace(
+                            tool_name=call.name, success=True, duration_ms=0, result_count=1)
+                box = {}
+                with patch.object(execution.runner.executor, 'execute', side_effect=execute), \
+                     patch.object(FeedCandidates, 'add') as publish:
+                    worker = Thread(target=lambda: box.update(result=execution(CONTEXT,'{}')), daemon=True)
+                    worker.start()
+                    try:
+                        self.assertTrue(failed.wait(2))
+                        worker.join(.1)
+                        self.assertTrue(worker.is_alive())
+                        publish.assert_not_called()
+                    finally:
+                        release.set()
+                        worker.join(2)
+                    self.assertFalse(worker.is_alive())
+                    result = box['result']
+                    self.assertEqual(result.execution.status, 'failed')
+                    self.assertEqual([t.success for t in result.execution.called_tools], [True,False,True])
+                    self.assertEqual(result.execution.errors[-1].code, code)
+                    self.assertEqual(len(client.requests), 1)
+                    self.assertIsNone(result.output)
+                    self.assertEqual(result.sources, [])
+                    publish.assert_not_called()
+
+    def test_ordinary_failure_does_not_extend_request_deadline_for_slow_peer(self):
+        entered, release, finished = Barrier(2), Event(), Event()
+        def handler(context, args):
+            entered.wait(2)
+            if args.query == 'broken': raise RuntimeError('PRIVATE')
+            try:
+                release.wait(3)
+                return package(['late'])
             finally: finished.set()
-            return package(['late'])
         try:
-            with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate):
-                result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','fail','slow'])]),
-                    ModelTurn(text=json.dumps(decisions(1, [0])))], handler, tool_timeout_seconds=2)
-            self.assertFalse(finished.is_set())
-            self.assertEqual(result.execution.status, 'completed')
-            self.assertEqual([s.pmid for s in result.sources], ['verified'])
-            self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:1:0:0')
-            self.assertEqual(result.execution.total_tool_calls, 3)
-            self.assertEqual([o.tool_choice for o in client.options], ['required','none'])
-            output = next(m for m in client.requests[-1][0] if m.type=='function_call_output')
-            body = json.loads(output.content)
-            self.assertEqual(output.call_id, 'provider-real')
-            self.assertTrue(body['success'])
-            self.assertEqual([r['status'] for r in body['data']['searches']], ['completed','failed','not_accepted'])
-            progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
-            self.assertEqual((progress['search_calls_used'], progress['search_calls_reserved']), (3,3))
-            self.assertEqual((progress['successful_searches'], progress['failed_searches'], progress['not_accepted']), (1,1,1))
-            self.assertNotIn('PRIVATE', output.content + result.model_dump_json())
-            snapshot = result.model_dump_json()
+            with patch.object(FeedCandidates, 'add') as publish:
+                result, client = self.run_turns([ModelTurn(tool_calls=[batch(['broken','slow'])])],
+                    handler, tool_timeout_seconds=3, request_timeout_seconds=.2)
+                self.assertEqual(result.execution.status, 'failed')
+                self.assertEqual(result.execution.errors[-1].code, 'request_timeout')
+                self.assertEqual(len(client.requests), 1)
+                self.assertEqual(result.sources, [])
+                snapshot = result.model_dump_json()
+                publish.assert_not_called()
         finally: release.set()
         self.assertTrue(finished.wait(1))
         self.assertEqual(result.model_dump_json(), snapshot)
 
-    def test_cancelled_later_batch_is_not_counted_as_started_or_failed(self):
-        from ..agent_loop_runner import _validate_tool_result
-        observed, reached = Event(), []
-        def validate(call, raw):
-            result = _validate_tool_result(call, raw)
-            if result[0].success: observed.set()
-            return result
-        def handler(context, args):
-            reached.append(args.query)
-            if args.query=='good': return package(['verified'])
-            self.assertTrue(observed.wait(2))
-            raise RuntimeError('PRIVATE')
-        with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate):
-            result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','fail','never'])]),
-                ModelTurn(text=json.dumps(decisions(1)))], handler, max_parallel_calls=2)
-        self.assertEqual(result.execution.status, 'completed')
-        self.assertCountEqual(reached, ['good','fail'])
-        self.assertEqual(result.execution.total_tool_calls, 2)
-        body = json.loads(next(m.content for m in client.requests[-1][0] if m.type=='function_call_output'))
-        self.assertEqual([r['status'] for r in body['data']['searches']], ['completed','failed','cancelled'])
-        progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
-        self.assertEqual((progress['search_calls_reserved'],progress['search_calls_used'],progress['cancelled']), (3,2,1))
-
     def test_partial_legacy_calls_acknowledge_success_and_failure_individually(self):
-        from ..agent_loop_runner import _validate_tool_result
         observed = Event()
-        def validate(call, raw):
-            result = _validate_tool_result(call, raw)
-            if result[0].success: observed.set()
-            return result
         def handler(context, args):
-            if args.query=='topic 0': return package(['verified'])
+            if args.query=='topic 0':
+                observed.set()
+                return package(['verified'])
             self.assertTrue(observed.wait(2))
             raise RuntimeError('PRIVATE')
-        with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate):
-            result, client = self.run_turns([ModelTurn(tool_calls=parallel.calls(2)),
+        result, client = self.run_turns([ModelTurn(tool_calls=parallel.calls(2)),
                 ModelTurn(text=json.dumps(decisions(1, [0])))], handler)
         self.assertEqual(result.execution.status, 'completed')
         outputs = [json.loads(m.content) for m in client.requests[-1][0] if m.type=='function_call_output']
@@ -457,18 +698,14 @@ class FeedBatchSearchTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources], ['verified'])
 
     def test_permission_denial_remains_fatal_even_with_verified_peer(self):
-        from ..agent_loop_runner import _validate_tool_result
         observed = Event()
-        def validate(call, raw):
-            result = _validate_tool_result(call, raw)
-            if result[0].success: observed.set()
-            return result
         def handler(context, args):
-            if args.query=='good': return package(['verified'])
+            if args.query=='good':
+                observed.set()
+                return package(['verified'])
             self.assertTrue(observed.wait(2))
             raise PermissionError('PRIVATE')
-        with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate):
-            result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','denied'])]),
+        result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','denied'])]),
                 ModelTurn(text=json.dumps(decisions(1)))], handler)
         self.assertEqual(result.execution.status, 'failed')
         self.assertEqual(len(client.requests), 1)
@@ -478,21 +715,17 @@ class FeedBatchSearchTests(unittest.TestCase):
     def test_postgres_permission_failure_aborts_after_accepted_parallel_success(self):
         from psycopg import Error
         from psycopg.errors import InsufficientPrivilege
-        from ..agent_loop_runner import _validate_tool_result
         errors = [InsufficientPrivilege('PRIVATE'), Error('PRIVATE', info={ord('C'):b'42501'})]
         for error in errors:
             with self.subTest(exception=type(error).__name__):
                 observed = Event()
-                def validate(call, raw):
-                    result = _validate_tool_result(call, raw)
-                    if result[0].success: observed.set()
-                    return result
                 def handler(context, args):
-                    if args.query == 'good': return package(['verified'])
+                    if args.query == 'good':
+                        observed.set()
+                        return package(['verified'])
                     self.assertTrue(observed.wait(2))
                     raise error
-                with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate), \
-                     self.assertLogs('app.ai.agent', level='INFO') as logs:
+                with self.assertLogs('app.ai.agent', level='INFO') as logs:
                     result, client = self.run_turns([ModelTurn(tool_calls=[batch(['good','denied'])]),
                         ModelTurn(text=json.dumps(decisions(1,[0])))], handler)
                 self.assertEqual(result.execution.status, 'failed')
@@ -507,16 +740,12 @@ class FeedBatchSearchTests(unittest.TestCase):
     def test_adapter_and_executor_output_violations_abort_with_same_classification(self):
         from ..adapters.rag_evidence import RagEvidenceRetriever
         from ..composition import build_evidence_registry
-        from ..agent_loop_runner import _validate_tool_result
         for adapter in (False, True):
             with self.subTest(adapter=adapter):
                 observed = Event()
-                def validate(call, raw):
-                    result = _validate_tool_result(call, raw)
-                    if result[0].success: observed.set()
-                    return result
                 def rag(*, query, k):
                     raw = package(['verified'])
+                    if query == 'good': observed.set()
                     if query == 'bad':
                         self.assertTrue(observed.wait(2))
                         raw.evidence[0].relevance_score = 2.0
@@ -525,8 +754,7 @@ class FeedBatchSearchTests(unittest.TestCase):
                          else parallel.registry(lambda c,a: rag(query=a.query,k=a.top_k)))
                 client = FakeLLMClient([ModelTurn(tool_calls=[batch(['good','bad'])]),
                                        ModelTurn(text=json.dumps(decisions(1,[0])))])
-                with patch('app.ai.agent.agent_loop_runner._validate_tool_result', side_effect=validate), \
-                     self.assertLogs('app.ai.agent', level='INFO') as logs:
+                with self.assertLogs('app.ai.agent', level='INFO') as logs:
                     result = FeedExecutionV1(client, tools)(CONTEXT, '{}')
                 self.assertEqual(result.execution.status, 'failed')
                 self.assertEqual((len(client.requests), result.execution.total_tool_calls), (1,2))

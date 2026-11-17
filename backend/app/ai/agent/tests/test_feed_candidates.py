@@ -270,13 +270,15 @@ class FeedCandidateRunnerTests(unittest.TestCase):
         self.assertEqual([i.source_ref.tool_call_id for i in result.output.items], ["sdk_0", "sdk_1", "sdk_2"])
         self.assertEqual([s.pmid for s in result.sources], ["0", "5", "10"])
 
-    def test_failed_search_does_not_add_candidates_and_failure_does_not_retry(self):
+    def test_failed_search_does_not_add_candidates_and_llm_can_choose_new_search(self):
         result, client, _ = self.run_feed([self.search("failed", "one"), self.search("ok", "two"),
             ModelTurn(text=json.dumps(decisions(1, (0,))))],
             {"one": RuntimeError("PRIVATE"), "two": package(("A",))})
-        self.assertEqual(result.execution.status, "failed")
-        self.assertEqual(result.sources, [])
-        self.assertEqual(len(client.requests), 1)
+        self.assertEqual(result.execution.status, "completed")
+        self.assertEqual([source.pmid for source in result.sources], ["A"])
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(result.execution.total_tool_calls, 2)
+        self.assertEqual([trace.success for trace in result.execution.called_tools], [False, True])
         self.assertNotIn("PRIVATE", result.model_dump_json())
         result, client, _ = self.run_feed([self.search("ok", "one"),
             ModelTurn(text=json.dumps(decisions(0)))], {"one": package(("A",))})

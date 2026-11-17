@@ -37,6 +37,54 @@ def search(queries, identifier, candidate_count=None, retain=()):
 class FeedReviewRoundsTests(unittest.TestCase):
     setUp = parallel.ParallelFeedTests.setUp
 
+    def test_empty_review_after_only_failed_searches_is_valid(self):
+        table = FeedCandidates()
+        table.record_search(False)
+        table.apply_review(FeedReview.model_validate(review(0)), table.snapshot)
+        self.assertEqual(table.count, 0)
+        self.assertEqual((table.successful_searches, table.failed_searches), (0,1))
+        self.assertEqual(json.loads(table.message().content)['candidate_count'], 0)
+
+    def test_first_review_and_nonempty_review_without_candidates_stay_invalid(self):
+        for failed, rows in ((0,0), (0,1), (1,1)):
+            with self.subTest(failed=failed, review_count=rows):
+                table = FeedCandidates()
+                if failed: table.record_search(False)
+                before = table.message().content
+                with self.assertRaises(FeedDecisionError) as caught:
+                    table.apply_review(FeedReview.model_validate(review(rows)), table.snapshot)
+                self.assertEqual(caught.exception.code, 'invalid_feed_review')
+                self.assertEqual(table.message().content, before)
+
+    def test_review_after_failed_search_is_still_revalidated(self):
+        table = FeedCandidates()
+        table.record_search(False)
+        before = table.message().content
+        with self.assertRaises(FeedDecisionError) as caught:
+            table.apply_review(FeedReview.model_construct(decisions='invalid'), table.snapshot)
+        self.assertEqual(caught.exception.code, 'invalid_feed_review')
+        self.assertEqual(table.message().content, before)
+
+    def test_empty_review_allows_followup_across_failed_rounds_without_argument_recovery(self):
+        reached = []
+        def handler(context, args):
+            reached.append(args.query)
+            if args.query.startswith('broken'): raise RuntimeError('PRIVATE')
+            return package(['verified'])
+        result, client = self.run_feed([
+            search(['broken-a','broken-b'], 'first'), search(['broken-c'], 'second', 0),
+            search(['good'], 'third', 0), ModelTurn(text=json.dumps(decisions(1, [0])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertCountEqual(reached, ['broken-a','broken-b','broken-c','good'])
+        self.assertEqual([e.code for e in result.execution.errors], ['tool_exception']*3)
+        self.assertEqual((result.execution.tool_rounds,result.execution.total_tool_calls), (3,4))
+        self.assertEqual([s.pmid for s in result.sources], ['verified'])
+        self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:3:0:0')
+        self.assertEqual([o.tool_choice for o in client.options], ['required','required','required','none'])
+        progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
+        self.assertEqual((progress['successful_searches'],progress['failed_searches']), (1,3))
+        self.assertEqual(progress.get('argument_recoveries_used', 0), 0)
+
     def run_feed(self, turns, handler, **options):
         client = FakeLLMClient(turns)
         result = FeedExecutionV1(client, parallel.registry(handler), **options)(CONTEXT, '{"patients":[]}')
@@ -345,35 +393,28 @@ class FeedReviewRoundsTests(unittest.TestCase):
             table.apply_review(FeedReview.model_validate(review(2, (0,))), saved)
         self.assertEqual(error.exception.code, 'candidate_source_mismatch')
 
-    def test_followup_failure_atomic_and_late_result_cannot_publish(self):
-        release, finished, barrier = Event(), Event(), Barrier(2)
+    def test_followup_failure_keeps_review_and_collects_slow_success(self):
+        failed, barrier = Event(), Barrier(2)
         def handler(context, args):
             if args.query == 'first': return package(['a'])
             barrier.wait(2)
-            if args.query == 'fail': raise RuntimeError('PRIVATE')
-            try: release.wait(4)
-            finally: finished.set()
-            return package(['late'])
-        box = {}
-        def run():
-            box['result'], box['client'] = self.run_feed([search(['first'], 'first'), search(['slow', 'fail'], 'next', 1, (0,)), ModelTurn(text=json.dumps(decisions(1, [0])))],
-                handler, tool_timeout_seconds=3, request_timeout_seconds=4)
-        worker = Thread(target=run, daemon=True)
-        worker.start()
-        try:
-            worker.join(1)
-            self.assertFalse(worker.is_alive())
-            self.assertFalse(finished.is_set())
-            result = box['result']
-            self.assertEqual(result.execution.status, 'completed')
-            self.assertEqual([s.pmid for s in result.sources], ['a'])
-            self.assertEqual(result.sources[0].source_ref.tool_call_id, 'feed-rag:1:0:0')
-            self.assertEqual(len(box['client'].requests), 3)
-            self.assertEqual(box['client'].options[-1].tool_choice, 'none')
-            snapshot = result.model_dump_json()
-        finally: release.set()
-        self.assertTrue(finished.wait(1))
-        self.assertEqual(box['result'].model_dump_json(), snapshot)
+            if args.query == 'fail':
+                failed.set()
+                raise RuntimeError('PRIVATE')
+            self.assertTrue(failed.wait(2))
+            return package(['b'])
+        result, client = self.run_feed([search(['first'], 'first'),
+            search(['slow', 'fail'], 'next', 1, (0,)),
+            ModelTurn(text=json.dumps(decisions(2, [0,1])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual([s.pmid for s in result.sources], ['a','b'])
+        self.assertEqual([s.source_ref.tool_call_id for s in result.sources],
+                         ['feed-rag:1:0:0','feed-rag:2:0:0'])
+        self.assertEqual((result.execution.tool_rounds,result.execution.total_tool_calls), (2,3))
+        self.assertEqual(len(client.requests), 3)
+        self.assertEqual(client.options[-1].tool_choice, 'auto')
+        progress=json.loads(client.requests[-1][0][-1].content)['search_progress']
+        self.assertEqual((progress['successful_searches'],progress['failed_searches']), (2,1))
 
     def test_state_is_not_shared_with_later_request(self):
         client = FakeLLMClient([search(['a'], 'first'), search(['b'], 'next', 1), ModelTurn(text=json.dumps(decisions(1, (0,)))),
@@ -443,7 +484,28 @@ class FeedReviewRoundsTests(unittest.TestCase):
         self.assertEqual([s.pmid for s in result.sources], ['original'])
         progress = json.loads(client.requests[-1][0][-1].content)['search_progress']
         self.assertEqual((progress['successful_searches'],progress['failed_searches'],progress['search_calls_used']), (1,1,2))
-        self.assertEqual(client.options[-1].tool_choice, 'none')
+        self.assertEqual(client.options[-1].tool_choice, 'auto')
+
+    def test_all_failed_followup_rolls_back_review_before_another_search(self):
+        reached = []
+        def handler(context, args):
+            reached.append(args.query)
+            if args.query == 'broken': raise RuntimeError('PRIVATE')
+            return package([args.query])
+        result, client = self.run_feed([
+            search(['initial'], 'first'), search(['broken'], 'second', 1),
+            search(['new'], 'third', 1, (0,)),
+            ModelTurn(text=json.dumps(decisions(2, [0,1])))], handler)
+        self.assertEqual(result.execution.status, 'completed')
+        self.assertEqual(reached, ['initial','broken','new'])
+        self.assertEqual([s.pmid for s in result.sources], ['initial','new'])
+        self.assertEqual([s.source_ref.tool_call_id for s in result.sources],
+                         ['feed-rag:1:0:0','feed-rag:3:0:0'])
+        restored = json.loads(client.requests[2][0][-1].content)
+        self.assertEqual(restored['candidate_count'], 1)
+        self.assertEqual(restored['candidates'][0]['title'], 'Synthetic paper 0')
+        self.assertEqual(restored['search_progress']['failed_searches'], 1)
+        self.assertEqual([o.tool_choice for o in client.options], ['required','auto','auto','none'])
 
     def test_zero_additional_recoveries_still_allows_last_repair_and_normal_search(self):
         turns = [search(['initial'],'first'), search([],'bad-1'), search([],'bad-2'),

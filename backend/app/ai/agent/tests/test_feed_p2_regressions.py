@@ -1,10 +1,9 @@
-"""Regression tests for candidate priority and completion-order Feed failure."""
+"""Regression tests for candidate priority and complete Feed search collection."""
 import json
 import unittest
 from threading import Barrier, Event, Thread
 from unittest.mock import patch
 
-from ..conversation import Conversation
 from ..feed_candidates import FeedCandidates, FeedDecisionError
 from ..schemas import ModelTurn
 from ..testing.fake_llm import FakeLLMClient
@@ -48,62 +47,63 @@ class FeedP2RegressionTests(unittest.TestCase):
             _,refs=table.finalize(json.dumps(decisions(len(expected),range(len(expected)))),table.snapshot)
             self.assertEqual([r.pmid for r in refs],expected)
 
-    def test_later_failure_returns_before_first_slow_call_and_discards_late_state(self):
-        barrier,release,finished=Barrier(2),Event(),Event()
+    def test_later_failure_waits_for_first_slow_call_and_retains_its_source(self):
+        barrier,release,failed=Barrier(2),Event(),Event()
         def handler(context,args):
             barrier.wait(2)
-            if args.query.endswith('1'): raise RuntimeError('PRIVATE')
-            try: release.wait(4)
-            finally: finished.set()
-            return package(['late'])
-        client=FakeLLMClient([ModelTurn(tool_calls=calls(2))])
-        execution=FeedExecutionV1(client,registry(handler),tool_timeout_seconds=3,request_timeout_seconds=4)
+            if args.query.endswith('1'):
+                failed.set()
+                raise RuntimeError('PRIVATE')
+            self.assertTrue(release.wait(3))
+            return package(['verified'])
+        client=FakeLLMClient([ModelTurn(tool_calls=calls(2)),
+                             ModelTurn(text=json.dumps(decisions(1,[0])))])
+        execution=FeedExecutionV1(client,registry(handler),tool_timeout_seconds=4,request_timeout_seconds=5)
         box={}
-        def run():box['result']=execution(CONTEXT,'{}')
-        with patch.object(FeedCandidates,'add',autospec=True) as publish, patch.object(
-                Conversation,'append_turn',autospec=True) as followup:
-            worker=Thread(target=run,daemon=True);worker.start()
-            try:
-                worker.join(1)
-                self.assertFalse(worker.is_alive(),'Failure must return without releasing the slow peer')
-                self.assertFalse(finished.is_set())
-                result=box['result']
-                self.assertEqual(result.execution.status,'failed')
-                self.assertEqual(result.execution.total_tool_calls,2)
-                self.assertEqual(result.execution.errors[-1].code,'tool_exception')
-                self.assertEqual([t.success for t in result.execution.called_tools],[False])
-                self.assertIsNone(result.output)
-                self.assertEqual(result.sources,[])
-                self.assertEqual(len(client.requests),1)
-                snapshot=result.model_dump_json()
-                publish.assert_not_called();followup.assert_not_called()
-            finally: release.set()
+        worker=Thread(target=lambda:box.update(result=execution(CONTEXT,'{}')),daemon=True)
+        worker.start()
+        try:
+            self.assertTrue(failed.wait(2))
+            worker.join(.1)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(len(client.requests),1)
+        finally:
+            release.set()
             worker.join(2)
-            self.assertTrue(finished.wait(1))
-            self.assertEqual(box['result'].model_dump_json(),snapshot)
-            publish.assert_not_called();followup.assert_not_called()
+        self.assertFalse(worker.is_alive())
+        result=box['result']
+        self.assertEqual(result.execution.status,'completed')
+        self.assertEqual(result.execution.total_tool_calls,2)
+        self.assertEqual([t.success for t in result.execution.called_tools],[True,False])
+        self.assertEqual([s.pmid for s in result.sources],['verified'])
+        self.assertEqual(result.sources[0].source_ref.tool_call_id,'opaque_0')
+        self.assertEqual(len(client.requests),2)
+        outputs=[json.loads(m.content) for m in client.requests[-1][0] if m.type=='function_call_output']
+        self.assertEqual([o['success'] for o in outputs],[True,False])
+        self.assertNotIn('PRIVATE',result.model_dump_json())
 
-    def test_failure_during_slot_admission_skips_unstarted_calls_and_releases_slots(self):
+    def test_failure_during_slot_admission_still_starts_remaining_search_and_releases_slots(self):
         from threading import BoundedSemaphore
-        slots,barrier,release=BoundedSemaphore(2),Barrier(2),Event()
+        slots,barrier,failed=BoundedSemaphore(2),Barrier(2),Event()
         reached=[]
         def handler(context,args):
             reached.append(args.query)
-            barrier.wait(2)
-            if args.query.endswith('1'):raise RuntimeError('synthetic failure')
-            release.wait(4)
-            return package(['late'])
-        client=FakeLLMClient([ModelTurn(tool_calls=calls(3))])
+            if args.query.endswith(('0','1')): barrier.wait(2)
+            if args.query.endswith('1'):
+                failed.set()
+                raise RuntimeError('synthetic failure')
+            if args.query.endswith('0'): self.assertTrue(failed.wait(2))
+            return package([args.query])
+        client=FakeLLMClient([ModelTurn(tool_calls=calls(3)),
+                             ModelTurn(text=json.dumps(decisions(2,[0,1])))])
         execution=FeedExecutionV1(client,registry(handler),tool_timeout_seconds=3,request_timeout_seconds=4)
         with patch('app.ai.agent._execution._PARALLEL_SLOTS',slots):
-            try:
-                result=execution(CONTEXT,'{}')
-                self.assertEqual(result.execution.status,'failed')
-                self.assertEqual(result.execution.total_tool_calls,2)
-                self.assertCountEqual(reached,['topic 0','topic 1'])
-                self.assertEqual(len(client.requests),1)
-                self.assertEqual(result.sources,[])
-            finally:release.set()
+            result=execution(CONTEXT,'{}')
+            self.assertEqual(result.execution.status,'completed')
+            self.assertEqual(result.execution.total_tool_calls,3)
+            self.assertCountEqual(reached,['topic 0','topic 1','topic 2'])
+            self.assertEqual([s.pmid for s in result.sources],['topic 0','topic 2'])
+            self.assertEqual([t.success for t in result.execution.called_tools],[True,False,True])
             acquired=0
             try:
                 for _ in range(2):

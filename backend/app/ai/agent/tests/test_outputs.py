@@ -583,9 +583,9 @@ class StructuredWorkflowTests(TestCase):
         for payload, preceding, registry in cases:
             model = FeedAnswerV2 if "decisions" in payload else ChatAnswerV1
             result, _ = self.run_output(payload, model, preceding, registry)
-            self.assertEqual(result.execution.status, "failed" if model is FeedAnswerV2 else "invalid_response")
+            self.assertEqual(result.execution.status, "invalid_response")
             self.assertEqual(result.execution.errors[-1].code,
-                             "empty_result" if model is FeedAnswerV2 else "invalid_structured_output")
+                             "feed_search_required" if model is FeedAnswerV2 else "invalid_structured_output")
             self.assertIsNone(result.output)
             self.assertIsNone(result.execution.final_answer)
             self.assertEqual(result.sources, [])

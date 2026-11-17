@@ -205,10 +205,13 @@ class FeedCandidates:
         """Bind this Provider turn to the exact snapshot sent by the server."""
         self._validate_snapshot(snapshot)
         if not self._review_ready:
-            if review is not None:
+            if review is None:
+                return
+            if not (self.failed_searches > 0 and self.successful_searches == 0 and self.count == 0):
                 raise FeedDecisionError("invalid_feed_review", diagnostic=dict(
                     reason="unexpected_review", field="review", expected="omit review before first search"))
-            return
+            # Failed searches disclose an empty candidate list. Validate its
+            # followup review below; only zero decisions can match that list.
         try:
             review = FeedReview.model_validate(review.model_dump(warnings=False)) if review is not None else None
         except ValidationError as exc:

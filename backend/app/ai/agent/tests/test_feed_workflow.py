@@ -162,7 +162,7 @@ class FeedWorkflowTests(unittest.TestCase):
         tool = next(m for m in deps.client.requests[1][0] if m.type == "function_call_output")
         self.assertTrue(json.loads(tool.content)["success"])
 
-    def test_timeout_and_search_exception_stop_without_retry(self):
+    def test_timeout_stops_and_search_exception_is_reported_without_automatic_retry(self):
         for error in (TimeoutError("PRIVATE"), RuntimeError("PRIVATE")):
             def handler(context, args):
                 raise error
@@ -170,9 +170,10 @@ class FeedWorkflowTests(unittest.TestCase):
                 turns=[ModelTurn(tool_calls=[search_call()]), final_turn(count=0)])
             with self.assertRaises(FeedWorkflowError):
                 deps.workflow().run(CONTEXT)
-            self.assertEqual(len(deps.client.requests), 1)
+            timeout = isinstance(error, TimeoutError)
+            self.assertEqual(len(deps.client.requests), 1 if timeout else 2)
             self.assertEqual(deps.saved, [])
-            self.assertEqual(deps.agent_result.execution.status, "failed")
+            self.assertEqual(deps.agent_result.execution.status, "failed" if timeout else "invalid_response")
             self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
 
     def test_disallowed_profile_tool_never_executes_or_discloses_profile(self):
@@ -267,10 +268,10 @@ class FeedWorkflowTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(deps.agent_result.execution.status, "failed")
+        self.assertEqual(deps.agent_result.execution.status, "invalid_response")
         self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
         self.assertIn("tool_exception", [error.code for error in deps.agent_result.execution.errors])
-        self.assertEqual(len(deps.client.requests), 1)
+        self.assertEqual(len(deps.client.requests), 2)
         self.assertIsNone(deps.agent_result.output)
         self.assertIsNone(deps.agent_result.execution.final_answer)
         self.assertEqual(deps.agent_result.sources, [])
@@ -359,7 +360,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
                     with self.assertRaises(FeedWorkflowError):
                         workflow.run(context)
                     self.assertEqual(deps.agent_result.execution.status,
-                                     "failed" if behavior == "failed_search" else "invalid_response")
+                                     "invalid_response")
                     self.assertIsNone(deps.agent_result.output)
                     self.assertEqual(deps.agent_result.sources, [])
                     self.assertEqual(deps.saved, [])

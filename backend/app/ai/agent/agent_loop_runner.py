@@ -245,7 +245,7 @@ class AgentLoopRunner:
         return cast(StructuredAgentResult, self._run(user_input, context, output_model=output_model,
                     previously_recommended_pmids=previously_recommended_pmids))
 
-    def _tool_results(self, calls, context, state, *, stop_on_failure, unaccepted=None, input_origins=None):
+    def _tool_results(self, calls, context, state, *, stop_on_timeout=False, unaccepted=None, input_origins=None):
         def execute(call, execution_context):
             token = tool_diagnostic_context.set({**tool_diagnostic_context.get(),
                 "input_origin": (input_origins or {}).get(call.id, "llm_arguments")})
@@ -253,6 +253,10 @@ class AgentLoopRunner:
                 return self.executor.execute(call, execution_context)
             finally:
                 tool_diagnostic_context.reset(token)
+
+        def timed_out(outcome):
+            # Feed collects other failures, but a Tool timeout ends collection.
+            return stop_on_timeout and outcome.error is not None and outcome.error.code == "tool_timeout"
 
         parallel = False
         if self.allow_parallel_tools and self.max_parallel_calls > 1 and len(calls) > 1:
@@ -267,8 +271,8 @@ class AgentLoopRunner:
                     raw_results = bounded_parallel([
                         partial(execute, call.model_copy(deep=True), context.model_copy(deep=True))
                         for call in batch], stop_on_result=(
-                            lambda index, raw: not _validate_tool_result(batch[index], raw)[0].success)
-                            if stop_on_failure else None, on_started=record_started)
+                            lambda index, raw: timed_out(_validate_tool_result(batch[index], raw)[0]))
+                            if stop_on_timeout else None, on_started=record_started)
                 except ParallelStopped as stopped:
                     if unaccepted is not None:
                         observed = {index for index, _ in stopped.results}
@@ -286,7 +290,7 @@ class AgentLoopRunner:
                 state.total_tool_calls += 1
                 outcome, trace = _validate_tool_result(call, bounded_call(lambda: execute(call, context)))
                 yield call, outcome, trace
-                if stop_on_failure and not outcome.success:
+                if timed_out(outcome):
                     if unaccepted is not None:
                         unaccepted.update({later.id: "cancelled" for later in calls[calls.index(call) + 1:]})
                     return
@@ -398,7 +402,11 @@ class AgentLoopRunner:
                     remaining = max(0, min(MAX_FEED_SEARCHES, self.max_total_tool_calls) - len(feed_query_keys))
                     if feed_search_closed:
                         remaining = rounds_remaining = 0
-                    if feed_candidates.successful_searches:
+                    # No successful search can support a final Feed. Preserve the
+                    # search errors instead of requesting an impossible final turn.
+                    if not feed_candidates.successful_searches and (remaining == 0 or rounds_remaining == 0):
+                        return finish("failed")
+                    if feed_candidates.successful_searches or feed_candidates.failed_searches:
                         projection = bounded_call(lambda: feed_candidates.message(
                             remaining, model_tool_calls=feed_model_calls,
                             rounds_used=state.tool_round, rounds_remaining=rounds_remaining))
@@ -627,7 +635,7 @@ class AgentLoopRunner:
                 input_origins = ({call.id: "feed_search_plan" for call in calls} if feed_candidates is not None else
                     {call.id: "chat_search_plan" for call in calls if call.name in chat_search_tools}
                     if output_model is ChatAnswerV1 else {})
-                results = self._tool_results(calls, context, state, stop_on_failure=feed_candidates is not None,
+                results = self._tool_results(calls, context, state, stop_on_timeout=feed_candidates is not None,
                                              unaccepted=unaccepted if feed_candidates is not None else None,
                                              input_origins=input_origins)
                 if skipped:
@@ -641,8 +649,8 @@ class AgentLoopRunner:
                     state.errors.extend(outcome.error for _, outcome, _ in results if outcome.error)
                     failures = {call.id: outcome.error for call, outcome, _ in results if not outcome.success}
                     # Timeouts, scope/contract violations and server defects remain hard stops.
-                    # Unknown handler exceptions permit finalizing verified existing evidence,
-                    # never automatic RAG retry or accepting a late result.
+                    # Ordinary search failures affect only that search. The model
+                    # decides whether to search further within the existing budget.
                     # PermissionError has a fixed server-owned message while retaining
                     # tool_exception. Do not inspect exception text to infer permissions.
                     if any(error.code not in ("tool_exception", "empty_result")
@@ -668,7 +676,7 @@ class AgentLoopRunner:
                                     context.request_id, llm_turn, [diagnostic_call_id(identifier) for identifier in ids],
                                     len(packages), len(failures),
                                     list(unaccepted.values()), state.total_tool_calls, len(feed_query_keys),
-                                    "finalize_existing_evidence" if packages or feed_candidates.successful_searches else "abort")
+                                    "llm_decision")
                     stage = "candidate_source_mismatch"
                     for call, outcome, _ in results:
                         if not outcome.success:
@@ -684,8 +692,6 @@ class AgentLoopRunner:
                         feed_unaccepted[status] += 1
                     check_deadline()
                     if failures or unaccepted:
-                        # No unknown internal failure is classified as retryable.
-                        feed_search_closed = True
                         if not packages:
                             # Do not apply an unfulfilled review to previous candidates.
                             staged_candidates = deepcopy(feed_candidates)
@@ -696,8 +702,6 @@ class AgentLoopRunner:
                                 "feed", selection_snapshot.keys))
                             for _ in failures:
                                 staged_candidates.record_search(False)
-                        if not packages and not feed_candidates.successful_searches:
-                            return finish("failed")
                     if packages:
                         staged_candidates.finish_round()
                     feed_candidates = staged_candidates
