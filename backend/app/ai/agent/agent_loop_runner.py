@@ -255,7 +255,7 @@ class AgentLoopRunner:
                 tool_diagnostic_context.reset(token)
 
         def timed_out(outcome):
-            # Feed collects other failures, but a Tool timeout ends collection.
+            # Structured workflows collect other failures; Tool timeout ends collection.
             return stop_on_timeout and outcome.error is not None and outcome.error.code == "tool_timeout"
 
         parallel = False
@@ -652,7 +652,8 @@ class AgentLoopRunner:
                 input_origins = ({call.id: "feed_search_plan" for call in calls} if feed_candidates is not None else
                     {call.id: "chat_search_plan" for call in calls if call.name in chat_search_tools}
                     if output_model is ChatAnswerV1 else {})
-                results = self._tool_results(calls, context, state, stop_on_timeout=feed_candidates is not None,
+                results = self._tool_results(calls, context, state,
+                                             stop_on_timeout=feed_candidates is not None or output_model is ChatAnswerV1,
                                              unaccepted=unaccepted if feed_candidates is not None else None,
                                              input_origins=input_origins)
                 if skipped:
