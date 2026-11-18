@@ -601,6 +601,14 @@ class PatientUpdate(BaseModel):
         return _text_list(value, info.field_name)
 
 
+class PatientCreate(PatientUpdate):
+    """POST /users/{user_id}/patients 요청 본문 (앱의 돌보는 분 추가).
+
+    칸과 검증 규칙은 PatientUpdate와 같고 모두 선택이다 (보내지 않은 목록은 빈 목록).
+    caregiver_id는 받지 않는다 — 주소의 user_id(로그인한 본인)로 정해서, 다른 사람 계정에 환자를 넣을 수 없다.
+    """
+
+
 class PatientOut(BaseModel):
     """patient_profiles 테이블 한 행. create_patient / get_patient / list_patients / update_patient가 돌려준다."""
 

@@ -1,9 +1,11 @@
-"""피드 입력용 사용자·환자 API (김한슬 담당).
+"""피드 입력용 사용자·환자 API (김한슬 담당, 돌보는 분 추가·수정은 명석희 — 11/18 한슬 님 동의).
 
 AI 피드 함수가 받는 개인화 입력(사용자·환자 프로필)을 돌려준다.
 GET /feed_user/{user_id}                     간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록)
 GET /feed_patient/{user_id}/{patient_id}     환자 한 명의 현재 상태 (이 간병인의 환자만)
 GET /feed/{user_id}                          간병인 + 담당 환자 전원 (AI 피드 함수 입력 형식 그대로)
+POST  /users/{user_id}/patients              돌보는 분 추가 (담당 간병인 = 로그인한 본인)
+PATCH /users/{user_id}/patients/{patient_id} 돌보는 분 정보 수정 (보낸 칸만, 이 간병인의 환자만)
 
 경로의 user_id와 로그인 사용자가 같은지 공통 의존성으로 먼저 확인한다.
 사용자 목록(user_functions.list_users)은 전체 회원 정보가 나오므로 API로 열지 않는다.
@@ -16,7 +18,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.auth.dependencies import require_user_access
 from app.db import user_functions
 from app.user_schemas import (
-    CaregiverContext, FeedSettingsOut, FeedSettingsUpdate, PatientContext, UserProfileContext,
+    CaregiverContext, FeedSettingsOut, FeedSettingsUpdate, PatientContext, PatientCreate, PatientIn, PatientOut,
+    PatientUpdate, UserProfileContext,
 )
 
 router = APIRouter(tags=["feed"], dependencies=[Depends(require_user_access)])
@@ -106,3 +109,43 @@ def update_feed_settings(user_id: UUID, data: FeedSettingsUpdate) -> FeedSetting
     if settings is None:
         raise HTTPException(status_code=404, detail=_USER_NOT_FOUND)
     return settings
+
+
+@router.post(
+    "/users/{user_id}/patients",
+    response_model=PatientOut,
+    status_code=201,
+    summary="돌보는 분 추가",
+)
+def create_patient(user_id: UUID, data: PatientCreate) -> PatientOut:
+    """로그인한 간병인에게 환자를 등록하고 저장된 행을 돌려준다 (201).
+
+    담당 간병인은 본문이 아니라 주소의 user_id로 정한다 (본문에 caregiver_id를 넣으면 422).
+    새 환자는 created_at이 피드 저장본보다 늦어서, 다음 피드 요청 때 맞춤 추천을 새로 만든다.
+    """
+    try:
+        return user_functions.create_patient(PatientIn(caregiver_id=user_id, **data.model_dump()))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+
+
+@router.patch(
+    "/users/{user_id}/patients/{patient_id}",
+    response_model=PatientOut,
+    summary="돌보는 분 정보 수정",
+    responses=_not_found(_PATIENT_NOT_FOUND),
+)
+def update_patient(user_id: UUID, patient_id: UUID, data: PatientUpdate) -> PatientOut:
+    """보낸 칸만 바꾼다 (규칙은 PatientUpdate). 수정되면 다음 피드 요청 때 맞춤 추천을 새로 만든다.
+
+    이 간병인의 환자가 아니면 (다른 간병인의 환자, 없는 환자 모두) 404 — 환자 조회 API와 같다.
+    """
+    if not user_functions.is_caregiver_of(user_id, patient_id):
+        raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
+    try:
+        patient = user_functions.update_patient(patient_id, data)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from None
+    if patient is None:  # 확인과 수정 사이에 삭제된 경우
+        raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
+    return patient

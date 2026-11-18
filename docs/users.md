@@ -23,6 +23,19 @@
   논문을 돌려주지 않는다 — **논문 추천은 `/recommendations`**. 응답 형식의 정본은 `backend/app/user_schemas.py`.
 - 사용자·환자 함수 목록은 `app/db/user_functions.py` 참고 (담당: 김한슬).
 
+## 돌보는 분 추가·수정 API (2026-11-18, 명석희 — 한슬 님 동의)
+
+- `POST /users/{user_id}/patients` — 본문 `PatientCreate`(이름·단계·진단일·증상·관심사, 모두 선택) → 201 `PatientOut`.
+  담당 간병인은 **주소의 user_id(로그인한 본인)**로 정한다. 본문에 `caregiver_id`를 넣으면 422 —
+  다른 사람 계정에 환자를 넣을 수 없게 하려는 것이다. 저장은 기존 `user_functions.create_patient()`.
+- `PATCH /users/{user_id}/patients/{patient_id}` — 본문 `PatientUpdate`(보낸 칸만 바뀜, null은 값 삭제, 목록은 통째로 교체) → 200 `PatientOut`.
+  `is_caregiver_of()`로 먼저 확인해서 다른 간병인의 환자·없는 환자는 404(조회 API와 같음). 저장은 기존 `update_patient()`.
+- 입력 검증은 `PatientIn`·`PatientUpdate` 규칙 그대로다 (단계 4종, 미래 진단일 불가, 문자열 목록, 모르는 칸 거부 → 422).
+- 추가·수정하면 환자 `created_at`/`updated_at`이 피드 저장본보다 늦어져, 다음 `/recommendations` 요청 때 피드를 새로 만든다
+  (`feed_read.profile_changed_since`). 환자 **삭제** API는 아직 없다.
+- 앱: 내 정보 > 돌보는 분 `+ 추가` / `정보 수정` (`frontend/src/app/patient/form.tsx`).
+- 검증: `python -m unittest tests.test_patients_api` (DB 없이 실제 라우터·검증 실행, 인증 없는 요청 401 포함).
+
 ## 챗봇 최근 돌봄 기록 조회 (2026-11-10)
 
 - 공용 관문 `app/db/functions.py`의 `get_recent_care_logs()`를 추가했다. 구현은 `user_functions.py`다.

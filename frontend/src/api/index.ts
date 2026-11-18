@@ -96,18 +96,17 @@ export function getUserProfile(userId: string): Promise<UserProfileContext> {
 }
 
 /**
- * 돌보는 분 추가 — POST /users/{user_id}/patients (본문 PatientIn).
- * ★ 백엔드에 아직 없는 API다 (2026-10-26 기준, 한슬 님께 요청 예정). 주소는 /feed_patient/{user_id}/{patient_id}처럼
- * 간병인 id를 주소에 넣는 방식으로 제안했다. 만들어지기 전에는 "서버에 아직 이 기능이 없어요" 오류가 난다.
+ * 돌보는 분 추가 — POST /users/{user_id}/patients (본문 PatientCreate, 201).
+ * 담당 간병인은 서버가 주소의 user_id(로그인한 본인)로 정한다. 본문에 caregiver_id를 넣으면 422.
  */
 export function createPatient(userId: string, data: PatientInput): Promise<Patient> {
   return request(`/users/${userId}/patients`, {
     method: 'POST',
-    body: { caregiver_id: userId, ...data },
+    body: data,
   });
 }
 
-/** 돌보는 분 정보 수정 — PATCH /users/{user_id}/patients/{patient_id} (본문 PatientUpdate). ★ 아직 없는 API */
+/** 돌보는 분 정보 수정 — PATCH /users/{user_id}/patients/{patient_id} (본문 PatientUpdate, 보낸 칸만). 남의 환자면 404 */
 export function updatePatient(userId: string, patientId: string, data: PatientInput): Promise<Patient> {
   return request(`/users/${userId}/patients/${patientId}`, {
     method: 'PATCH',

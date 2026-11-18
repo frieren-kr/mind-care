@@ -1,6 +1,6 @@
 # API
 
-> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`·`chat.py`는 박주현, `users.py`는 김한슬).
+> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`·`chat.py`는 박주현, `users.py`는 김한슬 — 돌보는 분 추가·수정 2개는 명석희).
 > 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), DB 함수 계약은 [`db.md`](db.md).
 
 **인증 추가 (2026-11-02)**: 기존 계정 로그인·내 정보·로그아웃 구현 완료.
@@ -32,6 +32,8 @@
 | `GET /feed_patient/{user_id}/{patient_id}` | `api/users.py` | 환자 한 명의 현재 상태. 이 간병인의 환자가 아니면 404 | `PatientContext` |
 | `GET /users/{user_id}/feed-settings` | `api/users.py` | 피드 갱신 주기 조회(1~7일, 기본 3일). 없는 사용자는 404 | `FeedSettingsOut` |
 | `PATCH /users/{user_id}/feed-settings` | `api/users.py` | JSON `{"feed_refresh_days": 5}` 저장. 정수 1~7만 허용, 잘못된 입력은 422, 없는 사용자는 404 | `FeedSettingsOut` |
+| `POST /users/{user_id}/patients` | `api/users.py` | 돌보는 분 추가 (담당: 명석희). 본문 `PatientCreate`(모두 선택), 담당 간병인 = 주소의 로그인 본인. 본문에 `caregiver_id`·모르는 칸·잘못된 단계·미래 진단일은 422. 성공 201 | `PatientOut` |
+| `PATCH /users/{user_id}/patients/{patient_id}` | `api/users.py` | 돌보는 분 수정 (담당: 명석희). 보낸 칸만 바뀜(`PatientUpdate`). 이 간병인의 환자가 아니면 404, 입력 오류 422. 수정 후 다음 피드 요청 때 피드 재생성 | `PatientOut` |
 | `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 | `POST /chat/{user_id}` | `api/chat.py` | 챗봇 질문 1개 → 답변 + 근거. 본문 `{"message": "...", "patient_id": null}` (`message` 1~4000자, `patient_id` 선택). 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404, 입력 오류는 422, AI를 못 쓰거나 실패하면 503. **최대 90초** 걸릴 수 있다 | `ChatResponse` |
 | `GET /chat/{user_id}/history?patient_id=&limit=20&before=` | `api/chat.py` | 저장된 챗봇 대화(질문·답변 쌍)를 **오래된 것부터 최신 순**으로. `patient_id` 없음 = 환자 미선택 대화만, 있으면 그 환자 대화만. `limit` 1~50(기본 20). `before`(시간대 필수)보다 이전 대화만 — 더 불러오기. **원문은 7일만 보관**. 토큰 없음 401, 남의 user_id 403, 남의 환자 404, 입력 오류 422, DB 오류 503 | `ChatHistoryResponse` |
