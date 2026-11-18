@@ -629,6 +629,78 @@ class PatientOut(BaseModel):
 
 
 # ============================================================
+# care_logs (앱에서 쓰는 환자 돌봄 기록) — 11/18 명석희
+# 저장은 feed_read.save_care_log(), 조회는 user_functions.get_recent_care_logs()(챗봇 Tool과 같은 함수).
+# ============================================================
+
+# 기록할 때의 간병인 기분. 데모 기록(scripts/seed_demo_care_logs.py)과 같은 말을 쓴다.
+CARE_MOOD_TAGS = ("평온", "안도", "뿌듯함", "걱정", "불안", "지침")
+CARE_LOG_MAX_CHARS = 1000
+CARE_LOG_MAX_DAYS = 90  # 챗봇 돌봄 기록 Tool이 볼 수 있는 최대 기간과 같다
+CARE_LOG_CLOCK_SKEW = timedelta(minutes=5)  # 폰 시계가 조금 빠른 것은 허용
+
+
+class CareLogCreate(BaseModel):
+    """POST /users/{user_id}/patients/{patient_id}/care-logs 본문. 환자 돌봄 기록(patient_care) 1건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description=f"있었던 일 (1~{CARE_LOG_MAX_CHARS}자). 앞뒤 공백 제거")
+    mood_tag: Optional[str] = Field(default=None, description=f"기록할 때 기분: {' / '.join(CARE_MOOD_TAGS)}. 선택")
+    logged_at: Optional[datetime] = Field(
+        default=None, description=f"있었던 시각 (시간대 필수). 비우면 지금. 미래·{CARE_LOG_MAX_DAYS}일보다 오래된 시각은 불가",
+    )
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _check_content(cls, value: Any) -> str:
+        text = _optional_text(value, "content")
+        if text is None:
+            raise ValueError("기록 내용(content)을 입력해 주세요.")
+        if len(text) > CARE_LOG_MAX_CHARS:
+            raise ValueError(f"기록 내용은 {CARE_LOG_MAX_CHARS}자까지 쓸 수 있습니다.")
+        return text
+
+    @field_validator("mood_tag", mode="before")
+    @classmethod
+    def _check_mood(cls, value: Any) -> Optional[str]:
+        tag = _optional_text(value, "mood_tag")
+        if tag is not None and tag not in CARE_MOOD_TAGS:
+            raise ValueError(f"기분은 {' / '.join(CARE_MOOD_TAGS)} 중에서 골라 주세요: {tag!r}")
+        return tag
+
+    @field_validator("logged_at")
+    @classmethod
+    def _check_logged_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.utcoffset() is None:
+            raise ValueError("logged_at에는 시간대가 있어야 합니다 (예: 2026-11-18T09:00:00+09:00).")
+        now = datetime.now(timezone.utc)
+        if value > now + CARE_LOG_CLOCK_SKEW:
+            raise ValueError("아직 오지 않은 시각은 기록할 수 없습니다.")
+        if value < now - timedelta(days=CARE_LOG_MAX_DAYS):
+            raise ValueError(f"{CARE_LOG_MAX_DAYS}일보다 오래된 기록은 남길 수 없습니다.")
+        return value
+
+
+class CareLogOut(BaseModel):
+    """돌봄 기록 1건 (화면 표시용). 기록 원문은 그대로 돌려준다."""
+
+    patient_id: UUID
+    content: Optional[str] = None
+    mood_tag: Optional[str] = None
+    logged_at: datetime = Field(description="있었던 시각 (시간대 포함)")
+
+
+class CareLogList(BaseModel):
+    """GET …/care-logs 응답. items는 최신순, total_count는 limit으로 자르기 전 건수."""
+
+    items: list[CareLogOut]
+    total_count: int
+
+
+# ============================================================
 # caregiver_profiles (간병인 자가점검)
 # ============================================================
 

@@ -1,4 +1,4 @@
-"""피드 입력용 사용자·환자 API (김한슬 담당, 돌보는 분 추가·수정은 명석희 — 11/18 한슬 님 동의).
+"""피드 입력용 사용자·환자 API (김한슬 담당. 돌보는 분 추가·수정은 명석희 — 11/18 한슬 님 동의, 돌봄 기록도 명석희).
 
 AI 피드 함수가 받는 개인화 입력(사용자·환자 프로필)을 돌려준다.
 GET /feed_user/{user_id}                     간병인 정보만 (이름 + 자가점검 + 담당 환자 id 목록)
@@ -6,21 +6,27 @@ GET /feed_patient/{user_id}/{patient_id}     환자 한 명의 현재 상태 (�
 GET /feed/{user_id}                          간병인 + 담당 환자 전원 (AI 피드 함수 입력 형식 그대로)
 POST  /users/{user_id}/patients              돌보는 분 추가 (담당 간병인 = 로그인한 본인)
 PATCH /users/{user_id}/patients/{patient_id} 돌보는 분 정보 수정 (보낸 칸만, 이 간병인의 환자만)
+GET   /users/{user_id}/patients/{patient_id}/care-logs  최근 돌봄 기록 (챗봇 Tool과 같은 조회)
+POST  /users/{user_id}/patients/{patient_id}/care-logs  돌봄 기록 추가 (patient_care)
 
 경로의 user_id와 로그인 사용자가 같은지 공통 의존성으로 먼저 확인한다.
 사용자 목록(user_functions.list_users)은 전체 회원 정보가 나오므로 API로 열지 않는다.
 응답에는 email / phone_number가 들어 있지 않다.
 """
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.auth.dependencies import require_user_access
-from app.db import user_functions
+from app.db import feed_read, user_functions
 from app.user_schemas import (
-    CaregiverContext, FeedSettingsOut, FeedSettingsUpdate, PatientContext, PatientCreate, PatientIn, PatientOut,
-    PatientUpdate, UserProfileContext,
+    CARE_LOG_MAX_DAYS, CareLogCreate, CareLogList, CareLogOut, CaregiverContext, FeedSettingsOut, FeedSettingsUpdate,
+    PatientContext, PatientCreate, PatientIn, PatientOut, PatientUpdate, UserProfileContext,
 )
+
+# 돌봄 기록 종류. 챗봇 돌봄 기록 Tool은 patient_care만 읽는다 (간병인 자기돌봄은 caregiver_selfcare).
+CARE_LOG_TYPE = "patient_care"
 
 router = APIRouter(tags=["feed"], dependencies=[Depends(require_user_access)])
 
@@ -149,3 +155,60 @@ def update_patient(user_id: UUID, patient_id: UUID, data: PatientUpdate) -> Pati
     if patient is None:  # 확인과 수정 사이에 삭제된 경우
         raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
     return patient
+
+
+@router.get(
+    "/users/{user_id}/patients/{patient_id}/care-logs",
+    response_model=CareLogList,
+    summary="최근 돌봄 기록",
+    responses=_not_found(_PATIENT_NOT_FOUND),
+)
+def list_care_logs(
+    user_id: UUID,
+    patient_id: UUID,
+    days: int = Query(14, ge=1, le=CARE_LOG_MAX_DAYS, description="최근 며칠 (1~90, 기본 14 — 챗봇과 같음)"),
+    limit: int = Query(30, ge=1, le=30, description="최대 건수 (1~30)"),
+) -> CareLogList:
+    """이 환자의 patient_care 기록을 최신순으로. 챗봇 돌봄 기록 Tool과 같은 함수(get_recent_care_logs)로 읽는다.
+
+    이 간병인의 환자가 아니면 404. total_count는 limit으로 자르기 전 건수다.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        logs = user_functions.get_recent_care_logs(
+            user_id=user_id, patient_id=patient_id, start_at=now - timedelta(days=days),
+            # 방금 저장한 기록(폰 시계가 조금 빠른 경우 포함)도 보이도록 끝을 조금 넉넉히
+            end_at=now + timedelta(minutes=10), limit=limit,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND) from None
+    items = [CareLogOut(patient_id=log.patient_id, content=log.content, mood_tag=log.mood_tag,
+                        logged_at=log.logged_at) for log in logs.items]
+    return CareLogList(items=items, total_count=logs.total_count)
+
+
+@router.post(
+    "/users/{user_id}/patients/{patient_id}/care-logs",
+    response_model=CareLogOut,
+    status_code=201,
+    summary="돌봄 기록 추가",
+    responses=_not_found(_PATIENT_NOT_FOUND),
+)
+def create_care_log(user_id: UUID, patient_id: UUID, data: CareLogCreate) -> CareLogOut:
+    """환자 돌봄 기록(patient_care) 1건을 저장한다 (201). 저장 함수는 feed_read.save_care_log().
+
+    챗봇 돌봄 기록 Tool과 피드 개인화가 이 기록을 그대로 읽는다. 이 간병인의 환자가 아니면 404.
+    """
+    if not user_functions.is_caregiver_of(user_id, patient_id):
+        raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND)
+    # 시각을 비우면 서버 시각으로 정해서 응답에도 같은 값을 돌려준다
+    logged_at = data.logged_at or datetime.now(timezone.utc)
+    try:
+        feed_read.save_care_log(
+            user_id=user_id, log_type=CARE_LOG_TYPE, content=data.content, mood_tag=data.mood_tag,
+            patient_id=patient_id, logged_at=logged_at,
+        )
+    except ValueError:
+        # 확인과 저장 사이에 환자가 지워지거나 담당이 바뀐 경우
+        raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND) from None
+    return CareLogOut(patient_id=patient_id, content=data.content, mood_tag=data.mood_tag, logged_at=logged_at)

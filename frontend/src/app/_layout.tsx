@@ -65,6 +65,7 @@ function AppShell() {
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="paper/[id]" options={{ title: '논문 상세' }} />
           <Stack.Screen name="patient/form" options={{ title: '돌보는 분' }} />
+          <Stack.Screen name="care" options={{ title: '돌봄 기록' }} />
         </Stack.Protected>
         <Stack.Protected guard={session === null}>
           <Stack.Screen name="login" options={{ headerShown: false }} />

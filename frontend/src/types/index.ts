@@ -253,3 +253,28 @@ export type ChatMessage = {
   at?: string;
 };
 
+
+/** 기록할 때 기분 (user_schemas.CARE_MOOD_TAGS와 같은 말) */
+export type CareMood = '평온' | '안도' | '뿌듯함' | '걱정' | '불안' | '지침';
+
+/** 돌봄 기록 1건 (user_schemas.CareLogOut). 챗봇이 최근 14일 기록을 읽고 답한다 */
+export type CareLog = {
+  patient_id: string;
+  content: string | null;
+  mood_tag: CareMood | null;
+  /** 있었던 시각 (ISO, 시간대 포함) */
+  logged_at: string;
+};
+
+/** GET …/care-logs 응답. items는 최신순, total_count는 자르기 전 건수 */
+export type CareLogList = {
+  items: CareLog[];
+  total_count: number;
+};
+
+/** 돌봄 기록 추가 때 보내는 값. logged_at을 비우면 서버의 지금 시각 */
+export type CareLogInput = {
+  content: string;
+  mood_tag: CareMood | null;
+  logged_at?: string;
+};

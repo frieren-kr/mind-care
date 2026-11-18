@@ -44,8 +44,12 @@ const shortcuts: Shortcut[] = [
     icon: { ios: 'bubble.left.and.bubble.right', android: 'chat', web: 'chat' },
     href: '/chat',
   },
-  // 돌봄 기록 화면은 아직 없다
-  { label: '돌봄 기록', caption: '준비 중', icon: { ios: 'list.bullet.rectangle', android: 'edit_note', web: 'edit_note' } },
+  {
+    label: '돌봄 기록',
+    caption: '오늘 있었던 일 남기기',
+    icon: { ios: 'list.bullet.rectangle', android: 'edit_note', web: 'edit_note' },
+    href: '/care',
+  },
   {
     label: '내 정보',
     caption: '돌보는 분 관리',

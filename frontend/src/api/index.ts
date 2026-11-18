@@ -5,6 +5,9 @@ import { ApiError, request } from '@/api/client';
 import { clearSession, getSession, saveSession, updateSessionUser } from '@/api/session';
 import type {
   AuthUser,
+  CareLog,
+  CareLogInput,
+  CareLogList,
   ChatHistoryResponse,
   ChatResponse,
   FeedSettings,
@@ -167,4 +170,23 @@ export function updateFeedSettings(userId: string, feedRefreshDays: number): Pro
     method: 'PATCH',
     body: { feed_refresh_days: feedRefreshDays },
   });
+}
+
+/**
+ * 최근 돌봄 기록 — GET /users/{user_id}/patients/{patient_id}/care-logs?days=&limit=
+ * 챗봇 돌봄 기록 Tool과 같은 조회(기본 14일). 최신순, 최대 30건
+ */
+export function getCareLogs(
+  userId: string,
+  patientId: string,
+  options: { days?: number; limit?: number } = {},
+): Promise<CareLogList> {
+  return request(`/users/${userId}/patients/${patientId}/care-logs`, {
+    query: { days: options.days, limit: options.limit },
+  });
+}
+
+/** 돌봄 기록 추가 — POST /users/{user_id}/patients/{patient_id}/care-logs (201). 남의 환자면 404 */
+export function createCareLog(userId: string, patientId: string, data: CareLogInput): Promise<CareLog> {
+  return request(`/users/${userId}/patients/${patientId}/care-logs`, { method: 'POST', body: data });
 }

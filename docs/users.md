@@ -36,6 +36,16 @@
 - 앱: 내 정보 > 돌보는 분 `+ 추가` / `정보 수정` (`frontend/src/app/patient/form.tsx`).
 - 검증: `python -m unittest tests.test_patients_api` (DB 없이 실제 라우터·검증 실행, 인증 없는 요청 401 포함).
 
+## 앱 돌봄 기록 API (2026-11-18, 명석희)
+
+- `POST /users/{user_id}/patients/{patient_id}/care-logs` — 본문 `CareLogCreate` → 201 `CareLogOut`.
+  내용(1~1000자, 앞뒤 공백 제거), 기분(`CARE_MOOD_TAGS` 6종, 선택), 시각(선택, 시간대 필수, 미래·90일 초과 불가).
+  `log_type`은 서버가 `patient_care`로 정한다 — 챗봇 돌봄 기록 Tool이 읽는 종류. 시각을 비우면 서버 시각으로 저장하고 응답에도 그 값.
+  저장은 기존 `feed_read.save_care_log()`. 이 간병인의 환자가 아니면 404.
+- `GET …/care-logs?days=14&limit=30` — 챗봇 Tool과 같은 `get_recent_care_logs()`로 최신순 조회. `total_count`는 자르기 전 건수.
+- 앱: 홈 바로가기 `돌봄 기록` → `frontend/src/app/care.tsx` (내용 + 언제 + 기분, 아래에 최근 14일 목록).
+- 검증: `python -m unittest tests.test_care_logs_api`.
+
 ## 챗봇 최근 돌봄 기록 조회 (2026-11-10)
 
 - 공용 관문 `app/db/functions.py`의 `get_recent_care_logs()`를 추가했다. 구현은 `user_functions.py`다.

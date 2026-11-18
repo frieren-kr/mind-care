@@ -47,6 +47,11 @@ export function TextField({ style, placeholder, value, accessibilityLabel, ...re
             StyleSheet.absoluteFill,
             styles.placeholder,
             { alignItems: inputStyle.textAlign === 'center' ? 'center' : 'flex-start' },
+            // 여러 줄 입력칸(위에서부터 쓰는 칸)은 안내 문구도 커서처럼 맨 위에
+            inputStyle.textAlignVertical === 'top' && {
+              justifyContent: 'flex-start',
+              paddingTop: inputStyle.paddingTop ?? inputStyle.paddingVertical,
+            },
           ]}>
           <Text numberOfLines={1} style={{ color: theme.textSecondary, fontFamily: FontFamily.regular, fontSize }}>
             {placeholder}
