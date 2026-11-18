@@ -4,6 +4,8 @@
 import { ApiError, request } from '@/api/client';
 import { clearSession, getSession, saveSession, updateSessionUser } from '@/api/session';
 import type {
+  Assessment,
+  AssessmentInput,
   AuthUser,
   CareLog,
   CareLogInput,
@@ -12,6 +14,10 @@ import type {
   ChatResponse,
   FeedSettings,
   LoginResponse,
+  MedicalVisit,
+  MedicalVisitInput,
+  Medication,
+  MedicationInput,
   PaperDetail,
   Patient,
   PatientInput,
@@ -189,4 +195,44 @@ export function getCareLogs(
 /** 돌봄 기록 추가 — POST /users/{user_id}/patients/{patient_id}/care-logs (201). 남의 환자면 404 */
 export function createCareLog(userId: string, patientId: string, data: CareLogInput): Promise<CareLog> {
   return request(`/users/${userId}/patients/${patientId}/care-logs`, { method: 'POST', body: data });
+}
+
+/** 환자별 기록 주소 /users/{user_id}/patients/{patient_id}/… */
+function patientPath(userId: string, patientId: string, rest: string): string {
+  return `/users/${userId}/patients/${patientId}/${rest}`;
+}
+
+/** 검사 결과 추가 — POST …/assessments (201). 앱 자가점검은 KDSQ-C. 점수 범위가 틀리면 422 */
+export function createAssessment(userId: string, patientId: string, data: AssessmentInput): Promise<Assessment> {
+  return request(patientPath(userId, patientId, 'assessments'), { method: 'POST', body: data });
+}
+
+/** 복용 약 추가 — POST …/medications (201) */
+export function createMedication(userId: string, patientId: string, data: MedicationInput): Promise<Medication> {
+  return request(patientPath(userId, patientId, 'medications'), { method: 'POST', body: data });
+}
+
+/** 약 정보 수정·복용 중단 — PATCH …/medications/{id}. 복용 중단은 { is_taking: false, end_date: 오늘 } */
+export function updateMedication(
+  userId: string,
+  patientId: string,
+  medicationId: string,
+  data: MedicationInput,
+): Promise<Medication> {
+  return request(patientPath(userId, patientId, `medications/${medicationId}`), { method: 'PATCH', body: data });
+}
+
+/** 진료 예약 추가 — POST …/visits (201). is_visited 기본 false(예약) */
+export function createVisit(userId: string, patientId: string, data: MedicalVisitInput): Promise<MedicalVisit> {
+  return request(patientPath(userId, patientId, 'visits'), { method: 'POST', body: data });
+}
+
+/** 진료 수정·다녀옴 표시 — PATCH …/visits/{id}. 미래 날짜는 다녀옴으로 못 바꾼다(422) */
+export function updateVisit(
+  userId: string,
+  patientId: string,
+  visitId: string,
+  data: MedicalVisitInput,
+): Promise<MedicalVisit> {
+  return request(patientPath(userId, patientId, `visits/${visitId}`), { method: 'PATCH', body: data });
 }

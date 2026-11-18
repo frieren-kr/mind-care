@@ -1230,3 +1230,22 @@ class UserProfileContext(BaseModel):
     )
     patients: list[PatientContext] = Field(default_factory=list, description="담당 환자들 (등록 순)")
     generated_at: datetime = Field(description="이 묶음을 조회한 시각 (한국 시간)")
+
+
+# ============================================================
+# 앱 입력용 본문 (POST /users/{user_id}/patients/{patient_id}/…) — 11/18 명석희
+# 칸과 검증 규칙은 각 Update 모델과 같고, 필수 칸(검사명·날짜, 약 이름, 진료일)은 저장 함수의 In 모델이 다시 검사한다.
+# patient_id는 받지 않는다 — 주소의 patient_id(로그인한 간병인의 환자)로 정한다.
+# ============================================================
+
+
+class AssessmentCreate(AssessmentUpdate):
+    """검사 결과 추가 본문. assessment_type·assessed_at 필수 (예: 앱 자가점검 KDSQ-C)."""
+
+
+class MedicationCreate(MedicationUpdate):
+    """복용 약 추가 본문. drug_name 필수, is_taking 기본 true."""
+
+
+class MedicalVisitCreate(MedicalVisitUpdate):
+    """진료 예약·기록 추가 본문. visit_date 필수, is_visited 기본 false(예약)."""

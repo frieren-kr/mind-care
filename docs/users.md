@@ -46,6 +46,20 @@
 - 앱: 홈 바로가기 `돌봄 기록` → `frontend/src/app/care.tsx` (내용 + 언제 + 기분, 아래에 최근 14일 목록).
 - 검증: `python -m unittest tests.test_care_logs_api`.
 
+## 앱 검사·약·진료 입력 API (2026-11-18, 명석희)
+
+- 주소: `POST …/assessments`, `POST …/medications`, `PATCH …/medications/{id}`, `POST …/visits`, `PATCH …/visits/{id}`
+  (`…` = `/users/{user_id}/patients/{patient_id}`). 표는 [`api.md`](api.md).
+- 저장·검증은 기존 `create_assessment`·`create_medication`·`update_medication`·`create_medical_visit`·`update_medical_visit` 그대로.
+  본문 모델 `AssessmentCreate`·`MedicationCreate`·`MedicalVisitCreate`는 각 Update 모델과 칸이 같고(`patient_id` 없음),
+  필수 칸은 저장 함수의 In 모델이 다시 검사한다(빠지면 422). `patient_id`는 주소로 정한다.
+- 주소의 환자가 이 간병인의 환자가 아니면 404. 약·진료 수정은 그 기록이 주소의 환자 것인지도 확인한다(아니면 404).
+- 조회는 새로 만들지 않았다 — `/feed/{user_id}`의 `latest_assessments`·`current_medications`·`upcoming_visits`·`recent_visits`를 쓴다.
+- 앱
+  - 자가점검 결과 화면 `결과 남겨 두기` → `KDSQ-C` 검사 기록 (`assessed_by` = "보호자 자가점검 (앱)", `result_detail` = 영역별 소계).
+  - 내 정보 > 돌보는 분 카드: 복용 중인 약·진료 예약 목록, `+ 약 추가`/`+ 진료 예약`, 줄을 누르면 수정 (약 복용 중단, 진료 다녀옴 + 당부·약 변경·다음 계획).
+- 검증: `python -m unittest tests.test_patient_records_api`.
+
 ## 챗봇 최근 돌봄 기록 조회 (2026-11-10)
 
 - 공용 관문 `app/db/functions.py`의 `get_recent_care_logs()`를 추가했다. 구현은 `user_functions.py`다.
