@@ -7,6 +7,7 @@ import { NAME_MAX_LENGTH, currentUserId, getUserProfile, logout, updateFeedSetti
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Card, Chip, ErrorView, LoadingView, Screen, Select, TextField } from '@/components/ui';
+import { FEATURES } from '@/constants/features';
 import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useAuth } from '@/hooks/use-auth';
@@ -106,6 +107,7 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
       {patient.interests.length > 0 && (
         <ThemedText>관심 분야: {patient.interests.join(', ')}</ThemedText>
       )}
+
       {current_medications.length > 0 && (
         <ThemedText>복용 중인 약: {current_medications.map((m) => m.drug_name).join(', ')}</ThemedText>
       )}
@@ -169,7 +171,8 @@ function NameCard({ name, onSaved }: { name: string; onSaved: () => void }) {
           <ThemedText type="subtitle" style={styles.flex}>
             {name}님
           </ThemedText>
-          <Button label="이름 수정" variant="secondary" onPress={startEdit} />
+          {/* 이름 수정 API(PATCH /users/{user_id})가 없어 숨김 (constants/features.ts) */}
+          {FEATURES.editName ? <Button label="이름 수정" variant="secondary" onPress={startEdit} /> : null}
         </View>
       </Card>
     );

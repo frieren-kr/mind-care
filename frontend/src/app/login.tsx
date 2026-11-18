@@ -7,6 +7,7 @@ import { login } from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Card, Checkbox, Disclaimer, DoubleRule, Screen, SectionLabel, TextField } from '@/components/ui';
+import { FEATURES } from '@/constants/features';
 import { FontSize, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -116,10 +117,13 @@ export default function LoginScreen() {
           <Button label={submitting ? '로그인하는 중…' : '로그인'} onPress={submit} disabled={!canSubmit} />
         </Card>
 
-        <View style={styles.signup}>
-          <ThemedText themeColor="textSecondary">처음 오셨나요?</ThemedText>
-          <Button label="계정 만들기" variant="secondary" onPress={() => router.push('/signup')} disabled={submitting} />
-        </View>
+        {/* 회원가입 API(POST /auth/signup)가 없어 숨김 (constants/features.ts) */}
+        {FEATURES.signup ? (
+          <View style={styles.signup}>
+            <ThemedText themeColor="textSecondary">처음 오셨나요?</ThemedText>
+            <Button label="계정 만들기" variant="secondary" onPress={() => router.push('/signup')} disabled={submitting} />
+          </View>
+        ) : null}
 
         <Disclaimer text="보안을 위해 로그인은 일정 시간이 지나면 풀려요. 아이디 저장을 켜 두면 비밀번호만 다시 입력하면 돼요." />
       </Screen>
