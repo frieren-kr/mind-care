@@ -1,27 +1,19 @@
-import { router, type Href } from 'expo-router';
+import { router, useFocusEffect, type Href } from 'expo-router';
 import { SymbolView, type SymbolViewProps } from 'expo-symbols';
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { currentUserId, getRecommendations, getUserProfile } from '@/api';
 import { PaperCard } from '@/components/paper-card';
 import { SkeletonPaperCard } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
+import { TodayCare } from '@/components/today-care';
 import { DoubleRule, ErrorView, Screen, SectionLabel } from '@/components/ui';
 import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useTheme } from '@/hooks/use-theme';
-import type { UserProfileContext } from '@/types';
-import { formatDate, todayLabel } from '@/utils/date';
+import { todayLabel } from '@/utils/date';
 import { feedCaption } from '@/utils/feed';
-
-/** 관리 환자 전체에서 가장 가까운 진료 예약 (visit_date는 'YYYY-MM-DD'라 문자열 비교로 정렬된다) */
-function nextVisit(profile: UserProfileContext) {
-  const visits = profile.patients.flatMap(({ patient, upcoming_visits }, index) =>
-    upcoming_visits.map((visit) => ({ visit, name: patient.name || `환자 ${index + 1}` })),
-  );
-  return visits.sort((a, b) => a.visit.visit_date.localeCompare(b.visit.visit_date))[0] ?? null;
-}
 
 type Shortcut = {
   label: string;
@@ -96,6 +88,18 @@ export default function HomeScreen() {
   // 피드 탭과 같은 추천. AI 결과는 서버에 저장돼 있어(기본 3일) 다시 만들지 않는다
   const loadFeed = useCallback(() => getRecommendations(currentUserId()), []);
   const feed = useApi(loadFeed);
+  // 자가점검 저장·진료 기록 뒤 홈으로 돌아오면 '오늘의 돌봄'을 새로 (처음 열 때는 useApi가 이미 불러온다)
+  const firstFocus = useRef(true);
+  const reloadProfile = profile.reload;
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) {
+        firstFocus.current = false;
+        return;
+      }
+      reloadProfile();
+    }, [reloadProfile]),
+  );
 
   const reloadAll = () => {
     profile.reload();
@@ -104,7 +108,6 @@ export default function HomeScreen() {
 
   const me = profile.data;
   const top = feed.data?.items[0];
-  const visit = me ? nextVisit(me) : null;
   const count = feed.data?.items.length ?? 0;
 
   return (
@@ -124,6 +127,9 @@ export default function HomeScreen() {
         ) : null}
       </View>
       {profile.error ? <ErrorView message={profile.error.message} onRetry={() => profile.reload()} /> : null}
+
+      {/* 매일 하는 돌봄이 먼저, 그 아래 맞춤 연구 */}
+      {me ? <TodayCare patients={me.patients} /> : null}
 
       <View style={styles.section}>
         <SectionLabel>오늘의 맞춤 연구</SectionLabel>
@@ -157,30 +163,6 @@ export default function HomeScreen() {
         ) : null}
       </View>
 
-      {me ? (
-        <View style={styles.section}>
-          <SectionLabel>돌보는 분</SectionLabel>
-          {me.patients.length === 0 ? (
-            <ThemedText themeColor="textSecondary">아직 등록된 분이 없어요.</ThemedText>
-          ) : (
-            me.patients.map(({ patient }, index) => (
-              <View key={patient.id} style={[styles.patientRow, { borderBottomColor: theme.border }]}>
-                <ThemedText type="bold">{patient.name || `환자 ${index + 1}`}</ThemedText>
-                <ThemedText type="small" themeColor="textSecondary" numberOfLines={1} style={styles.patientMeta}>
-                  {[patient.dementia_stage, patient.symptoms.slice(0, 2).join(', ')].filter(Boolean).join(' · ')}
-                </ThemedText>
-              </View>
-            ))
-          )}
-          {visit ? (
-            <ThemedText type="small" themeColor="textSecondary">
-              다음 진료: {formatDate(visit.visit.visit_date)} {visit.name}
-              {visit.visit.hospital_name ? ` · ${visit.visit.hospital_name}` : ''}
-            </ThemedText>
-          ) : null}
-        </View>
-      ) : null}
-
       <View style={[styles.grid, { borderTopColor: theme.rule }]}>
         {shortcuts.map((item, index) => (
           <ShortcutTile key={item.label} item={item} index={index} />
@@ -207,17 +189,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     borderTopWidth: 1,
     borderBottomWidth: 1,
-  },
-  patientRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    gap: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  patientMeta: {
-    flex: 1,
-    textAlign: 'right',
   },
   grid: {
     flexDirection: 'row',

@@ -46,7 +46,7 @@
 - 앱: 홈 바로가기 `돌봄 기록` → `frontend/src/app/care.tsx` (내용 + 언제 + 기분, 아래에 최근 14일 목록).
 - 검증: `python -m unittest tests.test_care_logs_api`.
 
-## 앱 검사·약·진료 입력 API (2026-11-18, 명석희)
+## 앱 검사·약·진료 입력 API와 오늘의 돌봄 (2026-11-18, 명석희)
 
 - 주소: `POST …/assessments`, `POST …/medications`, `PATCH …/medications/{id}`, `POST …/visits`, `PATCH …/visits/{id}`
   (`…` = `/users/{user_id}/patients/{patient_id}`). 표는 [`api.md`](api.md).
@@ -58,6 +58,9 @@
 - 앱
   - 자가점검 결과 화면 `결과 남겨 두기` → `KDSQ-C` 검사 기록 (`assessed_by` = "보호자 자가점검 (앱)", `result_detail` = 영역별 소계).
   - 내 정보 > 돌보는 분 카드: 복용 중인 약·진료 예약 목록, `+ 약 추가`/`+ 진료 예약`, 줄을 누르면 수정 (약 복용 중단, 진료 다녀옴 + 당부·약 변경·다음 계획).
+  - 홈 `오늘의 돌봄`(노션 7.2 미션·대시보드): 돌보는 분별 오늘 할 일과 완료 수.
+    오늘 돌봄 기록 / 약 챙겨 드리기(누르면 `복약 확인: …` 돌봄 기록 1건) / 자가점검(30일 안에 KDSQ-C 저장이 없으면 할 일) /
+    오늘 진료면 다녀온 기록, 7일 안이면 진료 준비 안내. 완료 여부는 서버 기록에서 계산한다(폰에 따로 저장하지 않음).
 - 검증: `python -m unittest tests.test_patient_records_api`.
 
 ## 챗봇 최근 돌봄 기록 조회 (2026-11-10)
