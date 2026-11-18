@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Linking, Pressable, StyleSheet, View } from 'react-native';
 
+import { createAssessment, currentUserId, getUserProfile } from '@/api';
+import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
-import { Button, Card, Disclaimer, Screen, SectionLabel } from '@/components/ui';
+import { Button, Card, Chip, Disclaimer, Screen, SectionLabel } from '@/components/ui';
 import {
   KDSQ_C_DOMAINS,
   KDSQ_C_INSTRUCTION,
@@ -12,7 +14,9 @@ import {
   KDSQ_C_SOURCE,
 } from '@/constants/kdsq-c';
 import { Radius, Spacing } from '@/constants/theme';
+import { useApi } from '@/hooks/use-api';
 import { useTheme } from '@/hooks/use-theme';
+import { isoDate } from '@/utils/date';
 
 const MEDICAL_DISCLAIMER =
   '이 점검은 치매를 진단하는 검사가 아니라, 인지기능 저하가 의심되는지 살펴보는 선별 참고용입니다. ' +
@@ -67,9 +71,93 @@ function DomainScores({ answers }: { answers: Record<string, number> }) {
   );
 }
 
+/** 영역별 소계를 한 줄로 (검사 기록의 세부 결과) — '기억력 3/8 · 언어 1/4 …' */
+function domainSummary(answers: Record<string, number>): string {
+  return KDSQ_C_DOMAINS.map((domain) => {
+    const score = domain.questionIds.reduce((sum, id) => sum + (answers[id] ?? 0), 0);
+    return `${domain.label} ${score}/${domain.questionIds.length * 2}`;
+  }).join(' · ');
+}
+
+/**
+ * 결과를 돌보는 분의 검사 기록(KDSQ-C)으로 저장. 저장하면 챗봇 검사 기록 Tool·홈 '오늘의 돌봄'·AI 피드가 읽는다.
+ * 같은 날 여러 번 저장해도 따로 남는다 (가장 최근 것이 최신 결과)
+ */
+function SaveResult({ score, answers }: { score: number; answers: Record<string, number> }) {
+  const theme = useTheme();
+  const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
+  const { data: profile } = useApi(loadProfile);
+  const patients = profile?.patients ?? [];
+  const [chosen, setChosen] = useState<string | null>(null);
+  const patientId = chosen ?? (patients.length === 1 ? patients[0].patient.id : null);
+  const [saving, setSaving] = useState(false);
+  const [savedFor, setSavedFor] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  if (patients.length === 0) return null;
+  const saved = patientId !== null && savedFor.includes(patientId);
+
+  const save = async () => {
+    if (!patientId || saving || saved) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await createAssessment(currentUserId(), patientId, {
+        assessment_type: 'KDSQ-C',
+        score,
+        assessed_at: isoDate(),
+        assessed_by: '보호자 자가점검 (앱)',
+        result_detail: domainSummary(answers),
+      });
+      setSavedFor((list) => [...list, patientId]);
+    } catch (e) {
+      setError(toApiError(e).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <ThemedText type="subtitle">결과 남겨 두기</ThemedText>
+      <ThemedText themeColor="textSecondary">
+        기록해 두면 다음 점검과 비교할 수 있고, 챗봇도 이 결과를 참고해서 답해요.
+      </ThemedText>
+      {patients.length > 1 ? (
+        <View style={styles.wrap}>
+          {patients.map(({ patient }, index) => (
+            <Chip
+              key={patient.id}
+              label={patient.name || `환자 ${index + 1}`}
+              selected={patient.id === patientId}
+              onPress={() => setChosen(patient.id)}
+            />
+          ))}
+        </View>
+      ) : null}
+      {error ? (
+        <ThemedText accessibilityRole="alert" style={{ color: theme.accent }}>
+          {error}
+        </ThemedText>
+      ) : null}
+      {saved ? (
+        <ThemedText accessibilityRole="alert" type="bold">
+          저장했어요.
+        </ThemedText>
+      ) : (
+        <Button
+          label={saving ? '저장하고 있어요…' : patientId ? '이 결과 저장하기' : '누구의 점검인지 골라 주세요'}
+          onPress={save}
+          disabled={saving || !patientId}
+        />
+      )}
+    </Card>
+  );
+}
+
 type Step = 'intro' | 'questions' | 'result';
 
-/** 인지기능 자가점검 (KDSQ-C 15문항). 결과는 아직 저장하지 않는다 (저장 API 미구현) */
+/** 인지기능 자가점검 (KDSQ-C 15문항). 결과 화면에서 돌보는 분의 검사 기록으로 저장할 수 있다 */
 export default function SelfCheckScreen() {
   const theme = useTheme();
   const [step, setStep] = useState<Step>('intro');
@@ -130,6 +218,7 @@ export default function SelfCheckScreen() {
           </ThemedText>
         </View>
         <DomainScores answers={answers} />
+        <SaveResult score={score} answers={answers} />
         {suspected && (
           <Button label="치매상담콜센터 1899-9988 전화하기" onPress={() => Linking.openURL('tel:18999988')} />
         )}
@@ -271,5 +360,10 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+  },
+  wrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: Spacing.two,
   },
 });

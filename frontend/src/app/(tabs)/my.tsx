@@ -7,6 +7,7 @@ import { NAME_MAX_LENGTH, currentUserId, getUserProfile, logout, updateFeedSetti
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Card, Chip, ErrorView, LoadingView, Screen, Select, TextField } from '@/components/ui';
+import { FEATURES } from '@/constants/features';
 import { MinTouch, Spacing } from '@/constants/theme';
 import { useApi } from '@/hooks/use-api';
 import { useAuth } from '@/hooks/use-auth';
@@ -14,7 +15,7 @@ import { TEXT_SCALES, useTextScale } from '@/hooks/use-text-scale';
 import { useResolvedColorScheme, useThemeMode } from '@/hooks/use-theme-mode';
 import { useTheme } from '@/hooks/use-theme';
 import type { PatientContext } from '@/types';
-import { formatDate } from '@/utils/date';
+import { daysFromToday, formatDate } from '@/utils/date';
 
 /** 피드 갱신 주기 선택지 (users.feed_refresh_days, 1~7일, 기본 3일) */
 const DEFAULT_REFRESH_DAYS = 3;
@@ -89,9 +90,43 @@ function ThemeModeCard() {
   );
 }
 
+/** 누르면 수정 화면으로 가는 한 줄 (약·진료) */
+function RecordRow({ title, meta, onPress }: { title: string; meta?: string | null; onPress: () => void }) {
+  const theme = useTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${title}${meta ? `, ${meta}` : ''}, 수정`}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.recordRow,
+        { borderTopColor: theme.border },
+        pressed && { backgroundColor: theme.backgroundSelected },
+      ]}>
+      <View style={styles.flex}>
+        <ThemedText type="bold">{title}</ThemedText>
+        {meta ? (
+          <ThemedText type="small" themeColor="textSecondary">
+            {meta}
+          </ThemedText>
+        ) : null}
+      </View>
+      <ThemedText type="bold" aria-hidden>
+        ›
+      </ThemedText>
+    </Pressable>
+  );
+}
+
+/** 진료일 옆 표시: 오늘 / D-3 */
+function dDay(visitDate: string): string {
+  const days = daysFromToday(visitDate);
+  return days === 0 ? '오늘' : `D-${days}`;
+}
+
 function PatientCard({ context, index }: { context: PatientContext; index: number }) {
   const { patient, current_medications, upcoming_visits } = context;
-  const nextVisit = upcoming_visits[0];
+  const params = { patientId: patient.id };
   const stage = [patient.dementia_stage, patient.diagnosis_date && `${formatDate(patient.diagnosis_date)} 진단`]
     .filter(Boolean)
     .join(' · ');
@@ -106,15 +141,51 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
       {patient.interests.length > 0 && (
         <ThemedText>관심 분야: {patient.interests.join(', ')}</ThemedText>
       )}
-      {current_medications.length > 0 && (
-        <ThemedText>복용 중인 약: {current_medications.map((m) => m.drug_name).join(', ')}</ThemedText>
-      )}
-      {nextVisit ? (
-        <ThemedText>
-          다음 진료: {formatDate(nextVisit.visit_date)}
-          {nextVisit.hospital_name ? ` · ${nextVisit.hospital_name}` : ''}
-        </ThemedText>
-      ) : null}
+
+      <View style={styles.recordList}>
+        <ThemedText type="smallBold">복용 중인 약</ThemedText>
+        {current_medications.map((m) => (
+          <RecordRow
+            key={m.id}
+            title={[m.drug_name, m.dosage].filter(Boolean).join(' ')}
+            meta={m.frequency}
+            onPress={() => router.push({ pathname: '/medication/form', params: { ...params, id: m.id } })}
+          />
+        ))}
+        {current_medications.length === 0 ? (
+          <ThemedText type="small" themeColor="textSecondary">
+            등록한 약이 없어요.
+          </ThemedText>
+        ) : null}
+      </View>
+      <View style={styles.recordList}>
+        <ThemedText type="smallBold">진료 예약</ThemedText>
+        {upcoming_visits.map((v) => (
+          <RecordRow
+            key={v.id}
+            title={`${formatDate(v.visit_date)} (${dDay(v.visit_date)})`}
+            meta={[v.hospital_name, v.department, v.visit_reason].filter(Boolean).join(' · ')}
+            onPress={() => router.push({ pathname: '/visit/form', params: { ...params, id: v.id } })}
+          />
+        ))}
+        {upcoming_visits.length === 0 ? (
+          <ThemedText type="small" themeColor="textSecondary">
+            잡힌 진료가 없어요.
+          </ThemedText>
+        ) : null}
+      </View>
+      <View style={styles.headerRow}>
+        <View style={styles.flex}>
+          <Button
+            label="+ 약 추가"
+            variant="secondary"
+            onPress={() => router.push({ pathname: '/medication/form', params })}
+          />
+        </View>
+        <View style={styles.flex}>
+          <Button label="+ 진료 예약" variant="secondary" onPress={() => router.push({ pathname: '/visit/form', params })} />
+        </View>
+      </View>
       <Button
         label="정보 수정"
         variant="secondary"
@@ -169,7 +240,8 @@ function NameCard({ name, onSaved }: { name: string; onSaved: () => void }) {
           <ThemedText type="subtitle" style={styles.flex}>
             {name}님
           </ThemedText>
-          <Button label="이름 수정" variant="secondary" onPress={startEdit} />
+          {/* 이름 수정 API(PATCH /users/{user_id})가 없어 숨김 (constants/features.ts) */}
+          {FEATURES.editName ? <Button label="이름 수정" variant="secondary" onPress={startEdit} /> : null}
         </View>
       </Card>
     );
@@ -346,6 +418,17 @@ const styles = StyleSheet.create({
   },
   flex: {
     flex: 1,
+  },
+  recordList: {
+    gap: Spacing.one,
+  },
+  recordRow: {
+    minHeight: MinTouch,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingVertical: Spacing.one,
   },
   wrapRow: {
     flexDirection: 'row',

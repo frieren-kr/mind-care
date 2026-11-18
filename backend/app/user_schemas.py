@@ -601,6 +601,14 @@ class PatientUpdate(BaseModel):
         return _text_list(value, info.field_name)
 
 
+class PatientCreate(PatientUpdate):
+    """POST /users/{user_id}/patients 요청 본문 (앱의 돌보는 분 추가).
+
+    칸과 검증 규칙은 PatientUpdate와 같고 모두 선택이다 (보내지 않은 목록은 빈 목록).
+    caregiver_id는 받지 않는다 — 주소의 user_id(로그인한 본인)로 정해서, 다른 사람 계정에 환자를 넣을 수 없다.
+    """
+
+
 class PatientOut(BaseModel):
     """patient_profiles 테이블 한 행. create_patient / get_patient / list_patients / update_patient가 돌려준다."""
 
@@ -618,6 +626,78 @@ class PatientOut(BaseModel):
     @classmethod
     def _null_lists(cls, value: Any) -> Any:
         return _null_to_empty_list(value)
+
+
+# ============================================================
+# care_logs (앱에서 쓰는 환자 돌봄 기록) — 11/18 명석희
+# 저장은 feed_read.save_care_log(), 조회는 user_functions.get_recent_care_logs()(챗봇 Tool과 같은 함수).
+# ============================================================
+
+# 기록할 때의 간병인 기분. 데모 기록(scripts/seed_demo_care_logs.py)과 같은 말을 쓴다.
+CARE_MOOD_TAGS = ("평온", "안도", "뿌듯함", "걱정", "불안", "지침")
+CARE_LOG_MAX_CHARS = 1000
+CARE_LOG_MAX_DAYS = 90  # 챗봇 돌봄 기록 Tool이 볼 수 있는 최대 기간과 같다
+CARE_LOG_CLOCK_SKEW = timedelta(minutes=5)  # 폰 시계가 조금 빠른 것은 허용
+
+
+class CareLogCreate(BaseModel):
+    """POST /users/{user_id}/patients/{patient_id}/care-logs 본문. 환자 돌봄 기록(patient_care) 1건."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(description=f"있었던 일 (1~{CARE_LOG_MAX_CHARS}자). 앞뒤 공백 제거")
+    mood_tag: Optional[str] = Field(default=None, description=f"기록할 때 기분: {' / '.join(CARE_MOOD_TAGS)}. 선택")
+    logged_at: Optional[datetime] = Field(
+        default=None, description=f"있었던 시각 (시간대 필수). 비우면 지금. 미래·{CARE_LOG_MAX_DAYS}일보다 오래된 시각은 불가",
+    )
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _check_content(cls, value: Any) -> str:
+        text = _optional_text(value, "content")
+        if text is None:
+            raise ValueError("기록 내용(content)을 입력해 주세요.")
+        if len(text) > CARE_LOG_MAX_CHARS:
+            raise ValueError(f"기록 내용은 {CARE_LOG_MAX_CHARS}자까지 쓸 수 있습니다.")
+        return text
+
+    @field_validator("mood_tag", mode="before")
+    @classmethod
+    def _check_mood(cls, value: Any) -> Optional[str]:
+        tag = _optional_text(value, "mood_tag")
+        if tag is not None and tag not in CARE_MOOD_TAGS:
+            raise ValueError(f"기분은 {' / '.join(CARE_MOOD_TAGS)} 중에서 골라 주세요: {tag!r}")
+        return tag
+
+    @field_validator("logged_at")
+    @classmethod
+    def _check_logged_at(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.utcoffset() is None:
+            raise ValueError("logged_at에는 시간대가 있어야 합니다 (예: 2026-11-18T09:00:00+09:00).")
+        now = datetime.now(timezone.utc)
+        if value > now + CARE_LOG_CLOCK_SKEW:
+            raise ValueError("아직 오지 않은 시각은 기록할 수 없습니다.")
+        if value < now - timedelta(days=CARE_LOG_MAX_DAYS):
+            raise ValueError(f"{CARE_LOG_MAX_DAYS}일보다 오래된 기록은 남길 수 없습니다.")
+        return value
+
+
+class CareLogOut(BaseModel):
+    """돌봄 기록 1건 (화면 표시용). 기록 원문은 그대로 돌려준다."""
+
+    patient_id: UUID
+    content: Optional[str] = None
+    mood_tag: Optional[str] = None
+    logged_at: datetime = Field(description="있었던 시각 (시간대 포함)")
+
+
+class CareLogList(BaseModel):
+    """GET …/care-logs 응답. items는 최신순, total_count는 limit으로 자르기 전 건수."""
+
+    items: list[CareLogOut]
+    total_count: int
 
 
 # ============================================================
@@ -1150,3 +1230,22 @@ class UserProfileContext(BaseModel):
     )
     patients: list[PatientContext] = Field(default_factory=list, description="담당 환자들 (등록 순)")
     generated_at: datetime = Field(description="이 묶음을 조회한 시각 (한국 시간)")
+
+
+# ============================================================
+# 앱 입력용 본문 (POST /users/{user_id}/patients/{patient_id}/…) — 11/18 명석희
+# 칸과 검증 규칙은 각 Update 모델과 같고, 필수 칸(검사명·날짜, 약 이름, 진료일)은 저장 함수의 In 모델이 다시 검사한다.
+# patient_id는 받지 않는다 — 주소의 patient_id(로그인한 간병인의 환자)로 정한다.
+# ============================================================
+
+
+class AssessmentCreate(AssessmentUpdate):
+    """검사 결과 추가 본문. assessment_type·assessed_at 필수 (예: 앱 자가점검 KDSQ-C)."""
+
+
+class MedicationCreate(MedicationUpdate):
+    """복용 약 추가 본문. drug_name 필수, is_taking 기본 true."""
+
+
+class MedicalVisitCreate(MedicalVisitUpdate):
+    """진료 예약·기록 추가 본문. visit_date 필수, is_visited 기본 false(예약)."""

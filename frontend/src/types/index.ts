@@ -110,19 +110,36 @@ export type PatientInput = {
 
 export type Medication = {
   id: string;
+  patient_id: string;
   drug_name: string;
   dosage: string | null;
   frequency: string | null;
   is_taking: boolean;
+  start_date: string | null;
+  end_date: string | null;
+  note: string | null;
 };
+
+/** 약 추가·수정 때 보내는 값 (user_schemas.MedicationCreate / MedicationUpdate). 보낸 칸만 바뀐다 */
+export type MedicationInput = Partial<Omit<Medication, 'id' | 'patient_id'>>;
 
 export type MedicalVisit = {
   id: string;
+  patient_id: string;
+  /** 'YYYY-MM-DD' */
   visit_date: string;
+  /** false = 예약, true = 다녀옴 */
   is_visited: boolean;
   hospital_name: string | null;
   department: string | null;
+  visit_reason: string | null;
+  medication_change: string | null;
+  doctor_note: string | null;
+  follow_up_plan: string | null;
 };
+
+/** 진료 추가·수정 때 보내는 값 (user_schemas.MedicalVisitCreate / MedicalVisitUpdate). 보낸 칸만 바뀐다 */
+export type MedicalVisitInput = Partial<Omit<MedicalVisit, 'id' | 'patient_id'>>;
 
 export type Assessment = {
   id: string;
@@ -130,6 +147,18 @@ export type Assessment = {
   score: number | null;
   result_detail: string | null;
   assessed_at: string;
+  assessed_by: string | null;
+};
+
+/** 검사 결과 추가 때 보내는 값 (user_schemas.AssessmentCreate) */
+export type AssessmentInput = {
+  /** 예: 'KDSQ-C' (앱 자가점검) */
+  assessment_type: string;
+  score: number | null;
+  /** 'YYYY-MM-DD', 미래 불가 */
+  assessed_at: string;
+  assessed_by?: string | null;
+  result_detail?: string | null;
 };
 
 /** 간병인 자가점검 (caregiver_profiles). 저장한 적이 없으면 null */
@@ -253,3 +282,28 @@ export type ChatMessage = {
   at?: string;
 };
 
+
+/** 기록할 때 기분 (user_schemas.CARE_MOOD_TAGS와 같은 말) */
+export type CareMood = '평온' | '안도' | '뿌듯함' | '걱정' | '불안' | '지침';
+
+/** 돌봄 기록 1건 (user_schemas.CareLogOut). 챗봇이 최근 14일 기록을 읽고 답한다 */
+export type CareLog = {
+  patient_id: string;
+  content: string | null;
+  mood_tag: CareMood | null;
+  /** 있었던 시각 (ISO, 시간대 포함) */
+  logged_at: string;
+};
+
+/** GET …/care-logs 응답. items는 최신순, total_count는 자르기 전 건수 */
+export type CareLogList = {
+  items: CareLog[];
+  total_count: number;
+};
+
+/** 돌봄 기록 추가 때 보내는 값. logged_at을 비우면 서버의 지금 시각 */
+export type CareLogInput = {
+  content: string;
+  mood_tag: CareMood | null;
+  logged_at?: string;
+};

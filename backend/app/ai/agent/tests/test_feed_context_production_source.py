@@ -441,8 +441,11 @@ class ProductionStageOneTests(unittest.TestCase):
         ) for index in range(2)]
         patients = raw.managed_patients.items
         cursor = MagicMock()
-        cursor.fetchone.side_effect = [{"ok": 1}, raw.caregiver_profile.model_dump(),
-                                      {"total": raw.recent_care_logs.total_count}, raw.long_term_summary.model_dump()]
+        cursor.fetchone.side_effect = [
+            {"ok": 1}, raw.caregiver_profile.model_dump(),
+            {"total": raw.recent_care_logs.total_count}, raw.long_term_summary.model_dump(),
+            {"total": raw.recent_chat_summaries.total_count},
+        ]
         patient_rows = [{key: getattr(row, key) for key in (
             "patient_id", "caregiver_id", "dementia_stage", "diagnosis_date", "symptoms", "interests", "updated_at")}
             for row in patients]
@@ -454,6 +457,7 @@ class ProductionStageOneTests(unittest.TestCase):
             ))
         all_rows.append([log.model_dump() for log in raw.recent_care_logs.items])
         all_rows.append([row.model_dump() for row in raw.recently_recommended])
+        all_rows.append([row.model_dump() for row in raw.recent_chat_summaries.items])
         cursor.fetchall.side_effect = all_rows
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value = cursor
@@ -496,7 +500,7 @@ class ProductionStageOneTests(unittest.TestCase):
         self.assertEqual(execution.call_args.args[1].previously_recommended_pmids,
                          frozenset({"PRIVATE_HISTORY_PMID"}))
         self.assertNotIn("PRIVATE_HISTORY_PMID", execution.call_args.args[1])
-        self.assertEqual(cursor.execute.call_count, 15)
+        self.assertEqual(cursor.execute.call_count, 17)
         self.assertEqual([call.args[0] for call in cursor.execute.call_args_list], [
             feed_read._USER_EXISTS, feed_read._CAREGIVER_PROFILE, feed_read._PATIENTS,
             feed_read._ASSESSMENTS, feed_read._ASSESSMENTS_COUNT,
@@ -505,4 +509,5 @@ class ProductionStageOneTests(unittest.TestCase):
             feed_read._VISITS, feed_read._VISITS_COUNT,
             feed_read._CARE_LOGS, feed_read._CARE_LOGS_COUNT,
             feed_read._LONG_TERM_SUMMARY, feed_read._RECENT_FEED_PAPERS,
+            feed_read._CHAT_SUMMARIES, feed_read._CHAT_SUMMARIES_COUNT,
         ])

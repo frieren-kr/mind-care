@@ -4,11 +4,20 @@
 import { ApiError, request } from '@/api/client';
 import { clearSession, getSession, saveSession, updateSessionUser } from '@/api/session';
 import type {
+  Assessment,
+  AssessmentInput,
   AuthUser,
+  CareLog,
+  CareLogInput,
+  CareLogList,
   ChatHistoryResponse,
   ChatResponse,
   FeedSettings,
   LoginResponse,
+  MedicalVisit,
+  MedicalVisitInput,
+  Medication,
+  MedicationInput,
   PaperDetail,
   Patient,
   PatientInput,
@@ -96,18 +105,17 @@ export function getUserProfile(userId: string): Promise<UserProfileContext> {
 }
 
 /**
- * 돌보는 분 추가 — POST /users/{user_id}/patients (본문 PatientIn).
- * ★ 백엔드에 아직 없는 API다 (2026-10-26 기준, 한슬 님께 요청 예정). 주소는 /feed_patient/{user_id}/{patient_id}처럼
- * 간병인 id를 주소에 넣는 방식으로 제안했다. 만들어지기 전에는 "서버에 아직 이 기능이 없어요" 오류가 난다.
+ * 돌보는 분 추가 — POST /users/{user_id}/patients (본문 PatientCreate, 201).
+ * 담당 간병인은 서버가 주소의 user_id(로그인한 본인)로 정한다. 본문에 caregiver_id를 넣으면 422.
  */
 export function createPatient(userId: string, data: PatientInput): Promise<Patient> {
   return request(`/users/${userId}/patients`, {
     method: 'POST',
-    body: { caregiver_id: userId, ...data },
+    body: data,
   });
 }
 
-/** 돌보는 분 정보 수정 — PATCH /users/{user_id}/patients/{patient_id} (본문 PatientUpdate). ★ 아직 없는 API */
+/** 돌보는 분 정보 수정 — PATCH /users/{user_id}/patients/{patient_id} (본문 PatientUpdate, 보낸 칸만). 남의 환자면 404 */
 export function updatePatient(userId: string, patientId: string, data: PatientInput): Promise<Patient> {
   return request(`/users/${userId}/patients/${patientId}`, {
     method: 'PATCH',
@@ -168,4 +176,63 @@ export function updateFeedSettings(userId: string, feedRefreshDays: number): Pro
     method: 'PATCH',
     body: { feed_refresh_days: feedRefreshDays },
   });
+}
+
+/**
+ * 최근 돌봄 기록 — GET /users/{user_id}/patients/{patient_id}/care-logs?days=&limit=
+ * 챗봇 돌봄 기록 Tool과 같은 조회(기본 14일). 최신순, 최대 30건
+ */
+export function getCareLogs(
+  userId: string,
+  patientId: string,
+  options: { days?: number; limit?: number } = {},
+): Promise<CareLogList> {
+  return request(`/users/${userId}/patients/${patientId}/care-logs`, {
+    query: { days: options.days, limit: options.limit },
+  });
+}
+
+/** 돌봄 기록 추가 — POST /users/{user_id}/patients/{patient_id}/care-logs (201). 남의 환자면 404 */
+export function createCareLog(userId: string, patientId: string, data: CareLogInput): Promise<CareLog> {
+  return request(`/users/${userId}/patients/${patientId}/care-logs`, { method: 'POST', body: data });
+}
+
+/** 환자별 기록 주소 /users/{user_id}/patients/{patient_id}/… */
+function patientPath(userId: string, patientId: string, rest: string): string {
+  return `/users/${userId}/patients/${patientId}/${rest}`;
+}
+
+/** 검사 결과 추가 — POST …/assessments (201). 앱 자가점검은 KDSQ-C. 점수 범위가 틀리면 422 */
+export function createAssessment(userId: string, patientId: string, data: AssessmentInput): Promise<Assessment> {
+  return request(patientPath(userId, patientId, 'assessments'), { method: 'POST', body: data });
+}
+
+/** 복용 약 추가 — POST …/medications (201) */
+export function createMedication(userId: string, patientId: string, data: MedicationInput): Promise<Medication> {
+  return request(patientPath(userId, patientId, 'medications'), { method: 'POST', body: data });
+}
+
+/** 약 정보 수정·복용 중단 — PATCH …/medications/{id}. 복용 중단은 { is_taking: false, end_date: 오늘 } */
+export function updateMedication(
+  userId: string,
+  patientId: string,
+  medicationId: string,
+  data: MedicationInput,
+): Promise<Medication> {
+  return request(patientPath(userId, patientId, `medications/${medicationId}`), { method: 'PATCH', body: data });
+}
+
+/** 진료 예약 추가 — POST …/visits (201). is_visited 기본 false(예약) */
+export function createVisit(userId: string, patientId: string, data: MedicalVisitInput): Promise<MedicalVisit> {
+  return request(patientPath(userId, patientId, 'visits'), { method: 'POST', body: data });
+}
+
+/** 진료 수정·다녀옴 표시 — PATCH …/visits/{id}. 미래 날짜는 다녀옴으로 못 바꾼다(422) */
+export function updateVisit(
+  userId: string,
+  patientId: string,
+  visitId: string,
+  data: MedicalVisitInput,
+): Promise<MedicalVisit> {
+  return request(patientPath(userId, patientId, `visits/${visitId}`), { method: 'PATCH', body: data });
 }

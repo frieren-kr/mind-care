@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from app.db.connection import get_connection
 from app.feed_schemas import (
     ASSESSMENT_WINDOW_DAYS,
+    CHAT_SUMMARY_WINDOW_DAYS,
     DEFAULT_CAPS,
     MAX_MANAGED_PATIENTS,
     MEDICATION_STOPPED_WITHIN_DAYS,
@@ -39,6 +40,7 @@ from app.feed_schemas import (
     VISIT_PAST_WINDOW_DAYS,
     FeedReadCaregiverProfile,
     FeedReadCareLog,
+    FeedReadChatDailySummary,
     FeedReadClinicalAssessment,
     FeedReadCollection,
     FeedReadLongTermSummary,
@@ -287,6 +289,28 @@ _LONG_TERM_SUMMARY = """
 """
 
 
+# 챗봇 하루 요약 — [reference_date - window, reference_date), 환자 미선택이거나 현재 관리 환자인 것만 (돌봄 기록과 같은 범위)
+# created_at(기준 시각) 조건은 일부러 없다 — 요약을 다시 만들면 created_at이 갱신돼 그날 요약이 사라진다.
+_CHAT_SUMMARY_WHERE = """
+     WHERE user_id = %(user_id)s
+       AND summary_date >= %(reference_date)s - %(window_days)s::int
+       AND summary_date <  %(reference_date)s
+       AND (patient_id IS NULL OR patient_id = ANY(%(patient_ids)s))
+"""
+_CHAT_SUMMARIES = f"""
+    SELECT patient_id, summary_date, summary
+      FROM chat_daily_summaries
+      {_CHAT_SUMMARY_WHERE}
+     ORDER BY summary_date DESC, patient_id NULLS LAST, id
+     LIMIT %(cap)s
+"""
+_CHAT_SUMMARIES_COUNT = f"""
+    SELECT count(*) AS total
+      FROM chat_daily_summaries
+      {_CHAT_SUMMARY_WHERE}
+"""
+
+
 # 기간은 (reference_time - days, reference_time]. 미래 시각의 행은 빠진다.
 # get_feed_context_snapshot()과 get_recent_feed_papers()가 같이 쓴다.
 _RECENT_FEED_PAPERS = """
@@ -465,6 +489,14 @@ def get_feed_context_snapshot(
                     "limit": RECENT_FEED_LIMIT,
                 })
                 recent_rows = cur.fetchall()
+
+                # 11) 챗봇 하루 요약 — 오늘(reference_date) 이전, 관리 환자 또는 환자 미선택
+                chat_params = {"user_id": user_id, "reference_date": reference_date,
+                               "window_days": CHAT_SUMMARY_WINDOW_DAYS, "patient_ids": patient_ids}
+                cur.execute(_CHAT_SUMMARIES, {**chat_params, "cap": caps["chat_summaries"]})
+                chat_summary_rows = cur.fetchall()
+                cur.execute(_CHAT_SUMMARIES_COUNT, chat_params)
+                chat_summary_total = cur.fetchone()["total"]
     except (ValueError, FeedUserNotFound, FeedPatientLimitExceeded):
         raise
     except psycopg.Error as err:
@@ -510,6 +542,10 @@ def get_feed_context_snapshot(
                 None if summary_row is None else FeedReadLongTermSummary(**summary_row)
             ),
             recently_recommended=[FeedRecentPaper(**r) for r in recent_rows],
+            recent_chat_summaries=FeedReadCollection[FeedReadChatDailySummary](
+                items=[FeedReadChatDailySummary(**r) for r in chat_summary_rows],
+                total_count=chat_summary_total,
+            ),
         )
     except ValidationError as err:
         raise FeedReadError(
@@ -517,9 +553,10 @@ def get_feed_context_snapshot(
         ) from err
 
     logger.info(
-        "get_feed_context_snapshot: user_id=%s 환자 %d명, 돌봄기록 %d/%d건, 요약 %s, 최근 추천 %d편",
+        "get_feed_context_snapshot: user_id=%s 환자 %d명, 돌봄기록 %d/%d건, 요약 %s, 최근 추천 %d편, "
+        "대화 요약 %d/%d건",
         user_id, len(patients), len(care_log_rows), care_log_total,
-        "있음" if summary_row else "없음", len(recent_rows),
+        "있음" if summary_row else "없음", len(recent_rows), len(chat_summary_rows), chat_summary_total,
     )
     return snapshot
 
