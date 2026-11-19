@@ -5,13 +5,15 @@ import traceback
 import unittest
 from unittest.mock import Mock, patch
 
+from app.config import settings
 from app.user_schemas import APP_TIMEZONE
 from ..workflows import feed_context_prepare as prepare
+from ..workflows.chat_history_context import serialize_chat_data, utf8_token_upper_bound
 from ..workflows.feed_context import FeedPersonalizationContextV1
 from ..workflows.feed_context_backend_source import ProductionFeedContextSource
 from ..workflows.feed_context_loader import FeedContextLoadError
 from .test_feed_context_production_source import (
-    CONTEXT, NOW, TODAY, P1, P2, OTHER, ARGS, patient, snapshot, context_loader,
+    CONTEXT, NOW, TODAY, P1, P2, OTHER, ARGS, chat_summary, patient, snapshot, context_loader,
 )
 
 
@@ -34,6 +36,7 @@ class ProductionPreparePolicyTests(unittest.TestCase):
         text = self.project(value)
         self.assertEqual(json.loads(text), {
             "feed_scope": "caregiver_all", "recent_feed_titles": [],
+            "chat_daily_summaries": [],
             "caregiver": {"relationship": "stored relationship", "lifestyle_tags": ["stored tag"]},
             "patients": [{"patient_ref": "patient_1", "dementia_stage": "stored stage",
                           "symptoms": ["signal 1"], "interests": ["stored interest"],
@@ -60,7 +63,7 @@ class ProductionPreparePolicyTests(unittest.TestCase):
             self.assertEqual(len(data["patients"]), size)
             if size == 0:
                 self.assertEqual(data, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
-                                        "recent_feed_titles": [], "care_logs": []})
+                                        "recent_feed_titles": [], "care_logs": [], "chat_daily_summaries": []})
 
     def test_all_patients_and_per_patient_signals_survive_selected_or_foreign_patient_id(self):
         raw = snapshot([patient(P2), patient(P1)])
@@ -115,6 +118,53 @@ class ProductionPreparePolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(prepare.FeedProfileMappingError, "^Feed profile mapping failed$") as caught:
             prepare.prepare_production_feed_input(CONTEXT, self.loader)
         self.assertNotIn("비공개", "".join(traceback.format_exception(caught.exception)))
+
+    def test_daily_summary_budget_counts_full_json_at_1000_utf8_bytes(self):
+        day = (TODAY - timedelta(days=1)).isoformat()
+        empty_body = {"chat_daily_summaries": [{"summary_date": day, "summary": ""}]}
+        overhead = utf8_token_upper_bound(serialize_chat_data(empty_body))
+        text = "수면 고민" + "x" * (1000 - overhead - len("수면 고민".encode("utf-8")))
+        with patch.object(settings, "openai_agent_model", "synthetic-unsupported-model"):
+            for content, expected in ((text, [{"summary_date": day, "summary": text}]), (text + "x", [])):
+                with self.subTest(size=overhead + len(content.encode("utf-8"))):
+                    value = self.load(snapshot(chat_summaries=[chat_summary(1, content)]))
+                    published = json.loads(self.project(value))["chat_daily_summaries"]
+                    self.assertEqual(published, expected)
+                    self.assertLessEqual(utf8_token_upper_bound(
+                        serialize_chat_data({"chat_daily_summaries": published})), 1000)
+
+    def test_daily_summary_budget_stops_on_first_overflow(self):
+        value = self.load(snapshot(chat_summaries=[
+            chat_summary(1, "  최근 요약\n"),
+            chat_summary(2, "가" * 400),
+            chat_summary(3, "예산에 들어갈 수 있는 더 오래된 요약"),
+        ]))
+        counter = Mock(wraps=utf8_token_upper_bound)
+        with patch.object(prepare, "chat_history_token_counter", return_value=counter):
+            result = json.loads(self.project(value))["chat_daily_summaries"]
+        self.assertEqual(result, [{
+            "summary_date": (TODAY - timedelta(days=1)).isoformat(), "summary": "  최근 요약\n",
+        }])
+        self.assertEqual(counter.call_count, 2)
+        attempted_payload = json.loads(counter.call_args.args[0])
+        self.assertEqual(list(attempted_payload), ["chat_daily_summaries"])
+        proposed = attempted_payload["chat_daily_summaries"]
+        self.assertEqual([row["summary"] for row in proposed], ["가" * 400, "  최근 요약\n"])
+
+    def test_feed_uses_only_process_loaded_tokenizer_and_falls_back_on_cache_miss(self):
+        summary = "가" * 400
+        value = self.load(snapshot(chat_summaries=[chat_summary(1, summary)]))
+        encoding = Mock()
+        encoding.encode_ordinary.return_value = [1] * 1000
+        with patch.object(settings, "openai_agent_model", "gpt-4o"), \
+             patch("tiktoken.get_encoding", side_effect=AssertionError("Feed must not load assets")) as load:
+            with patch("app.ai.agent.workflows.chat_history_context.ENCODINGS", {}):
+                self.assertEqual(json.loads(self.project(value))["chat_daily_summaries"], [])
+            with patch("app.ai.agent.workflows.chat_history_context.ENCODINGS", {"o200k_base": encoding}):
+                selected = json.loads(self.project(value))["chat_daily_summaries"]
+            load.assert_not_called()
+        self.assertEqual([row["summary"] for row in selected], [summary])
+        encoding.encode_ordinary.assert_called_once_with(serialize_chat_data({"chat_daily_summaries": selected}))
 
     def test_original_context_and_backend_snapshot_are_not_mutated(self):
         raw = snapshot([patient(P2), patient(P1)])

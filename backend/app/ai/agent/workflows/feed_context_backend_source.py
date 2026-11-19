@@ -14,6 +14,7 @@ from app.feed_schemas import (
     FeedReadManagedPatient, FeedReadMedicalVisit, FeedReadMedication,
     FeedReadSafetyEvent, FeedReadSnapshot,
 )
+from app.user_schemas import APP_TIMEZONE
 
 from . import feed_context_source as s
 from .feed_context_loader import _validate_source_invariants
@@ -86,6 +87,10 @@ def _read_log(row: FeedReadCareLog) -> s.SourceCareLog:
 
 def _project_read_snapshot(raw: FeedReadSnapshot) -> s.FeedContextSourceSnapshot:
     caregiver, summary = raw.caregiver_profile, raw.long_term_summary
+    patient_ids = {row.patient_id for row in raw.managed_patients.items}
+    if any(row.patient_id is not None and row.patient_id not in patient_ids
+           for row in raw.recent_chat_summaries.items):
+        raise ValueError("Chat summary references an unmanaged patient")
     return s.FeedContextSourceSnapshot(
         caregiver_profile=None if caregiver is None else s.SourceCaregiverProfile(
             user_id=caregiver.user_id, relationship=caregiver.relationship,
@@ -94,6 +99,9 @@ def _project_read_snapshot(raw: FeedReadSnapshot) -> s.FeedContextSourceSnapshot
         ),
         managed_patients=_read_collection(raw.managed_patients, _read_patient),
         recent_care_logs=_read_collection(raw.recent_care_logs, _read_log),
+        recent_chat_summaries=_read_collection(raw.recent_chat_summaries, lambda row: s.SourceChatDailySummary(
+            summary_date=row.summary_date, summary=row.summary,
+        )),
         recently_recommended=[s.SourceRecentFeedPaper(
             paper_id=row.paper_id, pmid=row.pmid, title=row.title,
             last_recommended_at=row.last_recommended_at, times_recommended=row.times_recommended,
@@ -128,14 +136,17 @@ class ProductionFeedContextSource:
     Inject app.db.feed_read.get_feed_context_snapshot. Backend owns read-only
     REPEATABLE READ, user existence, eligibility/selection, counts and ordering.
     Scope consistency is not authentication: callers must authorize user_id.
-    Loader still owns reference/time validation, patient_ref and Coverage; the
-    existing Provider Mapper keeps CareLog/Summary/narratives server-side.
+    Loader owns reference/time validation, patient_ref and Coverage.
+    The Adapter requires a KST reference date and checks chat-summary patient
+    scope before removing patient_id.
 
     No SQL, extra reads, own clock, sorting, slicing, count correction or fallback.
     Backend exceptions retain their types; only Adapter validation gets fixed text.
     Returned visit/stopped-medication policy violations fail the whole Snapshot.
     Missing/unreturned eligibility and count errors cannot be repaired here.
     """
+
+    requires_kst_reference_date = True
 
     def __init__(self, *, read_snapshot: Callable[..., FeedReadSnapshot]) -> None:
         if not callable(read_snapshot):
@@ -145,6 +156,9 @@ class ProductionFeedContextSource:
     def load_snapshot(self, *, user_id: UUID, reference_time: datetime,
                       reference_date: date, recent_period_start: datetime,
                       recent_period_end: datetime) -> s.FeedContextSourceSnapshot:
+        if (reference_time.tzinfo is not None and reference_time.utcoffset() is not None
+                and reference_date != reference_time.astimezone(APP_TIMEZONE).date()):
+            raise ProductionFeedContextSourceError()
         # Outside the validation wrapper: preserve FeedUserNotFound, FeedReadError
         # and its FeedPatientLimitExceeded subclass, including their identities.
         raw = self.read_snapshot(

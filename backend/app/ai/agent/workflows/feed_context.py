@@ -13,10 +13,13 @@ from uuid import UUID
 
 from pydantic import (
     AwareDatetime, ConfigDict, Field, StrictBool, StrictInt, StrictStr,
-    ValidationInfo, model_validator,
+    ValidationInfo, field_validator, model_validator,
 )
 
-from app.feed_schemas import RECENT_FEED_LIMIT, RECENT_FEED_WINDOW_DAYS
+from app.feed_schemas import (
+    CHAT_SUMMARY_WINDOW_DAYS, DEFAULT_CAPS, RECENT_FEED_LIMIT, RECENT_FEED_WINDOW_DAYS,
+)
+from app.user_schemas import APP_TIMEZONE
 
 from ..schemas import AgentModel
 
@@ -191,6 +194,18 @@ class RecentFeedRecommendationContext(_ContextModel):
     times_recommended: StrictInt = Field(ge=1)
 
 
+class ChatDailySummaryContext(_ContextModel):
+    summary_date: date
+    summary: StrictStr
+
+    @field_validator("summary")
+    @classmethod
+    def nonblank_summary(cls, value):
+        if not value.strip():
+            raise ValueError("Empty daily chat summary")
+        return value
+
+
 class FeedPersonalizationContextV1(_ContextModel):
     """Validate with server-only context={\"service_timezone\": tzinfo}.
 
@@ -205,6 +220,7 @@ class FeedPersonalizationContextV1(_ContextModel):
     recent_care_context: RecentCareContext
     long_term_summary: LongTermPersonalizationSummary | None
     recently_recommended: list[RecentFeedRecommendationContext]
+    recent_chat_summaries: ContextCollection[ChatDailySummaryContext]
 
     @model_validator(mode="after")
     def validate_context(self, info: ValidationInfo):
@@ -215,6 +231,14 @@ class FeedPersonalizationContextV1(_ContextModel):
         reference_date = self.reference_time.astimezone(service_timezone).date()
         reference_utc = self.reference_time.astimezone(timezone.utc)
         _validate_recent_feed_history(self.recently_recommended, self.reference_time)
+        chat_summaries = self.recent_chat_summaries.items
+        if len(chat_summaries) > DEFAULT_CAPS["chat_summaries"]:
+            raise ValueError("Recent chat summaries exceed Feed limit")
+        if chat_summaries:
+            today_kst = self.reference_time.astimezone(APP_TIMEZONE).date()
+            first_day = today_kst - timedelta(days=CHAT_SUMMARY_WINDOW_DAYS)
+            if any(not first_day <= row.summary_date < today_kst for row in chat_summaries):
+                raise ValueError("Chat summary lies outside the recent completed KST days")
         recent = self.recent_care_context
         if recent.period_end.astimezone(timezone.utc) != reference_utc:
             raise ValueError("recent period_end must equal reference_time")

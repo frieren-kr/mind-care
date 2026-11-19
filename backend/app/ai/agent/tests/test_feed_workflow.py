@@ -339,7 +339,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         messages = deps.client.requests[0][0]
         payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
         self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
-                                   "recent_feed_titles": [], "care_logs": []})
+                                   "recent_feed_titles": [], "care_logs": [], "chat_daily_summaries": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
         self.assertNotIn('personal_reason', policy)

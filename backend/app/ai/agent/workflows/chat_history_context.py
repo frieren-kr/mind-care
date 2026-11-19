@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 from uuid import UUID
 
 import tiktoken
+from tiktoken.registry import ENCODINGS
 
 from pydantic import ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
@@ -118,12 +119,13 @@ def utf8_token_upper_bound(serialized: str) -> int:
     return len(serialized.encode('utf-8'))
 
 
-def chat_history_token_counter(model: str | None = None) -> Callable[[str], int]:
+def chat_history_token_counter(model: str | None = None, *, cached_only: bool = False) -> Callable[[str], int]:
     """Use the execution model's tiktoken mapping, with explicit fallbacks.
 
     Backend's default Chat execution uses agent_model, then summary_model.
     Custom executions must pass their model explicitly (or supply a counter).
     Encoding assets should be cached during environment setup, not live traffic.
+    With cached_only, use a process-loaded encoding or immediately fall back to bytes.
     """
     if model is None:
         from app.config import settings
@@ -138,8 +140,10 @@ def chat_history_token_counter(model: str | None = None) -> Callable[[str], int]
         logger.warning('Chat history tokenizer: model_unsupported; using UTF-8 upper bound')
         return utf8_token_upper_bound
     try:
-        encoding = tiktoken.get_encoding(encoding_name)
+        encoding = ENCODINGS.get(encoding_name) if cached_only else tiktoken.get_encoding(encoding_name)
     except Exception:
+        encoding = None
+    if encoding is None:
         logger.warning('Chat history tokenizer: encoding_unavailable; using UTF-8 upper bound')
         return utf8_token_upper_bound
     # Special-token-looking history strings are ordinary untrusted text.

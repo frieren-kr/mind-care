@@ -159,7 +159,9 @@ class FeedHistoryContextTests(unittest.TestCase):
                 prepared = prepare_production_feed_input(CONTEXT, loader)
                 read.assert_called_once_with(**ARGS)
                 data = json.loads(prepared)
-                self.assertEqual(set(data), {'feed_scope', 'caregiver', 'patients', 'recent_feed_titles', 'care_logs'})
+                self.assertEqual(set(data), {
+                    'feed_scope', 'caregiver', 'patients', 'recent_feed_titles', 'care_logs', 'chat_daily_summaries',
+                })
                 self.assertEqual(data['recent_feed_titles'], [r['title'] for r in rows[:20]])
                 self.assertEqual({k: v for k, v in data.items() if k != 'recent_feed_titles'},
                                  {k: v for k, v in original.items() if k != 'recent_feed_titles'})

@@ -9,13 +9,15 @@ import json
 from app.user_schemas import CARE_LOG_MAX_CHARS
 
 from ..schemas import AgentContext
-from .feed_context import FeedPersonalizationContextV1
+from .chat_history_context import chat_history_token_counter, serialize_chat_data
+from .feed_context import ChatDailySummaryContext, FeedPersonalizationContextV1
 from .feed_context_loader import DefaultFeedContextLoader
 
 
 MAX_FEED_HISTORY_TITLES = 20
 MAX_FEED_HISTORY_TITLE_CHARS = 300
 MAX_FEED_HISTORY_TITLES_BYTES = 8192
+FEED_CHAT_SUMMARY_TOKEN_LIMIT = 1000
 
 
 def _project_recent_feed_titles(recently_recommended) -> list[str]:
@@ -30,6 +32,22 @@ def _project_recent_feed_titles(recently_recommended) -> list[str]:
             break
         titles.append(title)
     return titles
+
+
+def _project_chat_daily_summaries(records: list[ChatDailySummaryContext]) -> list[dict[str, str]]:
+    if not records:
+        return []
+    # The tokenizer uses the same agent-model/summary-model precedence as Feed execution.
+    count_tokens = chat_history_token_counter(cached_only=True)
+    selected = []
+    for record in sorted(records, key=lambda row: row.summary_date, reverse=True):
+        row = {"summary_date": record.summary_date.isoformat(), "summary": record.summary}
+        # Charge the exact chronological JSON order, preserving input order within a date.
+        proposed = sorted([*selected, row], key=lambda item: item["summary_date"])
+        if count_tokens(serialize_chat_data({"chat_daily_summaries": proposed})) > FEED_CHAT_SUMMARY_TOKEN_LIMIT:
+            break
+        selected = proposed
+    return selected
 
 
 class PreparedFeedInput(str):
@@ -67,11 +85,11 @@ class FeedProfileMappingError(RuntimeError):
         super().__init__("Feed profile mapping failed")
 
 
-def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles, care_logs) -> str:
+def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles, care_logs, chat_daily_summaries) -> str:
     """Production disclosure allowlist. Callers provide validated row views.
 
     A row view is (profile, safety rows, assessment rows), not a new DTO.
-    Summary and coverage stay internal.
+    Monthly summaries and coverage stay internal.
     """
     patients = [{
         "patient_ref": patient.patient_ref,
@@ -101,6 +119,7 @@ def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles, care
         "patients": patients,
         "recent_feed_titles": list(recent_feed_titles),
         "care_logs": projected_logs,
+        "chat_daily_summaries": chat_daily_summaries,
     }, ensure_ascii=False, allow_nan=False)
 
 
@@ -109,8 +128,8 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
     """Revalidate the full V1 before sharing only the approved profile signals.
 
     Source identity checks belong to DefaultFeedContextLoader, not opaque refs.
-    No summary, raw scores/dates, medication/visit narrative or coverage
-    is disclosed. Exclusion means unavailable to this projection, not absence.
+    Monthly summaries, profile scores/dates, medication/visit narrative and
+    coverage stay internal. Daily chat summaries have a separate token budget.
     """
     try:
         if not isinstance(value, FeedPersonalizationContextV1):
@@ -119,10 +138,15 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
             value, context={"service_timezone": service_timezone})
         if value.managed_patient_profiles.coverage.is_truncated:
             raise ValueError("Managed patients must be complete")
-        return _serialize_feed_provider_input(value.caregiver_profile, (
+        profiles = (
             (patient, patient.safety_events.items, patient.clinical_assessments.items)
             for patient in value.managed_patient_profiles.items
-        ), _project_recent_feed_titles(value.recently_recommended), value.recent_care_context.care_logs.items)
+        )
+        return _serialize_feed_provider_input(
+            value.caregiver_profile, profiles, _project_recent_feed_titles(value.recently_recommended),
+            value.recent_care_context.care_logs.items,
+            _project_chat_daily_summaries(value.recent_chat_summaries.items),
+        )
     except Exception:
         raise FeedProfileMappingError() from None
 
