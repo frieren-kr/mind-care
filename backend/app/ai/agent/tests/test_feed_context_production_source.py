@@ -133,7 +133,8 @@ class ProductionSourceTests(unittest.TestCase):
     def test_zero_patients_is_successful_cold_start_without_caregiver(self):
         source, read = self.source(snapshot([], full=False))
         self.assertEqual(json.loads(prepare_production_feed_input(CONTEXT, context_loader(source))),
-                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
+                         {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
+                          "recent_feed_titles": [], "care_logs": []})
         read.assert_called_once_with(**ARGS)
 
     def test_one_patient_source_preserves_all_counts_content_and_decimal(self):
@@ -353,18 +354,19 @@ class ProductionStageOneTests(unittest.TestCase):
         prepare_production_feed_input(CONTEXT, context_loader(source, clock=lambda: NOW.astimezone(offset)))
         read.assert_called_once_with(**ARGS)
 
-    def test_provider_input_uses_existing_allowlist_without_raw_snapshot_contents(self):
+    def test_provider_input_includes_care_logs_without_raw_snapshot_contents(self):
         source, _ = self.source(snapshot([patient(P2), patient(P1)]))
         text = prepare_production_feed_input(CONTEXT, context_loader(source))
         payload = json.loads(text)
         self.assertEqual(payload["feed_scope"], "caregiver_all")
-        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients", "recent_feed_titles"})
+        self.assertEqual(set(payload), {"feed_scope", "caregiver", "patients", "recent_feed_titles", "care_logs"})
         self.assertEqual(set(payload["caregiver"]), {"relationship", "lifestyle_tags"})
         for row in payload["patients"]:
             self.assertEqual(set(row), {"patient_ref", "dementia_stage", "symptoms", "interests",
                                         "safety_events", "assessment_types"})
-        for forbidden in ("PRIVATE", str(USER), str(P1), str(P2), CONTEXT.request_id,
-                          "care_logs", "summary", "coverage", "score", "medications", "medical_visits"):
+        self.assertEqual([log["patient_ref"] for log in payload["care_logs"]], [None, "patient_2"])
+        for forbidden in ("PRIVATE_MONTHLY_SUMMARY", str(USER), str(P1), str(P2), CONTEXT.request_id,
+                          "logged_at", "summary", "coverage", "score", "medications", "medical_visits"):
             self.assertNotIn(forbidden, text)
 
     def test_existing_loader_validates_log_window_and_monthly_summary_dates(self):
@@ -417,7 +419,9 @@ class ProductionStageOneTests(unittest.TestCase):
 
     def test_invalid_snapshot_policy_or_backend_failure_never_reaches_execution(self):
         raw = snapshot(); raw.managed_patients.items[0].medical_visits.items[0].is_visited = False
-        for value in (raw, None, feed_read.FeedUserNotFound(USER), feed_read.FeedReadError("PRIVATE_DB"),
+        oversized_log = snapshot()
+        oversized_log.recent_care_logs.items[0].content = "가" * 1001
+        for value in (raw, oversized_log, None, feed_read.FeedUserNotFound(USER), feed_read.FeedReadError("PRIVATE_DB"),
                       feed_read.FeedPatientLimitExceeded(USER, 21)):
             read = Mock(side_effect=value) if isinstance(value, Exception) else Mock(return_value=value)
             source = ProductionFeedContextSource(read_snapshot=read)
@@ -434,6 +438,12 @@ class ProductionStageOneTests(unittest.TestCase):
 
     def test_real_backend_function_is_called_through_production_stage_one_with_only_db_io_mocked(self):
         raw = snapshot([patient(P2), patient(P1)])
+        eligible_logs = [
+            {"user_id": USER, "patient_id": patient_id, "log_type": "patient_care",
+             "content": f"Stored care log {index}", "mood_tag": None,
+             "logged_at": NOW - timedelta(hours=index + 1)}
+            for index, patient_id in enumerate((P1, P2, P1, P2, P1, P2, P1))
+        ]
         raw.recently_recommended = [FeedRecentPaper(
             paper_id=UUID(int=100+index), pmid="PRIVATE_HISTORY_PMID" if index == 0 else None,
             title=f"Stored history title {index}", last_recommended_at=NOW-timedelta(hours=index),
@@ -443,7 +453,7 @@ class ProductionStageOneTests(unittest.TestCase):
         cursor = MagicMock()
         cursor.fetchone.side_effect = [
             {"ok": 1}, raw.caregiver_profile.model_dump(),
-            {"total": raw.recent_care_logs.total_count}, raw.long_term_summary.model_dump(),
+            {"total": len(eligible_logs)}, raw.long_term_summary.model_dump(),
             {"total": raw.recent_chat_summaries.total_count},
         ]
         patient_rows = [{key: getattr(row, key) for key in (
@@ -455,10 +465,17 @@ class ProductionStageOneTests(unittest.TestCase):
                 [record.model_dump() for row in patients for record in getattr(row, field).items],
                 [{"patient_id": row.patient_id, "total": getattr(row, field).total_count} for row in patients],
             ))
-        all_rows.append([log.model_dump() for log in raw.recent_care_logs.items])
         all_rows.append([row.model_dump() for row in raw.recently_recommended])
         all_rows.append([row.model_dump() for row in raw.recent_chat_summaries.items])
-        cursor.fetchall.side_effect = all_rows
+        remaining_rows = iter(all_rows)
+
+        def fetchall():
+            query, params = cursor.execute.call_args.args
+            if query == feed_read._CARE_LOGS:
+                return eligible_logs[:params["cap"]]
+            return next(remaining_rows)
+
+        cursor.fetchall.side_effect = fetchall
         connection = MagicMock()
         connection.cursor.return_value.__enter__.return_value = cursor
         with patch.object(feed_read, "get_connection") as get_connection:
@@ -492,7 +509,12 @@ class ProductionStageOneTests(unittest.TestCase):
         self.assertEqual(len(result["patients"]), 2)
         execution.assert_called_once()
         handoff.assert_called_once()
-        self.assertEqual(captured.recent_care_context.care_logs.coverage.total_count, 11)
+        coverage = captured.recent_care_context.care_logs.coverage
+        self.assertEqual((coverage.total_count, coverage.included_count, coverage.is_truncated), (7, 5, True))
+        self.assertEqual([(log["patient_ref"], log["content"]) for log in result["care_logs"]], [
+            ("patient_1" if index % 2 == 0 else "patient_2", f"Stored care log {index}")
+            for index in range(5)
+        ])
         self.assertEqual(captured.long_term_summary.summary, "PRIVATE_MONTHLY_SUMMARY")
         self.assertEqual([row.model_dump() for row in captured.recently_recommended],
                          [row.model_dump() for row in raw.recently_recommended])

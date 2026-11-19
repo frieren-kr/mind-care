@@ -490,8 +490,9 @@ Source identity/complete managed set/시간/Coverage 검증은 유지하며 Proj
 공통 공개 필드 선택·직렬화와 고정 `FeedProfileMappingError`는 feed_context_prepare.py가 소유한다.
 정식 Prepare는 Demo Mapper/DTO를 import하거나 사용하지 않는다. Provider JSON 필드·값·키 순서와
 ensure_ascii=False/allow_nan=False 정책을 유지하며 `feed_scope="caregiver_all"`을 고정한다.
-caregiver relationship/lifestyle_tags와 환자별 ref/stage/symptoms/interests/일반화 안전 label/assessment_type만 공개한다.
-점수·날짜·medication/visit/note·CareLog content·장기 summary·Coverage는 내부 Context에 유지한다.
+caregiver relationship/lifestyle_tags, 환자별 ref/stage/symptoms/interests/일반화 안전 label/assessment_type,
+그리고 최근 돌봄 기록의 patient_ref/log_type/content/mood_tag를 공개한다.
+점수·날짜·진료/복약 원문·장기 summary·Coverage는 내부 Context에 유지한다.
 Provider 입력에서 제외된 정보는 미제공이며 정상 0건이나 임상적 부재를 뜻하지 않는다.
 자유 텍스트 비식별화·Query Guard는 구현하지 않았고 Allowlist 최소화가 PII-safe 승인은 아니다.
 
@@ -1015,9 +1016,9 @@ Backend 복약 `dosage`/`frequency`와 진료 `visit_reason`/`diagnosis`/`treatm
 `test_summary`/`medication_change`/`doctor_note`/`follow_up_plan`은 제외한다.
 `visit_content`는 기타 자유 메모로 직접 보존하며 진단·처치 정보로 재해석하지 않는다.
 UUID→patient_ref와 Coverage/최종 기간 검증은 기존 Loader, LLM allowlist는 Production Prepare 책임이다.
-CareLog·요약이 full Context에 있다는 사실은 Provider 전송을 의미하지 않는다. UUID, 원점수,
-CareLog/월간 요약/진료·복약 원문/coverage는 기존 Provider Input에서 계속 제외한다.
-증상·관심사 등 허용 자유 문자열의 PII 비식별화는 별도 후속 작업이다.
+Provider Input에는 CareLog의 patient_ref/log_type/content/mood_tag만 포함한다. UUID, 원점수,
+logged_at, 월간 요약, 진료·복약 원문, coverage는 내부 Context에 유지한다.
+증상·관심사·돌봄 메모 등 허용 자유 문자열의 PII 비식별화는 별도 후속 작업이다.
 
 **실패 정책.** 실제 Backend 예외 `FeedUserNotFound(LookupError)`, `FeedReadError(RuntimeError)`,
 `FeedPatientLimitExceeded(FeedReadError)`는 같은 예외 인스턴스/종류로 전파한다.
@@ -1117,7 +1118,7 @@ current-state aggregate의 목록 길이는 이미 선택된 현재 상태 목�
 | 안전 기록 | 최근 180일 중 낙상·배회·실종 플래그가 하나 이상 참인 날 | 환자당 50건 |
 | 복약 기록 | 현재 복용 중이거나 최근 90일 이내 중단된 약 | 환자당 30건 |
 | 병원 방문 | 과거 365일 완료 진료 및 향후 90일 예약 | 환자당 20건 |
-| CareLog | 전달받은 정확한 최근 30×24시간 구간 | 간병인당 200건 |
+| CareLog | 전달받은 정확한 최근 30×24시간 구간 | 간병인당 최신 5건 |
 | 월간 개인화 요약 | 기준 날짜 전에 종료되고 기준 시각까지 생성된 요약 중 최신 1건 | 1건 |
 
 기준은 전달받은 `reference_time`과 서비스 시간대의 `reference_date`이며 Adapter에서 새 now/today를
@@ -1139,7 +1140,7 @@ SELECT/COUNT 적격 조건은 위 Backend 완료 항목을 따른다. Agent는 �
 바꾸지 않고 투영하며 current-state aggregate의 선정·정렬과 혼동하지 않는다. 정렬용 id/created_at을 Agent Source DTO에 새로 추가하지 않는다.
 
 **CareLog.** `[recent_period_start, recent_period_end)` 반열린 구간을 정확히 사용한다.
-`recent_period_end == reference_time`, 길이는 정확히 30×24시간이며 최대 200건을 포함한다.
+`recent_period_end == reference_time`, 길이는 정확히 30×24시간이며 최신 최대 5건을 포함한다.
 `user_id`는 요청 간병인과 일치하고, non-null `patient_id`는 현재 관리 환자 범위에 속해야 한다.
 NULL도 포함 가능하며 본인 기록/특정 환자 기록이라고 추정하지 않는다. Loader는 NULL을
 `patient_ref=None`으로 보존한다. 정식 total_count는 이 조회 대상의 실제 건수다.
@@ -1206,7 +1207,7 @@ Loader는 환자만 UUID bytes 순으로 정렬하여 ref를 만들며 child/log
 동일한 Backend logical Snapshot은 historical AS-OF 조회가 아니다. 저장된 profile/assessment/
 복약 상태에서 현재 진단·단계·중증도·약효를 추론하지 않고 codebook/검사점수의 과잉 해석을 금지한다.
 현재 복약 flag와 과거 종료일의 모순을 임상적으로 보정하지 않는다. Event 없음/미공개 데이터는
-안전함·임상적 부재의 증거가 아니다. CareLog·월간 요약은 전체 Context에 보존하지만 Provider에는 제외한다.
+안전함·임상적 부재의 증거가 아니다. CareLog의 공개 필드는 위 계약을 따르며 월간 요약은 내부 Context에 보존한다.
 
 **테스트 자산 이전:** 기존 Production Adapter 29개와 Loader·Context 테스트는 유지한다.
 FeedWorkflow/Execution/Prompt privacy의 Runner·Tool·출처·Handoff 테스트는 삭제하지 않고
@@ -1238,12 +1239,13 @@ feed_context_prepare.py가 소유한다. Prepare는 전체 V1을 재검증하고
 | 환자별 patient_ref/dementia_stage/symptoms/interests | diagnosis_date/reference_time 및 모든 날짜·시각 |
 | true safety flags의 fall/wandering/missing 목록 | safety note 및 event date |
 | assessment 이력의 assessment_type만 | assessment score/result_detail/assessed_at |
+| care_logs의 patient_ref/log_type/content/mood_tag, 적격 기록이 없으면 [] | logged_at, 월간 요약, Coverage |
 | caregiver가 없으면 null, 환자가 없으면 [] | medication 전체, visit department/content 및 기타 narrative |
 
 Positive flags는 제공된 selected rows에서만 고르며 false/row 부재를 안전함이나 임상적 부재로
 해석하지 않는다. 여러 환자를 합성 환자로 병합하지 않는다. Projection은 자유 텍스트를
-sanitize하거나 완전한 비식별화를 보장하지 않는다. 실제 CareLog/Summary는 전체 Context에
-보존하며 현재 Provider 공개 정책에 따라 입력에서 제외한다. 미공개를 정상 empty로 해석하지 않는다.
+sanitize하거나 완전한 비식별화를 보장하지 않는다. 돌봄 메모는 앱 API의 1,000자 상한을 따르며,
+초과 시 메모를 자르지 않고 `FeedProfileMappingError`로 입력 준비를 중단한다.
 
 **Runner/Policy.** FeedExecutionV1이 FeedPromptBuilder와 search_evidence 전용 Registry,
 3라운드/9검색 budget을 소유·검증한다. Executor/Runner Registry 불일치도 Provider 호출 전에 거부한다.

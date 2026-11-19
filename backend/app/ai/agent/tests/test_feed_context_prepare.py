@@ -39,9 +39,15 @@ class ProductionPreparePolicyTests(unittest.TestCase):
                           "symptoms": ["signal 1"], "interests": ["stored interest"],
                           "safety_events": ["fall", "wandering", "missing"],
                           "assessment_types": ["scale B", "scale A"]}],
+            "care_logs": [
+                {"patient_ref": None, "log_type": "stored unlinked type",
+                 "content": "PRIVATE_NULL_LOG", "mood_tag": "stored mood"},
+                {"patient_ref": "patient_1", "log_type": "patient_care",
+                 "content": "PRIVATE_PATIENT_LOG", "mood_tag": None},
+            ],
         })
-        for forbidden in ("PRIVATE", str(CONTEXT.user_id), str(P1), CONTEXT.request_id,
-                          "score", "care_logs", "summary", "coverage", "diagnosis_date",
+        for forbidden in ("PRIVATE_MONTHLY_SUMMARY", str(CONTEXT.user_id), str(P1), CONTEXT.request_id,
+                          "score", "logged_at", "summary", "coverage", "diagnosis_date",
                           "updated_at", "medications", "medical_visits", "reference_time"):
             self.assertNotIn(forbidden, text)
         self.assertEqual(value.model_dump(), before)
@@ -53,7 +59,8 @@ class ProductionPreparePolicyTests(unittest.TestCase):
             self.assertEqual(data["feed_scope"], "caregiver_all")
             self.assertEqual(len(data["patients"]), size)
             if size == 0:
-                self.assertEqual(data, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
+                self.assertEqual(data, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
+                                        "recent_feed_titles": [], "care_logs": []})
 
     def test_all_patients_and_per_patient_signals_survive_selected_or_foreign_patient_id(self):
         raw = snapshot([patient(P2), patient(P1)])
@@ -88,7 +95,26 @@ class ProductionPreparePolicyTests(unittest.TestCase):
                 log.patient_ref = "local_existing_ref"
         with patch.object(FeedPersonalizationContextV1, "model_dump_json", side_effect=AssertionError("Full disclosure")):
             text = self.project(value)
-        self.assertEqual(json.loads(text)["patients"][0]["patient_ref"], "local_existing_ref")
+        payload = json.loads(text)
+        self.assertEqual(payload["patients"][0]["patient_ref"], "local_existing_ref")
+        self.assertEqual([log["patient_ref"] for log in payload["care_logs"]], [None, "local_existing_ref"])
+
+    def test_care_log_content_at_or_below_limit_is_preserved(self):
+        for length in (None, 999, 1000):
+            with self.subTest(length=length):
+                content = None if length is None else " " + "가" * (length - 2) + "\n"
+                raw = snapshot()
+                raw.recent_care_logs.items[0].content = content
+                payload = json.loads(self.project(self.load(raw)))
+                self.assertEqual(payload["care_logs"][0]["content"], content)
+
+    def test_oversized_care_log_rejects_input_without_exposing_content(self):
+        raw = snapshot()
+        raw.recent_care_logs.items[1].content = "비공개" + "가" * 996 + " \n"
+        self.load(raw)
+        with self.assertRaisesRegex(prepare.FeedProfileMappingError, "^Feed profile mapping failed$") as caught:
+            prepare.prepare_production_feed_input(CONTEXT, self.loader)
+        self.assertNotIn("비공개", "".join(traceback.format_exception(caught.exception)))
 
     def test_original_context_and_backend_snapshot_are_not_mutated(self):
         raw = snapshot([patient(P2), patient(P1)])

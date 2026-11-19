@@ -49,10 +49,12 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["previously_recommended_pmids"], frozenset())
         user = next(m for m in deps.client.requests[0][0] if m.kind == "user_input")
         self.assertEqual(user.content, prepared)
-        patients = json.loads(prepared)["patients"]
+        payload = json.loads(prepared)
+        patients = payload["patients"]
         self.assertEqual([p["patient_ref"] for p in patients], ["patient_1", "patient_2"])
         self.assertEqual([p["symptoms"] for p in patients], [["signal 1"], ["second patient signal"]])
-        self.assertEqual(json.loads(prepared)["feed_scope"], "caregiver_all")
+        self.assertEqual(payload["feed_scope"], "caregiver_all")
+        self.assertEqual([log["patient_ref"] for log in payload["care_logs"]], [None, "patient_2"])
         self.assertEqual(raw.model_dump(), before)
         self.assertEqual(deps.events, list(STAGES))
         self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
@@ -65,9 +67,10 @@ class FeedWorkflowTests(unittest.TestCase):
         for messages, _ in deps.client.requests:
             text = json.dumps([m.model_dump(mode="json") for m in messages])
             for forbidden in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id),
-                              "PRIVATE", "stored stopped drug", "stored current drug", "stored department",
+                              "PRIVATE_ASSESSMENT", "PRIVATE_SAFETY", "PRIVATE_MEDICATION", "PRIVATE_VISIT_MEMO",
+                              "PRIVATE_MONTHLY_SUMMARY", "stored stopped drug", "stored current drug", "stored department",
                               "reference_time", "updated_at", "diagnosis_date", "assessed_at", "result_detail",
-                              "burden_score", "mood_score", "2026-10", "coverage", "long_term_summary"):
+                              "burden_score", "mood_score", "logged_at", "2026-10", "coverage", "long_term_summary"):
                 self.assertNotIn(forbidden, text)
 
     def test_workflow_observes_first_evidence_then_llm_chooses_followup(self):
@@ -335,7 +338,8 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
         messages = deps.client.requests[0][0]
         payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
-        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
+        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
+                                   "recent_feed_titles": [], "care_logs": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
         self.assertNotIn('personal_reason', policy)

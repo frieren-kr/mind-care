@@ -6,6 +6,8 @@ retain their codes.
 from datetime import tzinfo
 import json
 
+from app.user_schemas import CARE_LOG_MAX_CHARS
+
 from ..schemas import AgentContext
 from .feed_context import FeedPersonalizationContextV1
 from .feed_context_loader import DefaultFeedContextLoader
@@ -65,11 +67,11 @@ class FeedProfileMappingError(RuntimeError):
         super().__init__("Feed profile mapping failed")
 
 
-def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles) -> str:
+def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles, care_logs) -> str:
     """Production disclosure allowlist. Callers provide validated row views.
 
     A row view is (profile, safety rows, assessment rows), not a new DTO.
-    Production-only logs/summary/coverage stay internal, never fabricated empty.
+    Summary and coverage stay internal.
     """
     patients = [{
         "patient_ref": patient.patient_ref,
@@ -81,6 +83,16 @@ def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles) -> s
         ) if any(getattr(row, flag) for row in safety)],
         "assessment_types": [row.assessment_type for row in assessments],
     } for patient, safety, assessments in profiles]
+    projected_logs = []
+    for log in care_logs:
+        if log.content is not None and len(log.content) > CARE_LOG_MAX_CHARS:
+            raise ValueError("Care log content exceeds the length limit")
+        projected_logs.append({
+            "patient_ref": log.patient_ref,
+            "log_type": log.log_type,
+            "content": log.content,
+            "mood_tag": log.mood_tag,
+        })
     return json.dumps({
         "feed_scope": "caregiver_all",
         "caregiver": None if caregiver is None else {
@@ -88,6 +100,7 @@ def _serialize_feed_provider_input(caregiver, profiles, recent_feed_titles) -> s
         },
         "patients": patients,
         "recent_feed_titles": list(recent_feed_titles),
+        "care_logs": projected_logs,
     }, ensure_ascii=False, allow_nan=False)
 
 
@@ -96,7 +109,7 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
     """Revalidate the full V1 before sharing only the approved profile signals.
 
     Source identity checks belong to DefaultFeedContextLoader, not opaque refs.
-    No CareLog/summary, raw scores/dates, medication/visit narrative or coverage
+    No summary, raw scores/dates, medication/visit narrative or coverage
     is disclosed. Exclusion means unavailable to this projection, not absence.
     """
     try:
@@ -109,7 +122,7 @@ def build_production_feed_provider_input(value: FeedPersonalizationContextV1, *,
         return _serialize_feed_provider_input(value.caregiver_profile, (
             (patient, patient.safety_events.items, patient.clinical_assessments.items)
             for patient in value.managed_patient_profiles.items
-        ), _project_recent_feed_titles(value.recently_recommended))
+        ), _project_recent_feed_titles(value.recently_recommended), value.recent_care_context.care_logs.items)
     except Exception:
         raise FeedProfileMappingError() from None
 
