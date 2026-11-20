@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 import httpx
 from openai import OpenAI
 
-from ..clients.openai_client import OpenAIClient
+from ..clients.base import GenerationRequest
+from ..clients.openai_client import OpenAIClient, ProviderResponseError
 from ..agent_loop_runner import AgentLoopRunner
 from ..composition import build_evidence_registry
 from ..outputs import FeedAnswerV2
@@ -92,10 +93,13 @@ class OpenAIClientTests(unittest.TestCase):
         client = ObservedClient(sdk, model="configured-test-model")
         with patch.object(OpenAI, "_calculate_retry_timeout", return_value=0):
             try:
-                result = AgentLoopRunner(client, production_registry(), request_timeout_seconds=0.1).run("synthetic", CONTEXT)
+                with self.assertLogs('app.ai.agent.agent_loop_runner',level='INFO') as logs:
+                    result = AgentLoopRunner(client, production_registry(), request_timeout_seconds=0.1).run("synthetic", CONTEXT)
                 self.assertEqual(result.status, "failed")
                 self.assertEqual(result.errors[-1].code, "request_timeout")
                 self.assertEqual(len(requests), 1)
+                self.assertIn('stage=provider_generation','\n'.join(logs.output))
+                self.assertNotIn('stage=registry_error','\n'.join(logs.output))
             finally:
                 release.set()
                 self.assertTrue(finished.wait(1))
@@ -194,6 +198,48 @@ class OpenAIClientTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.errors[0].code, "invalid_arguments")
         self.assertEqual(requests[1]["input"][-2]["arguments"], "{invalid")
+
+
+    def test_provider_format_failure_logs_reason_before_wrapper_and_preserves_status(self):
+        received=[]
+        def transport(request):
+            received.append(request)
+            return httpx.Response(200,json=response_fixture({'text':None,'calls':[{
+                'type':'function_call','id':'PRIVATE-ITEM','call_id':'','name':'search_evidence',
+                'arguments':'{"query":"PRIVATE"}','status':'completed'}]}))
+        with self.assertLogs('app.ai.agent',level='INFO') as logs:
+            result=AgentLoopRunner(self.sdk(transport),fake_registry()).run('Synthetic',CONTEXT)
+        self.assertEqual(result.status,'provider_error')
+        self.assertEqual((len(received),result.total_tool_calls),(1,0))
+        self.assertEqual(len(logs.records),1)
+        self.assertEqual(logs.records[0].name,'app.ai.agent.agent_loop_runner')
+        text='\n'.join(logs.output)
+        self.assertIn('empty_tool_call_id',text)
+        self.assertIn('output.call_id',text)
+        self.assertIn("'output_index': 0",text)
+        self.assertIn('stage=provider_response_validation',text)
+        self.assertNotIn('stage=provider_generation',text)
+        self.assertNotIn('PRIVATE',text+result.model_dump_json())
+
+    def test_standalone_client_preserves_safe_diagnostic_without_runner(self):
+        for name, identifier, reason, field in (
+                ('search_evidence', '', 'empty_tool_call_id', 'output.call_id'),
+                ('', 'PRIVATE-CALL', 'too_short', 'name')):
+            with self.subTest(field=field):
+                def transport(request):
+                    return httpx.Response(200,json=response_fixture({'text':None,'calls':[{
+                        'type':'function_call','id':'PRIVATE-ITEM','call_id':identifier,'name':name,
+                        'arguments':'{"query":"PRIVATE"}','status':'completed'}]}))
+                with self.assertRaises(ProviderResponseError) as caught:
+                    self.sdk(transport).generate(GenerationRequest(inputs=(),tools=[]))
+                error=caught.exception
+                self.assertEqual(error.stage,'provider_response_validation')
+                self.assertIsNotNone(error.__cause__)
+                diagnostic=json.dumps(error.diagnostic)
+                self.assertIn(field,diagnostic)
+                self.assertIn(reason,diagnostic)
+                self.assertEqual(error.diagnostic['output_index'],0)
+                self.assertNotIn('PRIVATE',diagnostic+str(error))
 
 
 class OpenAIFeedIntegrationTests(unittest.TestCase):
@@ -323,10 +369,11 @@ class OpenAIFeedIntegrationTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             case.workflow.run(FEED_CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(len(case.requests), 1)
+        self.assertEqual(len(case.requests), 2)
         result = case.results[0]
-        self.assertEqual(result.execution.status, "failed")
-        self.assertEqual(result.execution.errors[-1].code, "invalid_arguments")
+        self.assertEqual(result.execution.status, "invalid_response")
+        self.assertEqual(result.execution.errors[0].code, "invalid_arguments")
+        self.assertEqual(result.execution.errors[-1].code, "feed_search_required")
         self.assertIsNone(result.output)
         self.assertEqual(result.sources, [])
         case.retriever.search_evidence.assert_not_called()

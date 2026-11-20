@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.ai.retrieval import search as rag
 from ..adapters.rag_evidence import RagEvidenceRetriever
+from ..executor import ToolOutputValidationError
 from ..tools.contracts import EvidencePackage
 from ..tools.evidence_tools import EvidenceRetriever
 from .test_workflows import CONTEXT
@@ -60,8 +61,9 @@ class SearchEvidenceAdapterTests(TestCase):
             query='synthetic', top_k=5, context=CONTEXT)
         self.assertTrue(all(item.evidence_grade is None for item in result.evidence))
         payload['evidence'][0]['evidence_grade'] = 'E'
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(ToolOutputValidationError) as caught:
             RagEvidenceRetriever(search_fn=search).search_evidence(query='synthetic', top_k=5, context=CONTEXT)
+        self.assertIsInstance(caught.exception.__cause__, ValidationError)
 
     def test_query_and_k_are_forwarded_without_identity_or_filter_overrides(self):
         query = " \t치매 돌봄 연구\n "
@@ -118,9 +120,10 @@ class SearchEvidenceAdapterTests(TestCase):
                 raw = package()
                 raw.evidence[0].relevance_score = score
                 before = raw.evidence[0].relevance_score
-                with self.assertRaises(ValidationError):
+                with self.assertRaises(ToolOutputValidationError) as caught:
                     RagEvidenceRetriever(search_fn=Mock(return_value=raw)).search_evidence(
                         query="synthetic", top_k=5, context=CONTEXT)
+                self.assertIsInstance(caught.exception.__cause__, ValidationError)
                 if score == score:
                     self.assertEqual(raw.evidence[0].relevance_score, before)
 
@@ -137,27 +140,29 @@ class SearchEvidenceAdapterTests(TestCase):
         for invalid in (missing, bad_rows, bad_type, extra):
             with self.subTest(payload=invalid):
                 raw = Mock(model_dump=Mock(return_value=invalid))
-                with self.assertRaises(ValidationError):
+                with self.assertRaises(ToolOutputValidationError) as caught:
                     RagEvidenceRetriever(search_fn=Mock(return_value=raw)).search_evidence(
                         query="synthetic", top_k=5, context=CONTEXT)
+                self.assertIsInstance(caught.exception.__cause__, ValidationError)
 
     def test_mutated_output_is_rejected_without_raw_serialization_warnings(self):
         raw = package()
         raw.evidence[0].title = ["PRIVATE source text"]
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
-            with self.assertRaises(ValidationError):
+            with self.assertRaises(ToolOutputValidationError) as error:
                 RagEvidenceRetriever(search_fn=Mock(return_value=raw)).search_evidence(
                     query="synthetic", top_k=5, context=CONTEXT)
+            self.assertIsInstance(error.exception.__cause__, ValidationError)
         self.assertEqual(captured, [])
 
     def test_serialization_failure_is_propagated_without_empty_fallback(self):
         error = ValueError("PRIVATE serializer detail")
         raw = Mock(model_dump=Mock(side_effect=error))
         search = Mock(return_value=raw)
-        with self.assertRaises(ValueError) as caught:
+        with self.assertRaises(ToolOutputValidationError) as caught:
             RagEvidenceRetriever(search_fn=search).search_evidence(query="synthetic", top_k=5, context=CONTEXT)
-        self.assertIs(caught.exception, error)
+        self.assertIs(caught.exception.__cause__, error)
         raw.model_dump.assert_called_once_with(mode="json", warnings=False)
         search.assert_called_once()
 

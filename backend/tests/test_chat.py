@@ -238,7 +238,7 @@ class ChatApiTests(unittest.TestCase):
         self.assertIn("챗봇 AI 실행 실패", text)
         self.assertIn("status=provider_error errors=['provider_error']", text)
         self.assertIn("AuthenticationError status=401 code=invalid_api_key", text)
-        self.assertIn("sk-***", text)
+        self.assertNotIn("message=", text)
         for secret in ("SECRET123", "PRIVATE"):
             self.assertNotIn(secret, text)
 

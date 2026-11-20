@@ -78,7 +78,7 @@ class FeedRetrievalBudgetTests(unittest.TestCase):
             requested = calls(3)
             requested[-1].arguments['top_k'] = value
             touched = []
-            client = FakeLLMClient([ModelTurn(tool_calls=requested)])
+            client = FakeLLMClient([ModelTurn(tool_calls=[c.model_copy(update={"id":f"{c.id}-{i}"}) for c in requested]) for i in range(3)])
             result = FeedExecutionV1(client, registry(lambda c, a: touched.append(True)))(CONTEXT, '{}')
             self.assertEqual(result.execution.status, 'failed')
             self.assertEqual(result.execution.total_tool_calls, 0)

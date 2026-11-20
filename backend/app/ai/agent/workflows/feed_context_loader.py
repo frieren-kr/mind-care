@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Callable, Literal, TypeVar
 from uuid import UUID
 
+from app.user_schemas import APP_TIMEZONE
+
 from ..schemas import AgentContext
 from .feed_context import FeedPersonalizationContextV1, _validate_recent_feed_history
 from . import feed_context_source as s
@@ -139,6 +141,9 @@ def _project_snapshot(snapshot: s.FeedContextSourceSnapshot, reference: datetime
             "period_start": start, "period_end": reference,
             "care_logs": _project_collection(snapshot.recent_care_logs, project_log),
         },
+        "recent_chat_summaries": _project_collection(snapshot.recent_chat_summaries, lambda row: {
+            "summary_date": row.summary_date, "summary": row.summary,
+        }),
         "long_term_summary": None if summary is None else {
             "period_start": summary.period_start, "period_end": summary.period_end,
             "summary": summary.summary, "updated_tags": summary.updated_tags,
@@ -175,7 +180,11 @@ class DefaultFeedContextLoader:
             # Keep service-timezone failures in the existing Context error category.
             if not isinstance(self.service_timezone, tzinfo):
                 raise ValueError("Service timezone must be supplied")
-            reference_date = reference.astimezone(self.service_timezone).date()
+            local_reference = reference.astimezone(self.service_timezone)
+            if (getattr(self.source, "requires_kst_reference_date", False) is True
+                    and local_reference.utcoffset() != reference.astimezone(APP_TIMEZONE).utcoffset()):
+                raise ValueError("Production Feed service timezone must use KST")
+            reference_date = local_reference.date()
         except Exception:
             raise FeedContextLoadError("context_validation_failed") from None
         try:

@@ -9,9 +9,11 @@ from decimal import Decimal
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
 
-from pydantic import AwareDatetime, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
+from pydantic import (
+    AwareDatetime, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator,
+)
 
-from app.feed_schemas import RECENT_FEED_LIMIT
+from app.feed_schemas import DEFAULT_CAPS, RECENT_FEED_LIMIT
 
 from ..schemas import AgentModel
 
@@ -124,12 +126,28 @@ class SourceRecentFeedPaper(FeedSourceModel):
     times_recommended: StrictInt = Field(ge=1)
 
 
+class SourceChatDailySummary(FeedSourceModel):
+    summary_date: date
+    summary: StrictStr
+
+
 class FeedContextSourceSnapshot(FeedSourceModel):
     caregiver_profile: SourceCaregiverProfile | None
     managed_patients: SourceCollection[SourceManagedPatient]
     recent_care_logs: SourceCollection[SourceCareLog]
     long_term_summary: SourceLongTermSummary | None
     recently_recommended: list[SourceRecentFeedPaper] = Field(max_length=RECENT_FEED_LIMIT)
+    # Older Source callers can omit this collection. Production always projects the Backend field.
+    recent_chat_summaries: SourceCollection[SourceChatDailySummary] = Field(
+        default_factory=lambda: SourceCollection[SourceChatDailySummary](items=[], total_count=0),
+    )
+
+    @field_validator("recent_chat_summaries")
+    @classmethod
+    def validate_chat_summary_limit(cls, collection):
+        if len(collection.items) > DEFAULT_CAPS["chat_summaries"]:
+            raise ValueError("Recent chat summaries exceed Feed limit")
+        return collection
 
     @model_validator(mode="after")
     def unique_recent_papers(self):
@@ -178,10 +196,10 @@ class FeedContextSource(Protocol):
         safety: event_date DESC (one row per patient/date);
         medication: is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id;
         visit: visit_date DESC, created_at DESC, id;
-        CareLog: logged_at DESC, id.
+        CareLog: logged_at DESC, id; daily chat summary: summary_date DESC, patient_id NULLS LAST, id.
         Ordering is not eligibility; current-only medications/latest-only
         assessments/event-only safety are not the final Feed selection policy.
-        Loader preserves child/log order and canonicalizes patients by UUID.bytes.
+        Loader preserves child/log/summary order and canonicalizes patients by UUID.bytes.
 
         UserProfileContext/PatientContext/get_user_profile_context() are
         current-state/demo aggregates, not FeedContextSourceSnapshot,

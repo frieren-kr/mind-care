@@ -3,6 +3,7 @@ from datetime import date, timezone
 from typing import Literal
 
 from pydantic import AwareDatetime, Field, JsonValue, StrictInt, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from ..schemas import AgentModel
 from .medications import MedicationItem, PatientMedicationsInput, PatientMedicationsOutput
@@ -104,7 +105,7 @@ class EvidenceSearchInput(AgentModel):
     @classmethod
     def reject_blank_query(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("Evidence search query must not be blank")
+            raise PydanticCustomError('query_blank', "Evidence search query must not be blank")
         return value
 
 
@@ -116,7 +117,7 @@ class GuidelineSearchInput(AgentModel):
     @classmethod
     def reject_blank_query(cls, value: str) -> str:
         if not value.strip():
-            raise ValueError("Guideline search query must not be blank")
+            raise PydanticCustomError('query_blank', "Guideline search query must not be blank")
         return value
 
 

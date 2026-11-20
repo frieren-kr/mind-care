@@ -193,6 +193,104 @@ class ParallelChatTests(unittest.TestCase):
         self.assertTrue(finished.wait(2))
         self.assertEqual(result.model_dump_json(),snapshot)
 
+    def test_known_timeout_stops_waiting_for_peer_without_starting_next_chunk(self):
+        from .._execution import bounded_parallel as execute_parallel
+        barrier, release, allow_timeout = Barrier(3), Event(), Event()
+        ordinary_seen, timeout_seen, finished = Event(), Event(), Event()
+        reached, box = [], {}
+        def handler(context, args):
+            reached.append(args.query)
+            barrier.wait(2)
+            if args.query == '0': raise RuntimeError('PRIVATE')
+            if args.query == '1':
+                self.assertTrue(allow_timeout.wait(3))
+                raise TimeoutError('PRIVATE')
+            try:
+                release.wait(4)
+                return package(['late'])
+            finally: finished.set()
+        def observe(functions, **options):
+            original = options.get('on_result')
+            def accepted(index, raw):
+                if original: original(index, raw)
+                if raw[0].error:
+                    (timeout_seen if raw[0].error.code == 'tool_timeout' else ordinary_seen).set()
+            options['on_result'] = accepted
+            return execute_parallel(functions, **options)
+        client = FakeLLMClient([ModelTurn(tool_calls=calls(4)), chat_final()])
+        def run():
+            box['result'] = self.execute(client, registry(handler),
+                tool_timeout_seconds=5, request_timeout_seconds=6)
+        with patch('app.ai.agent.agent_loop_runner.bounded_parallel', side_effect=observe):
+            worker = Thread(target=run, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(ordinary_seen.wait(2))
+                worker.join(.1)
+                self.assertTrue(worker.is_alive(), 'Ordinary errors must keep collecting peer results')
+                allow_timeout.set()
+                self.assertTrue(timeout_seen.wait(2))
+                worker.join(1)
+                self.assertFalse(worker.is_alive(), 'A known timeout must not wait for its slow peer')
+                self.assertFalse(finished.is_set())
+                self.assertCountEqual(reached, ['0','1','2'])
+                result = box['result']
+                self.assertEqual(result.execution.status, 'failed')
+                self.assertEqual([e.code for e in result.execution.errors], ['tool_exception','tool_timeout'])
+                self.assertEqual(result.execution.total_tool_calls, 3)
+                self.assertEqual(len(client.requests), 1)
+                self.assertIsNone(result.output)
+                self.assertEqual(result.sources, [])
+                snapshot = result.model_dump_json()
+            finally:
+                allow_timeout.set()
+                release.set()
+                worker.join(2)
+            self.assertTrue(finished.wait(1))
+            self.assertEqual(box['result'].model_dump_json(), snapshot)
+
+    def test_recoverable_errors_still_wait_for_and_publish_slow_peer_results(self):
+        from .._execution import bounded_parallel as execute_parallel
+        for invalid in (False, True):
+            with self.subTest(invalid_output=invalid):
+                entered, release, error_seen = Barrier(2), Event(), Event()
+                box = {}
+                def handler(context, args):
+                    entered.wait(2)
+                    if args.query == '0':
+                        if invalid: return {'PRIVATE': 'invalid output'}
+                        raise RuntimeError('PRIVATE')
+                    self.assertTrue(release.wait(3))
+                    return package(['peer'])
+                def observe(functions, **options):
+                    original = options.get('on_result')
+                    def accepted(index, raw):
+                        if original: original(index, raw)
+                        if raw[0].error: error_seen.set()
+                    options['on_result'] = accepted
+                    return execute_parallel(functions, **options)
+                client = FakeLLMClient([ModelTurn(tool_calls=calls(2)), chat_final(selected=[True])])
+                with patch('app.ai.agent.agent_loop_runner.bounded_parallel', side_effect=observe):
+                    worker = Thread(target=lambda: box.update(result=self.execute(client, registry(handler))), daemon=True)
+                    worker.start()
+                    try:
+                        self.assertTrue(error_seen.wait(2))
+                        worker.join(.1)
+                        self.assertTrue(worker.is_alive())
+                        self.assertEqual(len(client.requests), 1)
+                    finally:
+                        release.set()
+                        worker.join(2)
+                    self.assertFalse(worker.is_alive())
+                result = box['result']
+                self.assertEqual(result.execution.status, 'completed')
+                self.assertEqual([e.code for e in result.execution.errors],
+                                 ['invalid_output' if invalid else 'tool_exception'])
+                self.assertEqual([s.pmid for s in result.sources], ['peer'])
+                self.assertEqual(result.sources[0].source_ref.tool_call_id, 'call-1')
+                self.assertEqual(len(client.requests), 2)
+                self.assertEqual(result.execution.total_tool_calls, 2)
+
     def test_no_resource_admission_counts_no_calls_or_traces(self):
         slots=BoundedSemaphore(1);slots.acquire();executed=[]
         client=FakeLLMClient([ModelTurn(tool_calls=calls(3))])

@@ -49,10 +49,12 @@ class FeedWorkflowTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["previously_recommended_pmids"], frozenset())
         user = next(m for m in deps.client.requests[0][0] if m.kind == "user_input")
         self.assertEqual(user.content, prepared)
-        patients = json.loads(prepared)["patients"]
+        payload = json.loads(prepared)
+        patients = payload["patients"]
         self.assertEqual([p["patient_ref"] for p in patients], ["patient_1", "patient_2"])
         self.assertEqual([p["symptoms"] for p in patients], [["signal 1"], ["second patient signal"]])
-        self.assertEqual(json.loads(prepared)["feed_scope"], "caregiver_all")
+        self.assertEqual(payload["feed_scope"], "caregiver_all")
+        self.assertEqual([log["patient_ref"] for log in payload["care_logs"]], [None, "patient_2"])
         self.assertEqual(raw.model_dump(), before)
         self.assertEqual(deps.events, list(STAGES))
         self.assertEqual(deps.saved_owners, [CONTEXT.user_id])
@@ -65,9 +67,10 @@ class FeedWorkflowTests(unittest.TestCase):
         for messages, _ in deps.client.requests:
             text = json.dumps([m.model_dump(mode="json") for m in messages])
             for forbidden in (CONTEXT.request_id, str(CONTEXT.user_id), str(CONTEXT.patient_id),
-                              "PRIVATE", "stored stopped drug", "stored current drug", "stored department",
+                              "PRIVATE_ASSESSMENT", "PRIVATE_SAFETY", "PRIVATE_MEDICATION", "PRIVATE_VISIT_MEMO",
+                              "PRIVATE_MONTHLY_SUMMARY", "stored stopped drug", "stored current drug", "stored department",
                               "reference_time", "updated_at", "diagnosis_date", "assessed_at", "result_detail",
-                              "burden_score", "mood_score", "2026-10", "coverage", "long_term_summary"):
+                              "burden_score", "mood_score", "logged_at", "2026-10", "coverage", "long_term_summary"):
                 self.assertNotIn(forbidden, text)
 
     def test_workflow_observes_first_evidence_then_llm_chooses_followup(self):
@@ -162,7 +165,7 @@ class FeedWorkflowTests(unittest.TestCase):
         tool = next(m for m in deps.client.requests[1][0] if m.type == "function_call_output")
         self.assertTrue(json.loads(tool.content)["success"])
 
-    def test_timeout_and_search_exception_stop_without_retry(self):
+    def test_timeout_stops_and_search_exception_is_reported_without_automatic_retry(self):
         for error in (TimeoutError("PRIVATE"), RuntimeError("PRIVATE")):
             def handler(context, args):
                 raise error
@@ -170,9 +173,10 @@ class FeedWorkflowTests(unittest.TestCase):
                 turns=[ModelTurn(tool_calls=[search_call()]), final_turn(count=0)])
             with self.assertRaises(FeedWorkflowError):
                 deps.workflow().run(CONTEXT)
-            self.assertEqual(len(deps.client.requests), 1)
+            timeout = isinstance(error, TimeoutError)
+            self.assertEqual(len(deps.client.requests), 1 if timeout else 2)
             self.assertEqual(deps.saved, [])
-            self.assertEqual(deps.agent_result.execution.status, "failed")
+            self.assertEqual(deps.agent_result.execution.status, "failed" if timeout else "invalid_response")
             self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
 
     def test_disallowed_profile_tool_never_executes_or_discloses_profile(self):
@@ -267,10 +271,10 @@ class FeedWorkflowTests(unittest.TestCase):
         with self.assertRaises(FeedWorkflowError) as caught:
             deps.workflow().run(CONTEXT)
         self.assertEqual(caught.exception.stage, "backend_handoff")
-        self.assertEqual(deps.agent_result.execution.status, "failed")
+        self.assertEqual(deps.agent_result.execution.status, "invalid_response")
         self.assertEqual(deps.agent_result.execution.total_tool_calls, 1)
         self.assertIn("tool_exception", [error.code for error in deps.agent_result.execution.errors])
-        self.assertEqual(len(deps.client.requests), 1)
+        self.assertEqual(len(deps.client.requests), 2)
         self.assertIsNone(deps.agent_result.output)
         self.assertIsNone(deps.agent_result.execution.final_answer)
         self.assertEqual(deps.agent_result.sources, [])
@@ -334,7 +338,8 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
         self.assertEqual(deps.saved[0].sources[0].pmid, "FAKE-PMID")
         messages = deps.client.requests[0][0]
         payload = json.loads(next(m.content for m in messages if m.kind == "user_input"))
-        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [], "recent_feed_titles": []})
+        self.assertEqual(payload, {"feed_scope": "caregiver_all", "caregiver": None, "patients": [],
+                                   "recent_feed_titles": [], "care_logs": [], "chat_daily_summaries": []})
         policy = "\n".join(m.content for m in messages if m.role == "system")
         self.assertIn("Cold Start", policy)
         self.assertNotIn('personal_reason', policy)
@@ -359,7 +364,7 @@ class SharedFeedContextIntegrationTests(unittest.TestCase):
                     with self.assertRaises(FeedWorkflowError):
                         workflow.run(context)
                     self.assertEqual(deps.agent_result.execution.status,
-                                     "failed" if behavior == "failed_search" else "invalid_response")
+                                     "invalid_response")
                     self.assertIsNone(deps.agent_result.output)
                     self.assertEqual(deps.agent_result.sources, [])
                     self.assertEqual(deps.saved, [])

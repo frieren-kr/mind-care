@@ -32,9 +32,10 @@ Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar�
 - `conversation.py`: Runner 실행마다 새 객체를 만든다. 출력 항목을 원래 순서대로
   한 번만 보존하고 각 원래 call_id에 function_call_output 하나를 연결한다.
   PromptBuilder는 정책과 데이터만 조립하며 Provider 이력을 합성하지 않는다.
-- `agent_loop_runner.py`: 기존 단일 Loop가 Feed/Chat의 예산·권한·Executor·Evidence·
-  최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
-  이전 후보 목록을 다음 요청에 중복 누적하지 않는다.
+- `agent_loop_runner.py`: 단일 Loop에서 Provider 호출, Tool 실행, 호출 순서와 결과 연결,
+  실행 예산과 deadline을 관리한다. Chat의 검색·후보 정책은 `workflows/chat_search_policy.py`,
+  Feed의 검색 조건과 오류 복구 판정은 `feed_search_policy.py`에 둔다. `FeedCandidates`가 만든
+  후보 투영은 해당 generation snapshot에만 붙인다.
 
 `PromptBuilder.build_post_tool_success_policies(frozenset[str])`는 검증·반영이 완료된 요청별
 성공 Tool 이름만 받아 정적 Workflow System 정책을 반환한다. 검색 성공(정상 0건 포함) 후
@@ -490,8 +491,9 @@ Source identity/complete managed set/시간/Coverage 검증은 유지하며 Proj
 공통 공개 필드 선택·직렬화와 고정 `FeedProfileMappingError`는 feed_context_prepare.py가 소유한다.
 정식 Prepare는 Demo Mapper/DTO를 import하거나 사용하지 않는다. Provider JSON 필드·값·키 순서와
 ensure_ascii=False/allow_nan=False 정책을 유지하며 `feed_scope="caregiver_all"`을 고정한다.
-caregiver relationship/lifestyle_tags와 환자별 ref/stage/symptoms/interests/일반화 안전 label/assessment_type만 공개한다.
-점수·날짜·medication/visit/note·CareLog content·장기 summary·Coverage는 내부 Context에 유지한다.
+caregiver relationship/lifestyle_tags, 환자별 ref/stage/symptoms/interests/일반화 안전 label/assessment_type,
+최근 돌봄 기록의 patient_ref/log_type/content/mood_tag와 일별 대화 요약의 summary_date/summary를 공개한다.
+프로필 점수·시각, 진료/복약 원문, 장기 summary, Coverage는 내부 Context에 유지한다.
 Provider 입력에서 제외된 정보는 미제공이며 정상 0건이나 임상적 부재를 뜻하지 않는다.
 자유 텍스트 비식별화·Query Guard는 구현하지 않았고 Allowlist 최소화가 PII-safe 승인은 아니다.
 
@@ -597,20 +599,21 @@ MINDCARE_RUN_PROVIDER_INTEGRATION=0 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -
 
 `workflows/feed_context.py`는 caregiver/user-scoped **입력** 계약이다. 공통 실행 `schemas.py`,
 Tool 계약 `tools/contracts.py`, 최종 응답 `outputs.py`와 책임을 분리한다. Loader는 이 전체 계약으로
-최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 다섯 구성이다.
+최종 검증하고 정식 Prepare가 최소 JSON을 Production Prompt/Runner로 전달한다. 최상위는 `schema_version="1"`, aware `reference_time`과 다음 여섯 구성이다.
 
 - `caregiver_profile`: 저장된 간병인 프로필, row가 없으면 명시적 `null`
 - `managed_patient_profiles`: 여러 관리 환자의 저장 프로필 및 환자별 종속 collection
 - `recent_care_context`: 최근 정확히 30×24시간의 관찰 기록
 - `long_term_summary`: optional caregiver/user-scoped derived 장기 요약, 없으면 명시적 `null`
 - `recently_recommended`: 같은 Backend Snapshot의 최근 추천 이력, 없으면 명시적 `[]`
+- `recent_chat_summaries`: 완료된 최근 7일(KST)의 일별 대화 요약과 Coverage. 날짜와 원문만 보존한다.
 
 최근 추천 이력은 `SourceRecentFeedPaper` → `RecentFeedRecommendationContext`로 순서와 모든 필드를 보존한다.
 `paper_id`, nullable `pmid`, `title`, aware `last_recommended_at`, strict 양의 `times_recommended`가 required다.
 Source/Context 검증 경계에서 중복 `paper_id`, 50편 초과, `(reference_time - 30일, reference_time]` 밖의 시각을 거부한다.
 전체 적격 수를 알 수 없어 이 목록에 Coverage를 만들지 않는다.
 
-Provider JSON에는 기존 개인화 신호에 `recent_feed_titles` 문자열 배열만 추가한다. DB 정렬을 그대로 따라
+최근 추천 이력에서 Provider JSON에 제공하는 필드는 `recent_feed_titles` 문자열 배열이다. DB 정렬을 그대로 따라
 최신 최대 20개 제목을 제공하며 UUID/PMID/추천 시각·횟수는 공개하지 않는다. 제목은 비신뢰 데이터이고,
 이 상위 20편에서 300자 초과 제목은 공개 목록에서만 제외한다. 제목 배열을
 `json.dumps(ensure_ascii=False, allow_nan=False)`로 직렬화한 UTF-8 크기가 8,192 bytes를
@@ -1010,14 +1013,17 @@ get_user_profile_context fallback은 없다. AgentContext.patient_id로 환자�
 실제 CareLog items/count와 월간 요약을 적재한다. 정상 조회의 None/빈 결과만 그대로 유지하며
 개발용 자리표시자는 사용하지 않는다. CareLog NULL patient_id는 NULL 그대로 옮기고 Loader가
 patient_ref=None으로 변환한다. 본인 기록 또는 특정 환자 기록이라고 임의 추정하지 않는다.
+일별 대화 요약은 환자 연결이 있으면 관리 환자 범위를 검증한 뒤 `patient_id`를 제거한다.
+Source와 Loader는 날짜, 요약 원문, 항목 순서와 상한 적용 전 건수를 보존한다.
+정식 Source에 연결된 Loader는 KST 기준을 검증하고, Source는 KST 기준일과 일치할 때만 Backend 조회를 호출한다.
 
 Backend 복약 `dosage`/`frequency`와 진료 `visit_reason`/`diagnosis`/`treatment_content`/
 `test_summary`/`medication_change`/`doctor_note`/`follow_up_plan`은 제외한다.
 `visit_content`는 기타 자유 메모로 직접 보존하며 진단·처치 정보로 재해석하지 않는다.
 UUID→patient_ref와 Coverage/최종 기간 검증은 기존 Loader, LLM allowlist는 Production Prepare 책임이다.
-CareLog·요약이 full Context에 있다는 사실은 Provider 전송을 의미하지 않는다. UUID, 원점수,
-CareLog/월간 요약/진료·복약 원문/coverage는 기존 Provider Input에서 계속 제외한다.
-증상·관심사 등 허용 자유 문자열의 PII 비식별화는 별도 후속 작업이다.
+Provider Input에는 CareLog의 patient_ref/log_type/content/mood_tag만 포함한다. UUID, 원점수,
+logged_at, 월간 요약, 진료·복약 원문, coverage는 내부 Context에 유지한다.
+증상·관심사·돌봄 메모 등 허용 자유 문자열의 PII 비식별화는 별도 후속 작업이다.
 
 **실패 정책.** 실제 Backend 예외 `FeedUserNotFound(LookupError)`, `FeedReadError(RuntimeError)`,
 `FeedPatientLimitExceeded(FeedReadError)`는 같은 예외 인스턴스/종류로 전파한다.
@@ -1117,7 +1123,8 @@ current-state aggregate의 목록 길이는 이미 선택된 현재 상태 목�
 | 안전 기록 | 최근 180일 중 낙상·배회·실종 플래그가 하나 이상 참인 날 | 환자당 50건 |
 | 복약 기록 | 현재 복용 중이거나 최근 90일 이내 중단된 약 | 환자당 30건 |
 | 병원 방문 | 과거 365일 완료 진료 및 향후 90일 예약 | 환자당 20건 |
-| CareLog | 전달받은 정확한 최근 30×24시간 구간 | 간병인당 200건 |
+| CareLog | 전달받은 정확한 최근 30×24시간 구간 | 간병인당 최신 5건 |
+| 일별 대화 요약 | 기준일을 제외한 이전 7일(KST) | 간병인당 최신 5건 |
 | 월간 개인화 요약 | 기준 날짜 전에 종료되고 기준 시각까지 생성된 요약 중 최신 1건 | 1건 |
 
 기준은 전달받은 `reference_time`과 서비스 시간대의 `reference_date`이며 Adapter에서 새 now/today를
@@ -1139,7 +1146,7 @@ SELECT/COUNT 적격 조건은 위 Backend 완료 항목을 따른다. Agent는 �
 바꾸지 않고 투영하며 current-state aggregate의 선정·정렬과 혼동하지 않는다. 정렬용 id/created_at을 Agent Source DTO에 새로 추가하지 않는다.
 
 **CareLog.** `[recent_period_start, recent_period_end)` 반열린 구간을 정확히 사용한다.
-`recent_period_end == reference_time`, 길이는 정확히 30×24시간이며 최대 200건을 포함한다.
+`recent_period_end == reference_time`, 길이는 정확히 30×24시간이며 최신 최대 5건을 포함한다.
 `user_id`는 요청 간병인과 일치하고, non-null `patient_id`는 현재 관리 환자 범위에 속해야 한다.
 NULL도 포함 가능하며 본인 기록/특정 환자 기록이라고 추정하지 않는다. Loader는 NULL을
 `patient_ref=None`으로 보존한다. 정식 total_count는 이 조회 대상의 실제 건수다.
@@ -1206,7 +1213,7 @@ Loader는 환자만 UUID bytes 순으로 정렬하여 ref를 만들며 child/log
 동일한 Backend logical Snapshot은 historical AS-OF 조회가 아니다. 저장된 profile/assessment/
 복약 상태에서 현재 진단·단계·중증도·약효를 추론하지 않고 codebook/검사점수의 과잉 해석을 금지한다.
 현재 복약 flag와 과거 종료일의 모순을 임상적으로 보정하지 않는다. Event 없음/미공개 데이터는
-안전함·임상적 부재의 증거가 아니다. CareLog·월간 요약은 전체 Context에 보존하지만 Provider에는 제외한다.
+안전함·임상적 부재의 증거가 아니다. CareLog의 공개 필드는 위 계약을 따르며 월간 요약은 내부 Context에 보존한다.
 
 **테스트 자산 이전:** 기존 Production Adapter 29개와 Loader·Context 테스트는 유지한다.
 FeedWorkflow/Execution/Prompt privacy의 Runner·Tool·출처·Handoff 테스트는 삭제하지 않고
@@ -1235,15 +1242,21 @@ feed_context_prepare.py가 소유한다. Prepare는 전체 V1을 재검증하고
 | 포함 | 제외 |
 |---|---|
 | caregiver relationship/lifestyle_tags | burden/mood score, updated_at, server identity |
-| 환자별 patient_ref/dementia_stage/symptoms/interests | diagnosis_date/reference_time 및 모든 날짜·시각 |
+| 환자별 patient_ref/dementia_stage/symptoms/interests | diagnosis_date/reference_time |
 | true safety flags의 fall/wandering/missing 목록 | safety note 및 event date |
 | assessment 이력의 assessment_type만 | assessment score/result_detail/assessed_at |
+| care_logs의 patient_ref/log_type/content/mood_tag, 적격 기록이 없으면 [] | logged_at, 월간 요약, Coverage |
+| chat_daily_summaries의 summary_date/summary, 선정된 기록이 없으면 [] | 요약의 환자 UUID와 조회 메타데이터 |
 | caregiver가 없으면 null, 환자가 없으면 [] | medication 전체, visit department/content 및 기타 narrative |
 
 Positive flags는 제공된 selected rows에서만 고르며 false/row 부재를 안전함이나 임상적 부재로
 해석하지 않는다. 여러 환자를 합성 환자로 병합하지 않는다. Projection은 자유 텍스트를
-sanitize하거나 완전한 비식별화를 보장하지 않는다. 실제 CareLog/Summary는 전체 Context에
-보존하며 현재 Provider 공개 정책에 따라 입력에서 제외한다. 미공개를 정상 empty로 해석하지 않는다.
+sanitize하거나 완전한 비식별화를 보장하지 않는다. 돌봄 메모는 앱 API의 1,000자 상한을 따르며,
+초과 시 메모를 자르지 않고 `FeedProfileMappingError`로 입력 준비를 중단한다.
+일별 대화 요약은 최신 요약부터 선택해 날짜 오름차순으로 전달한다. 같은 날짜의 요약도 각각 유지한다.
+`{"chat_daily_summaries": [...]}` 전체를 프로세스에 이미 로딩된 Feed 모델 토크나이저로 계산한다.
+해당 인코딩이 메모리에 없으면 요청 중 다운로드 없이 UTF-8 바이트 수를 쓴다.
+1,000토큰을 초과하는 첫 요약에서 선정을 멈추고 원문을 그대로 유지한다.
 
 **Runner/Policy.** FeedExecutionV1이 FeedPromptBuilder와 search_evidence 전용 Registry,
 3라운드/9검색 budget을 소유·검증한다. Executor/Runner Registry 불일치도 Provider 호출 전에 거부한다.
@@ -2431,7 +2444,7 @@ JSON 모드로 변환한 뒤 기존 Agent EvidencePackage로 재검증한다. Ou
 strip 동작과 같은 query.strip()이며 검색 함수에 넘기는 원문은 바꾸지 않는다. 결과 순서·중복·
 발췌·기관·연도·출처·유사도를 그대로 보존하고 추가 정렬·요약·상한 절단·출처 생성은 하지 않는다.
 정상 빈 목록만 정상 0건이며 예외·잘못된 반환형·변환 실패를 빈 목록으로 대체하지 않는다.
-변환 예외는 기존 Executor로 전파되고, Tool별 자료 유형·반환 건수 검증은 기존 Chat Runner가 담당한다.
+변환 예외는 기존 Executor로 전파된다. Chat 검색 정책이 자료 유형·반환 건수를 판정하고 Runner가 실패 결과를 기록한다.
 
 `build_chat_registry(..., guidelines_retriever=...)`는 환자 선택 유무와 무관하게 canonical
 search_guidelines를 production Tool로 등록한다. 기본값은 RagGuidelineRetriever이며 기존

@@ -127,16 +127,18 @@ class SearchEvidenceIntegrationTests(TestCase):
         self.assertEqual(result.sources, [])
         self.assertTrue(envelopes(client)[0]["success"])
 
-    def test_generic_feed_search_error_stops_without_retry_or_citation(self):
-        for final, status in ((final_turn(count=0), "failed"), (final_turn(), "failed")):
+    def test_generic_feed_search_error_is_reported_without_automatic_retry_or_citation(self):
+        for final in (final_turn(count=0), final_turn()):
             search = Mock(side_effect=RuntimeError("PRIVATE retrieval error"))
             client = FakeLLMClient([ModelTurn(tool_calls=[search_call()]), final])
             result = FeedExecutionV1(client, self.registry(search))(self.context, prepared_input())
-            self.assertEqual(result.execution.status, status)
+            self.assertEqual(result.execution.status, "invalid_response")
             self.assertEqual(result.execution.errors[0].code, "tool_exception")
+            self.assertEqual(result.execution.errors[-1].code, "feed_search_required")
             self.assertEqual(result.sources, [])
-            self.assertEqual(len(client.requests), 1)
-            self.assertEqual(envelopes(client), [])
+            self.assertEqual(len(client.requests), 2)
+            self.assertFalse(envelopes(client)[0]["success"])
+            self.assertEqual(envelopes(client)[0]["data"]["searches"][0]["status"], "failed")
             self.assertNotIn("PRIVATE", result.model_dump_json())
             search.assert_called_once()
 

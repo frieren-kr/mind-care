@@ -45,7 +45,7 @@ def minimal():
         "managed_patient_profiles": collection(), "recent_care_context": {
             "period_start": NOW - timedelta(days=30), "period_end": NOW,
             "care_logs": collection(),
-        }, "long_term_summary": None, "recently_recommended": [],
+        }, "long_term_summary": None, "recently_recommended": [], "recent_chat_summaries": collection(),
     }
 
 
@@ -87,7 +87,9 @@ class FeedContextContractTests(unittest.TestCase):
     def test_frozen_public_v1_field_sets(self):
         expected = {
             c.FeedPersonalizationContextV1: {"schema_version", "reference_time", "caregiver_profile",
-                "managed_patient_profiles", "recent_care_context", "long_term_summary", "recently_recommended"},
+                "managed_patient_profiles", "recent_care_context", "long_term_summary", "recently_recommended",
+                "recent_chat_summaries"},
+            c.ChatDailySummaryContext: {"summary_date", "summary"},
             c.ManagedPatientContext: {"patient_ref", "dementia_stage", "diagnosis_date", "symptoms",
                 "interests", "updated_at", "clinical_assessments", "safety_events", "medications", "medical_visits"},
             c.MedicalVisitContext: {"visit_date", "is_visited", "department", "visit_content"},
@@ -111,6 +113,7 @@ class FeedContextContractTests(unittest.TestCase):
         self.assertIsNone(result.long_term_summary)
         self.assertEqual(result.managed_patient_profiles.items, [])
         self.assertEqual(result.recent_care_context.care_logs.items, [])
+        self.assertEqual(result.recent_chat_summaries.items, [])
 
     def test_full_context_and_raw_scores(self):
         result = self.validate(full())

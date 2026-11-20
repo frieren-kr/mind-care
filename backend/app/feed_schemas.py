@@ -43,7 +43,7 @@ DEFAULT_CAPS = {
     "medications": 30,
     "visits": 20,
     "visits_upcoming": 5,  # 방문 20건 중 '앞으로의 예약'에 먼저 주는 자리
-    "care_logs": 200,
+    "care_logs": 5,
     "chat_summaries": 5,
 }
 

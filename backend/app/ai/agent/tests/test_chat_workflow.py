@@ -421,6 +421,22 @@ class ChatWorkflowTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ChatWorkflow(context_prepare=deps.prepare, chat_execution=deps.run_chat)
 
+    def test_chat_search_diagnostics_keep_existing_recovery_order_and_hide_inputs(self):
+        bad = search('bad').model_copy(update={'arguments': {'top_k':2, 'PRIVATE':'PRIVATE'}})
+        deps = FakeChatDependencies([ModelTurn(tool_calls=[bad]), ModelTurn(tool_calls=[search('fixed')]),
+                                     chat_final(selected=[True])])
+        with self.assertLogs('app.ai.agent.agent_loop_runner', level='INFO') as logs:
+            deps.workflow().run(CONTEXT.model_copy(update={'request_id':'diagnostic-request'}), '질문')
+        self.assertEqual(deps.agent_result.execution.status, 'completed')
+        errors = [body['error'] for _,body in outcomes(deps) if not body['success']]
+        self.assertEqual(errors[0]['code'], 'invalid_arguments')
+        self.assertIn('query', errors[0]['message'])
+        self.assertNotIn('PRIVATE', json.dumps(errors) + '\n'.join(logs.output))
+        self.assertIn('stage=chat_search_plan', '\n'.join(logs.output))
+        self.assertIn('workflow', '\n'.join(logs.output))
+        self.assertEqual([identifier for identifier,_ in outcomes(deps)], ['bad','fixed'])
+        self.assertEqual(deps.agent_result.execution.total_tool_calls, 2)
+
 
 class ChatArchitectureTests(unittest.TestCase):
     def test_exact_three_stages_without_runner_creation_or_private_tool_loop(self):
