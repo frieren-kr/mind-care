@@ -1,13 +1,15 @@
 """Feed-only search admission; shared Tool input and Chat remain unchanged."""
 import json
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field, StrictStr, ValidationError, field_validator
 from pydantic_core import PydanticCustomError
 
 from .error_diagnostics import diagnostic_message, summarize_json_error, summarize_validation_error
+from .executor import PERMISSION_FAILURE_MESSAGE
 from .schemas import AgentError, AgentModel, ToolCall, ToolOutcome
 from .feed_candidates import FeedReview
 from .outputs import _json_object, _reject_constant
@@ -19,6 +21,26 @@ MAX_FEED_SEARCHES_PER_ROUND = 3
 MAX_FEED_SEARCHES = 9
 MAX_FEED_ARGUMENT_RECOVERIES = 2
 MAX_FEED_RETRIEVAL = MAX_FEED_SEARCHES * FEED_SEARCH_TOP_K
+
+
+def feed_tool_choice(remaining: int, rounds_remaining: int,
+                     successful_searches: int) -> Literal["auto", "none", "required"]:
+    if remaining == 0 or rounds_remaining == 0:
+        return "none"
+    return "auto" if successful_searches else "required"
+
+
+def feed_initial_search_diagnostic(calls: list[ToolCall], successful_searches: int) -> dict[str, str] | None:
+    if not successful_searches and (not calls or any(call.name != "search_evidence" for call in calls)):
+        return dict(reason="unsupported_feed_tool" if calls else "initial_search_required",
+                    field="tool_calls", expected="initial search_evidence call")
+    return None
+
+
+def feed_search_errors_recoverable(errors: Iterable[AgentError]) -> bool:
+    # PermissionError retains tool_exception with a fixed server-owned message.
+    return not any(error.code not in ("tool_exception", "empty_result")
+                   or error.message == PERMISSION_FAILURE_MESSAGE for error in errors)
 
 
 class FeedSearchInput(AgentModel):

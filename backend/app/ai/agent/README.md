@@ -32,9 +32,10 @@ Chat Completions 호출·자동 폴백·암묵적 generation-options ContextVar�
 - `conversation.py`: Runner 실행마다 새 객체를 만든다. 출력 항목을 원래 순서대로
   한 번만 보존하고 각 원래 call_id에 function_call_output 하나를 연결한다.
   PromptBuilder는 정책과 데이터만 조립하며 Provider 이력을 합성하지 않는다.
-- `agent_loop_runner.py`: 기존 단일 Loop가 Feed/Chat의 예산·권한·Executor·Evidence·
-  최종 JSON 검증을 계속 소유한다. Feed 후보 투영은 generation snapshot에만 붙이므로
-  이전 후보 목록을 다음 요청에 중복 누적하지 않는다.
+- `agent_loop_runner.py`: 단일 Loop에서 Provider 호출, Tool 실행, 호출 순서와 결과 연결,
+  실행 예산과 deadline을 관리한다. Chat의 검색·후보 정책은 `workflows/chat_search_policy.py`,
+  Feed의 검색 조건과 오류 복구 판정은 `feed_search_policy.py`에 둔다. `FeedCandidates`가 만든
+  후보 투영은 해당 generation snapshot에만 붙인다.
 
 `PromptBuilder.build_post_tool_success_policies(frozenset[str])`는 검증·반영이 완료된 요청별
 성공 Tool 이름만 받아 정적 Workflow System 정책을 반환한다. 검색 성공(정상 0건 포함) 후
@@ -2443,7 +2444,7 @@ JSON 모드로 변환한 뒤 기존 Agent EvidencePackage로 재검증한다. Ou
 strip 동작과 같은 query.strip()이며 검색 함수에 넘기는 원문은 바꾸지 않는다. 결과 순서·중복·
 발췌·기관·연도·출처·유사도를 그대로 보존하고 추가 정렬·요약·상한 절단·출처 생성은 하지 않는다.
 정상 빈 목록만 정상 0건이며 예외·잘못된 반환형·변환 실패를 빈 목록으로 대체하지 않는다.
-변환 예외는 기존 Executor로 전파되고, Tool별 자료 유형·반환 건수 검증은 기존 Chat Runner가 담당한다.
+변환 예외는 기존 Executor로 전파된다. Chat 검색 정책이 자료 유형·반환 건수를 판정하고 Runner가 실패 결과를 기록한다.
 
 `build_chat_registry(..., guidelines_retriever=...)`는 환자 선택 유무와 무관하게 canonical
 search_guidelines를 production Tool로 등록한다. 기본값은 RagGuidelineRetriever이며 기존
