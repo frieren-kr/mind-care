@@ -1,6 +1,6 @@
 # API
 
-> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`·`chat.py`는 박주현, `users.py`는 김한슬 — 돌보는 분·돌봄 기록·검사·약·진료 입력 9개는 명석희).
+> 주소별 담당은 아래 표의 "담당" 설명을 따른다 (`papers.py`·`recommendations.py`·`chat.py`는 박주현, `users.py`는 김한슬 — 돌보는 분·돌봄 기록·검사·약·진료 입력 11개는 명석희).
 > 공통 규칙은 루트 [`AGENTS.md`](../AGENTS.md), DB 함수 계약은 [`db.md`](db.md).
 
 **인증 추가 (2026-11-02)**: 기존 계정 로그인·내 정보·로그아웃 구현 완료.
@@ -41,6 +41,8 @@
 | `PATCH /users/{user_id}/patients/{patient_id}/medications/{medication_id}` | `api/users.py` | 약 수정·복용 중단 (담당: 명석희). 보낸 칸만(`MedicationUpdate`). 중단은 `{"is_taking": false, "end_date": "오늘"}`. 주소의 환자 약이 아니면 404 | `MedicationOut` |
 | `POST /users/{user_id}/patients/{patient_id}/visits` | `api/users.py` | 진료 예약 추가 (담당: 명석희). 본문 `MedicalVisitCreate` — `visit_date` 필수, 기본 예약(`is_visited=false`). 미래 날짜를 다녀옴으로는 422 | `MedicalVisitOut` |
 | `PATCH /users/{user_id}/patients/{patient_id}/visits/{visit_id}` | `api/users.py` | 진료 수정·다녀옴 표시 (담당: 명석희). 보낸 칸만(`MedicalVisitUpdate`), 다녀온 뒤 `doctor_note`·`medication_change`·`follow_up_plan`. 주소의 환자 진료가 아니면 404 | `MedicalVisitOut` |
+| `GET /users/{user_id}/patients/{patient_id}/visits/pending` | `api/users.py` | 기록이 필요한 지난 진료 (담당: 명석희). 어제까지 날짜·미방문·건너뜀 표시 없음, 최근 날짜부터 최대 10건. 남의 환자 404 | `list[MedicalVisitOut]` |
+| `POST /users/{user_id}/patients/{patient_id}/visits/{visit_id}/skip` | `api/users.py` | 가지 않은 진료로 표시 (담당: 명석희). 본문 없음. `visit_content` 맨 앞에 `건너뜀 — 가지 않은 진료`(기존 메모는 뒤에), 이미 표시면 그대로. 다녀온 진료는 422, 주소의 환자 진료가 아니면 404 | `MedicalVisitOut` |
 | `GET /recommendations/{user_id}?patient_id=&k=5&refresh=false` | `api/recommendations.py` | **간병인(관리 환자 전체)** 기준 논문 최대 `k`편. 응답의 `mode`가 `ai`(FeedWorkflow) 또는 `search`(검색 방식, 폴백). AI 결과는 저장 기간(기본 3일) 동안 저장본을 다시 준다(`refresh=true`면 새로 만든다). `k` 1~5(기본 5), 범위를 벗어나면 422. `patient_id`는 선택 — 주면 검색 방식 응답만 그 환자로 좁힌다. 환자가 0명이어도 200. 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404 | `RecommendationResponse` |
 | `POST /chat/{user_id}` | `api/chat.py` | 챗봇 질문 1개 → 답변 + 근거. 본문 `{"message": "...", "patient_id": null}` (`message` 1~4000자, `patient_id` 선택). 없는 사용자·이 사용자의 환자가 아닌 `patient_id`는 404, 입력 오류는 422, AI를 못 쓰거나 실패하면 503. **최대 90초** 걸릴 수 있다 | `ChatResponse` |
 | `GET /chat/{user_id}/history?patient_id=&limit=20&before=` | `api/chat.py` | 저장된 챗봇 대화(질문·답변 쌍)를 **오래된 것부터 최신 순**으로. `patient_id` 없음 = 환자 미선택 대화만, 있으면 그 환자 대화만. `limit` 1~50(기본 20). `before`(시간대 필수)보다 이전 대화만 — 더 불러오기. **원문은 7일만 보관**. 토큰 없음 401, 남의 user_id 403, 남의 환자 404, 입력 오류 422, DB 오류 503 | `ChatHistoryResponse` |

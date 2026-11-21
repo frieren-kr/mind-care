@@ -236,3 +236,13 @@ export function updateVisit(
 ): Promise<MedicalVisit> {
   return request(patientPath(userId, patientId, `visits/${visitId}`), { method: 'PATCH', body: data });
 }
+
+/** 기록이 필요한 지난 진료 — GET …/visits/pending. 어제까지 날짜인데 다녀옴·건너뜀 표시가 없는 진료 (최근 날짜부터 최대 10건) */
+export function getPendingVisits(userId: string, patientId: string): Promise<MedicalVisit[]> {
+  return request(patientPath(userId, patientId, 'visits/pending'));
+}
+
+/** 가지 않은 진료로 표시 — POST …/visits/{id}/skip. 메모 맨 앞에 '건너뜀' 표시 (챗봇도 이 메모를 읽는다) */
+export function skipVisit(userId: string, patientId: string, visitId: string): Promise<MedicalVisit> {
+  return request(patientPath(userId, patientId, `visits/${visitId}/skip`), { method: 'POST' });
+}

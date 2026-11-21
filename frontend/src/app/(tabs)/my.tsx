@@ -3,7 +3,16 @@ import { SymbolView, type SymbolViewProps } from 'expo-symbols';
 import { useCallback, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Switch, View } from 'react-native';
 
-import { NAME_MAX_LENGTH, currentUserId, getUserProfile, logout, updateFeedSettings, updateUserName } from '@/api';
+import {
+  NAME_MAX_LENGTH,
+  currentUserId,
+  getPendingVisits,
+  getUserProfile,
+  logout,
+  skipVisit,
+  updateFeedSettings,
+  updateUserName,
+} from '@/api';
 import { toApiError } from '@/api/client';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Card, Chip, ErrorView, LoadingView, Screen, Select, TextField } from '@/components/ui';
@@ -124,6 +133,82 @@ function dDay(visitDate: string): string {
   return days === 0 ? '오늘' : `D-${days}`;
 }
 
+/**
+ * 지난 진료 (기록 필요): 날짜가 지났는데 다녀옴·건너뜀 표시가 없는 진료.
+ * 그대로 두면 챗봇이 매번 '미방문'으로 설명해서, 여기서 다녀왔어요(기록 화면) / 건너뛰었어요(바로 저장)로 정리한다
+ */
+function PendingVisits({ context }: { context: PatientContext }) {
+  const theme = useTheme();
+  const patientId = context.patient.id;
+  // context가 바뀌면(내 정보를 다시 불러오면 = 기록 화면에서 돌아오면) 다시 불러온다
+  const load = useCallback(() => getPendingVisits(currentUserId(), patientId), [patientId, context]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pending = useApi(load);
+  const [skipping, setSkipping] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const visits = pending.data ?? [];
+
+  const skip = async (visitId: string) => {
+    setSkipping(visitId);
+    setError(null);
+    try {
+      await skipVisit(currentUserId(), patientId, visitId);
+      pending.reload();
+    } catch (e) {
+      setError(toApiError(e).message);
+    } finally {
+      setSkipping(null);
+    }
+  };
+
+  if (visits.length === 0 && !error) return null;
+
+  return (
+    <View style={styles.recordList}>
+      <ThemedText type="smallBold">지난 진료 (기록 필요)</ThemedText>
+      <ThemedText type="small" themeColor="textSecondary">
+        다녀오셨는지 알려 주시면 챗봇이 진료 기록을 정확히 설명해요.
+      </ThemedText>
+      {visits.map((v) => (
+        <View key={v.id} style={[styles.pendingRow, { borderTopColor: theme.border }]}>
+          <ThemedText type="bold">
+            {formatDate(v.visit_date)} ({-daysFromToday(v.visit_date)}일 전)
+          </ThemedText>
+          {v.hospital_name || v.department || v.visit_reason ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              {[v.hospital_name, v.department, v.visit_reason].filter(Boolean).join(' · ')}
+            </ThemedText>
+          ) : null}
+          <View style={styles.headerRow}>
+            <View style={styles.flex}>
+              <Button
+                label="다녀왔어요"
+                variant="secondary"
+                disabled={skipping !== null}
+                onPress={() =>
+                  router.push({ pathname: '/visit/form', params: { patientId, id: v.id, visited: '1' } })
+                }
+              />
+            </View>
+            <View style={styles.flex}>
+              <Button
+                label={skipping === v.id ? '저장 중…' : '건너뛰었어요'}
+                variant="secondary"
+                disabled={skipping !== null}
+                onPress={() => skip(v.id)}
+              />
+            </View>
+          </View>
+        </View>
+      ))}
+      {error ? (
+        <ThemedText type="small" accessibilityRole="alert" style={{ color: theme.accent }}>
+          {error}
+        </ThemedText>
+      ) : null}
+    </View>
+  );
+}
+
 function PatientCard({ context, index }: { context: PatientContext; index: number }) {
   const { patient, current_medications, upcoming_visits } = context;
   const params = { patientId: patient.id };
@@ -174,6 +259,7 @@ function PatientCard({ context, index }: { context: PatientContext; index: numbe
           </ThemedText>
         ) : null}
       </View>
+      <PendingVisits context={context} />
       <View style={styles.headerRow}>
         <View style={styles.flex}>
           <Button
@@ -421,6 +507,11 @@ const styles = StyleSheet.create({
   },
   recordList: {
     gap: Spacing.one,
+  },
+  pendingRow: {
+    gap: Spacing.one,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: Spacing.two,
   },
   recordRow: {
     minHeight: MinTouch,

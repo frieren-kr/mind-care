@@ -13,12 +13,15 @@ POST  /users/{user_id}/patients/{patient_id}/medications  복용 약 추가
 PATCH /users/{user_id}/patients/{patient_id}/medications/{medication_id}  약 정보 수정·복용 중단
 POST  /users/{user_id}/patients/{patient_id}/visits       진료 예약 추가
 PATCH /users/{user_id}/patients/{patient_id}/visits/{visit_id}  진료 수정·다녀옴 표시
+GET   /users/{user_id}/patients/{patient_id}/visits/pending      지난 날짜인데 다녀옴·건너뜀 표시가 없는 진료
+POST  /users/{user_id}/patients/{patient_id}/visits/{visit_id}/skip  가지 않은 진료로 표시 (건너뜀)
 
 경로의 user_id와 로그인 사용자가 같은지 공통 의존성으로 먼저 확인한다.
 사용자 목록(user_functions.list_users)은 전체 회원 정보가 나오므로 API로 열지 않는다.
 응답에는 email / phone_number가 들어 있지 않다.
 """
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -29,7 +32,7 @@ from app.user_schemas import (
     CARE_LOG_MAX_DAYS, AssessmentCreate, AssessmentOut, CareLogCreate, CareLogList, CareLogOut, CaregiverContext,
     FeedSettingsOut, FeedSettingsUpdate, MedicalVisitCreate, MedicalVisitOut, MedicalVisitUpdate, MedicationCreate,
     MedicationOut, MedicationUpdate, PatientContext, PatientCreate, PatientIn, PatientOut, PatientUpdate,
-    UserProfileContext,
+    UserProfileContext, today,
 )
 
 # 돌봄 기록 종류. 챗봇 돌봄 기록 Tool은 patient_care만 읽는다 (간병인 자기돌봄은 caregiver_selfcare).
@@ -41,6 +44,15 @@ _USER_NOT_FOUND = "사용자를 찾을 수 없습니다."
 _PATIENT_NOT_FOUND = "환자를 찾을 수 없습니다."
 _MEDICATION_NOT_FOUND = "약 정보를 찾을 수 없습니다."
 _VISIT_NOT_FOUND = "진료 기록을 찾을 수 없습니다."
+
+# 가지 않은 진료 표시. 상태 칸이 없어서(DB 변경 없이) 기타 메모(visit_content) 맨 앞에 붙인다.
+# 챗봇 진료 Tool이 visit_content를 그대로 읽으므로 "건너뛴 진료"로 설명할 수 있다. is_visited는 false 그대로.
+VISIT_SKIPPED_PREFIX = "건너뜀 — 가지 않은 진료"
+PENDING_VISITS_LIMIT = 10
+
+
+def _is_skipped(visit_content: Optional[str]) -> bool:
+    return bool(visit_content) and visit_content.startswith(VISIT_SKIPPED_PREFIX)
 
 
 def _not_found(detail: str) -> dict:
@@ -314,6 +326,49 @@ def update_visit(user_id: UUID, patient_id: UUID, visit_id: UUID, data: MedicalV
     if current is None or current.patient_id != patient_id:
         raise HTTPException(status_code=404, detail=_VISIT_NOT_FOUND)
     visit = _save(user_functions.update_medical_visit, visit_id, data)
+    if visit is None:
+        raise HTTPException(status_code=404, detail=_VISIT_NOT_FOUND)
+    return visit
+
+
+@router.get(
+    "/users/{user_id}/patients/{patient_id}/visits/pending",
+    response_model=list[MedicalVisitOut],
+    summary="기록이 필요한 지난 진료",
+    responses=_not_found(_PATIENT_NOT_FOUND),
+)
+def list_pending_visits(user_id: UUID, patient_id: UUID) -> list[MedicalVisitOut]:
+    """오늘(한국 시간) 이전 날짜인데 다녀옴(is_visited)도 건너뜀 표시도 없는 진료. 최근 날짜부터 최대 10건.
+
+    /feed의 upcoming_visits(오늘 이후)·recent_visits(다녀옴)에 들어가지 않아 앱에서 고칠 수 없던 기록이다.
+    """
+    _require_patient(user_id, patient_id)
+    yesterday = today() - timedelta(days=1)
+    visits = user_functions.list_medical_visits(patient_id, is_visited=False, end_date=yesterday, limit=50)
+    return [v for v in visits if not _is_skipped(v.visit_content)][:PENDING_VISITS_LIMIT]
+
+
+@router.post(
+    "/users/{user_id}/patients/{patient_id}/visits/{visit_id}/skip",
+    response_model=MedicalVisitOut,
+    summary="가지 않은 진료로 표시",
+    responses=_not_found(_VISIT_NOT_FOUND),
+)
+def skip_visit(user_id: UUID, patient_id: UUID, visit_id: UUID) -> MedicalVisitOut:
+    """기타 메모 맨 앞에 '건너뜀' 표시를 붙인다 (기존 메모는 뒤에 남긴다). 이미 표시돼 있으면 그대로 돌려준다.
+
+    다녀온 것으로 등록된 진료는 422 (다녀옴을 되돌리려면 PATCH로 is_visited=false).
+    """
+    _require_patient(user_id, patient_id)
+    current = user_functions.get_medical_visit(visit_id)
+    if current is None or current.patient_id != patient_id:
+        raise HTTPException(status_code=404, detail=_VISIT_NOT_FOUND)
+    if current.is_visited:
+        raise HTTPException(status_code=422, detail="다녀온 것으로 등록된 진료는 건너뜀으로 바꿀 수 없습니다.")
+    if _is_skipped(current.visit_content):
+        return current
+    note = f"{VISIT_SKIPPED_PREFIX}\n{current.visit_content}" if current.visit_content else VISIT_SKIPPED_PREFIX
+    visit = _save(user_functions.update_medical_visit, visit_id, {"visit_content": note})
     if visit is None:
         raise HTTPException(status_code=404, detail=_VISIT_NOT_FOUND)
     return visit

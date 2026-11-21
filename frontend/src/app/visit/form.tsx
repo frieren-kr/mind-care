@@ -2,7 +2,7 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
-import { createVisit, currentUserId, getUserProfile, updateVisit } from '@/api';
+import { createVisit, currentUserId, getPendingVisits, getUserProfile, updateVisit } from '@/api';
 import { toApiError } from '@/api/client';
 import { DateFields, toDateParts } from '@/components/date-fields';
 import { ThemedText } from '@/components/themed-text';
@@ -18,13 +18,22 @@ const DEPARTMENTS = ['신경과', '정신건강의학과', '신경외과', '가�
 /** 비운 칸은 null로 (수정할 때 지운 값도 서버에서 지워지게) */
 const text = (value: string) => value.trim() || null;
 
-function VisitForm({ patientId, initial }: { patientId: string; initial?: MedicalVisit }) {
+function VisitForm({
+  patientId,
+  initial,
+  markVisited = false,
+}: {
+  patientId: string;
+  initial?: MedicalVisit;
+  /** 내 정보 '지난 진료'의 다녀왔어요로 들어오면 다녀옴 체크를 켠 채로 연다 */
+  markVisited?: boolean;
+}) {
   const theme = useTheme();
   const [date, setDate] = useState(toDateParts(initial?.visit_date));
   const [hospital, setHospital] = useState(initial?.hospital_name ?? '');
   const [department, setDepartment] = useState(initial?.department ?? '');
   const [reason, setReason] = useState(initial?.visit_reason ?? '');
-  const [visited, setVisited] = useState(initial?.is_visited ?? false);
+  const [visited, setVisited] = useState(markVisited || (initial?.is_visited ?? false));
   const [doctorNote, setDoctorNote] = useState(initial?.doctor_note ?? '');
   const [medicationChange, setMedicationChange] = useState(initial?.medication_change ?? '');
   const [followUp, setFollowUp] = useState(initial?.follow_up_plan ?? '');
@@ -139,12 +148,20 @@ function VisitForm({ patientId, initial }: { patientId: string; initial?: Medica
 
 /** 진료 예약 추가(id 없음) / 수정·다녀옴 표시(id 있음). patientId는 필수 */
 export default function VisitFormScreen() {
-  const { patientId, id } = useLocalSearchParams<{ patientId: string; id?: string }>();
+  const { patientId, id, visited } = useLocalSearchParams<{ patientId: string; id?: string; visited?: string }>();
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const profile = useApi(loadProfile);
+  // 지난 날짜의 미방문 진료는 /feed에 없어서 따로 불러온다 (내 정보 '지난 진료'에서 들어온 경우)
+  const loadPending = useCallback(
+    () => (patientId && id ? getPendingVisits(currentUserId(), patientId) : Promise.resolve([])),
+    [patientId, id],
+  );
+  const pending = useApi(loadPending);
   const context = profile.data?.patients.find(({ patient }) => patient.id === patientId);
   const existing = id
-    ? [...(context?.upcoming_visits ?? []), ...(context?.recent_visits ?? [])].find((v) => v.id === id)
+    ? [...(context?.upcoming_visits ?? []), ...(context?.recent_visits ?? []), ...(pending.data ?? [])].find(
+        (v) => v.id === id,
+      )
     : undefined;
   const who = context?.patient.name;
   const title = id ? '진료 기록' : '진료 예약 추가';
@@ -154,8 +171,8 @@ export default function VisitFormScreen() {
       <Screen>
         <Stack.Screen options={{ title }} />
         {profile.error ? <ErrorView message={profile.error.message} onRetry={() => profile.reload()} /> : null}
-        {profile.loading ? <LoadingView /> : null}
-        {profile.data || !patientId ? (
+        {profile.loading || pending.loading ? <LoadingView /> : null}
+        {(profile.data && !pending.loading) || !patientId ? (
           <ThemedText themeColor="textSecondary">이 진료 기록을 찾을 수 없어요.</ThemedText>
         ) : null}
       </Screen>
@@ -165,7 +182,7 @@ export default function VisitFormScreen() {
   return (
     <>
       <Stack.Screen options={{ title: who ? `${who} · ${title}` : title }} />
-      <VisitForm key={existing?.id ?? 'new'} patientId={patientId} initial={existing} />
+      <VisitForm key={existing?.id ?? 'new'} patientId={patientId} initial={existing} markVisited={visited === '1'} />
     </>
   );
 }

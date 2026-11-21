@@ -176,6 +176,57 @@ class PatientRecordsApiTests(unittest.TestCase):
         self.assertEqual(self.client.patch(f"{self.base}/visits/{uuid4()}", json={"doctor_note": "메모"}).status_code,
                          404)
 
+    # ---------- 지난 진료 (기록 필요 / 건너뜀) ----------
+
+    def _visits_of_patient(self, patient_id, is_visited=None, start_date=None, end_date=None, limit=100):
+        """list_medical_visits 대신: self.rows의 진료를 같은 조건·순서(최근 날짜부터)로"""
+        rows = [r for r in self.rows.values() if "visit_date" in r and r["patient_id"] == patient_id
+                and (is_visited is None or r["is_visited"] is is_visited)
+                and (end_date is None or r["visit_date"] <= end_date)
+                and (start_date is None or r["visit_date"] >= start_date)]
+        rows.sort(key=lambda r: r["visit_date"], reverse=True)
+        return [user_functions.MedicalVisitOut.model_validate(r) for r in rows[:limit]]
+
+    def _visit(self, days, **fields):
+        base = dict.fromkeys(("hospital_name", "department", "visit_reason", "diagnosis", "treatment_content",
+                              "test_summary", "medication_change", "doctor_note", "follow_up_plan", "visit_content"))
+        return self._store("medical_visits", patient_id=self.patient_id, visit_date=self.today + timedelta(days=days),
+                           **{"is_visited": False, **base, **fields})
+
+    def test_pending_lists_only_past_unmarked_visits(self):
+        visited = self._visit(-5, is_visited=True)
+        skipped = self._visit(-3, visit_content="건너뜀 — 가지 않은 진료")
+        older = self._visit(-20, hospital_name="옛 병원")
+        with patch.object(user_functions, "list_medical_visits", side_effect=self._visits_of_patient):
+            response = self.client.get(f"{self.base}/visits/pending")
+        self.assertEqual(response.status_code, 200)
+        ids = [v["id"] for v in response.json()]
+        # 어제 날짜(past_visit)와 20일 전(older)만, 최근 날짜부터. 오늘 이후·다녀옴·건너뜀은 빠진다
+        self.assertEqual(ids, [str(self.past_visit["id"]), str(older["id"])])
+        self.assertNotIn(str(visited["id"]), ids)
+        self.assertNotIn(str(skipped["id"]), ids)
+        self.assertNotIn(str(self.visit["id"]), ids)
+
+    def test_skip_marks_memo_and_keeps_existing_note(self):
+        visit = self._visit(-2, visit_content="보호자 메모")
+        response = self.client.post(f"{self.base}/visits/{visit['id']}/skip")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["is_visited"])
+        self.assertEqual(response.json()["visit_content"], "건너뜀 — 가지 않은 진료\n보호자 메모")
+        # 두 번 눌러도 표시가 겹치지 않는다
+        again = self.client.post(f"{self.base}/visits/{visit['id']}/skip")
+        self.assertEqual(again.json()["visit_content"], "건너뜀 — 가지 않은 진료\n보호자 메모")
+        self.assertEqual(self.update.call_count, 1)
+
+    def test_skip_rejects_visited_and_other_patients(self):
+        visited = self._visit(-2, is_visited=True)
+        self.assertEqual(self.client.post(f"{self.base}/visits/{visited['id']}/skip").status_code, 422)
+        other = self._visit(-1)
+        other["patient_id"] = self.other_patient_id
+        self.assertEqual(self.client.post(f"{self.base}/visits/{other['id']}/skip").status_code, 404)
+        self.assertEqual(self.client.get(f"/users/{self.user_id}/patients/{uuid4()}/visits/pending").status_code, 404)
+        self.update.assert_not_called()
+
     # ---------- 공통 ----------
 
     def test_not_my_patient_is_404_everywhere(self):
