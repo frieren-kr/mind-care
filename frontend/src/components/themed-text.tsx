@@ -17,10 +17,13 @@ export type ThemedTextProps = TextProps & {
 const WORD_JOINER = '⁠';
 const HANGUL_PAIR = /([가-힣])(?=\S)|(\S)(?=[가-힣])/gu;
 
+/** 문자열 하나에 어절 줄바꿈 처리 (ThemedText 안에 직접 넣는 중첩 Text용) */
+export function keepKoreanWordsText(text: string): string {
+  return text.replace(HANGUL_PAIR, `$1$2${WORD_JOINER}`);
+}
+
 function keepKoreanWords(children: ReactNode): ReactNode {
-  return Children.map(children, (child) =>
-    typeof child === 'string' ? child.replace(HANGUL_PAIR, `$1$2${WORD_JOINER}`) : child,
-  );
+  return Children.map(children, (child) => (typeof child === 'string' ? keepKoreanWordsText(child) : child));
 }
 
 export function ThemedText({ style, type = 'default', themeColor, children, ...rest }: ThemedTextProps) {

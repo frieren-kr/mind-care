@@ -5,6 +5,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'reac
 
 import { currentUserId, getChatHistory, getUserProfile, sendChatMessage } from '@/api';
 import { toApiError } from '@/api/client';
+import { Markdown } from '@/components/markdown';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Chip, Disclaimer, EvidenceBadge, SectionLabel, TextField } from '@/components/ui';
 import { studyTypeLabel } from '@/constants/labels';
@@ -113,7 +114,12 @@ function Bubble({ message, onRetry }: { message: ChatMessage; onRetry?: () => vo
           ? [styles.user, { backgroundColor: theme.primary }]
           : [styles.assistant, { backgroundColor: theme.backgroundElement, borderColor: theme.border }],
       ]}>
-      <ThemedText style={user ? { color: theme.onPrimary } : undefined}>{message.text}</ThemedText>
+      {/* 챗봇 답변은 마크다운(굵게·목록·표 등)으로, 내 질문·오류 안내는 쓴 그대로 */}
+      {user || message.failed ? (
+        <ThemedText style={user ? { color: theme.onPrimary } : undefined}>{message.text}</ThemedText>
+      ) : (
+        <Markdown text={message.text} />
+      )}
       {!user && !message.failed && sources.length > 0 ? (
         <View style={styles.sources}>
           <SectionLabel>근거 자료</SectionLabel>
