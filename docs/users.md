@@ -43,7 +43,11 @@
   `log_type`은 서버가 `patient_care`로 정한다 — 챗봇 돌봄 기록 Tool이 읽는 종류. 시각을 비우면 서버 시각으로 저장하고 응답에도 그 값.
   저장은 기존 `feed_read.save_care_log()`. 이 간병인의 환자가 아니면 404.
 - `GET …/care-logs?days=14&limit=30` — 챗봇 Tool과 같은 `get_recent_care_logs()`로 최신순 조회. `total_count`는 자르기 전 건수.
-- 앱: 홈 바로가기 `돌봄 기록` → `frontend/src/app/care.tsx` (내용 + 언제 + 기분, 아래에 최근 14일 목록).
+- 앱: 홈 바로가기 `돌봄 기록` → `frontend/src/app/care.tsx`.
+  - (11/23) 맨 위 달력(`components/month-calendar.tsx`): 기록 있는 날 점, 날짜를 누르면 그날 기록 목록 + 그날 기록 남기기.
+    '2026년 11월 ▾'를 누르면 연도·월을 바로 고른다 (작년 1월~이번 달). 미래는 못 고르고, 90일보다 지난 날은 보기만.
+  - 시간은 오늘이면 지금·아침·낮·저녁·밤(지난 때만), 지난 날이면 아침(8시)·낮(13시)·저녁(19시)·밤(22시).
+  - 달력 한 달 치는 `GET …/care-logs?start=&end=`로 불러온다.
 - 검증: `python -m unittest tests.test_care_logs_api`.
 
 ## 앱 검사·약·진료 입력 API와 오늘의 돌봄 (2026-11-18, 명석희)

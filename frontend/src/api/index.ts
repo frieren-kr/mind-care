@@ -179,16 +179,17 @@ export function updateFeedSettings(userId: string, feedRefreshDays: number): Pro
 }
 
 /**
- * 최근 돌봄 기록 — GET /users/{user_id}/patients/{patient_id}/care-logs?days=&limit=
- * 챗봇 돌봄 기록 Tool과 같은 조회(기본 14일). 최신순, 최대 30건
+ * 돌봄 기록 — GET /users/{user_id}/patients/{patient_id}/care-logs
+ * - days·limit: 최근 며칠 (챗봇 돌봄 기록 Tool과 같은 조회, 기본 14일), 최신순 최대 30건
+ * - start·end ('YYYY-MM-DD', 한국 날짜, 42일 이내): 그 기간 기록 전부 (달력용, 최대 300건)
  */
 export function getCareLogs(
   userId: string,
   patientId: string,
-  options: { days?: number; limit?: number } = {},
+  options: { days?: number; limit?: number; start?: string; end?: string } = {},
 ): Promise<CareLogList> {
   return request(`/users/${userId}/patients/${patientId}/care-logs`, {
-    query: { days: options.days, limit: options.limit },
+    query: { days: options.days, limit: options.limit, start: options.start, end: options.end },
   });
 }
 

@@ -121,6 +121,45 @@ class CareLogApiTests(unittest.TestCase):
                 self.assertEqual(self.client.get(self.url, params=params).status_code, 422)
         self.recent.assert_not_called()
 
+    # ---------- 기간 조회 (달력) ----------
+
+    def _fake_db(self, logs):
+        """get_recent_care_logs 대신: [start_at, end_at), 최신순, limit건 + 자르기 전 건수"""
+        def recent(*, user_id, patient_id, start_at, end_at, limit):
+            hits = sorted((l for l in logs if start_at <= l.logged_at < end_at), key=lambda l: l.logged_at, reverse=True)
+            return FeedReadCollection[FeedReadCareLog](items=hits[:limit], total_count=len(hits))
+        self.recent.side_effect = recent
+
+    def _log(self, at, content):
+        return FeedReadCareLog(user_id=self.user_id, patient_id=self.patient_id, log_type="patient_care",
+                               content=content, mood_tag=None, logged_at=at)
+
+    def test_range_returns_every_log_in_kst_dates_across_pages(self):
+        kst = timezone(timedelta(hours=9))
+        inside = [self._log(datetime(2026, 11, 1, 8, 0, tzinfo=kst) + timedelta(hours=7 * i), f"기록 {i}")
+                  for i in range(75)]  # 11/1 08:00부터 약 22일, 한 번에 30건씩 3번 나눠 불러야 한다
+        same_time = [self._log(datetime(2026, 11, 20, 9, 0, tzinfo=kst), f"같은 시각 {i}") for i in range(2)]
+        outside = [self._log(datetime(2026, 10, 31, 23, 59, tzinfo=kst), "전달 마지막 밤"),
+                   self._log(datetime(2026, 12, 1, 0, 0, tzinfo=kst), "다음 달 첫 시각")]
+        self._fake_db(inside + same_time + outside)
+        response = self.client.get(self.url, params={"start": "2026-11-01", "end": "2026-11-30"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        contents = [i["content"] for i in body["items"]]
+        self.assertEqual(len(contents), 77)
+        self.assertEqual(len(set(contents)), 77)  # 겹쳐 부른 경계에서 중복 없음
+        self.assertNotIn("전달 마지막 밤", contents)
+        self.assertNotIn("다음 달 첫 시각", contents)
+        self.assertEqual(body["total_count"], 77)
+        self.assertGreaterEqual(self.recent.call_count, 3)
+
+    def test_range_requires_both_dates_and_limited_span(self):
+        for params in ({"start": "2026-11-01"}, {"end": "2026-11-30"}, {"start": "2026-11-30", "end": "2026-11-01"},
+                       {"start": "2026-10-01", "end": "2026-11-30"}, {"start": "2026-13-01", "end": "2026-11-30"}):
+            with self.subTest(params=params):
+                self.assertEqual(self.client.get(self.url, params=params).status_code, 422)
+        self.recent.assert_not_called()
+
     # ---------- 인증 ----------
 
     def test_requires_login(self):

@@ -34,7 +34,7 @@
 | `PATCH /users/{user_id}/feed-settings` | `api/users.py` | JSON `{"feed_refresh_days": 5}` 저장. 정수 1~7만 허용, 잘못된 입력은 422, 없는 사용자는 404 | `FeedSettingsOut` |
 | `POST /users/{user_id}/patients` | `api/users.py` | 돌보는 분 추가 (담당: 명석희). 본문 `PatientCreate`(모두 선택), 담당 간병인 = 주소의 로그인 본인. 본문에 `caregiver_id`·모르는 칸·잘못된 단계·미래 진단일은 422. 성공 201 | `PatientOut` |
 | `PATCH /users/{user_id}/patients/{patient_id}` | `api/users.py` | 돌보는 분 수정 (담당: 명석희). 보낸 칸만 바뀜(`PatientUpdate`). 이 간병인의 환자가 아니면 404, 입력 오류 422. 수정 후 다음 피드 요청 때 피드 재생성 | `PatientOut` |
-| `GET /users/{user_id}/patients/{patient_id}/care-logs?days=14&limit=30` | `api/users.py` | 최근 돌봄 기록 (담당: 명석희). `days` 1~90(기본 14), `limit` 1~30(기본 30). 챗봇 Tool과 같은 `get_recent_care_logs`로 최신순 조회, 남의 환자 404 | `CareLogList` |
+| `GET /users/{user_id}/patients/{patient_id}/care-logs?days=14&limit=30` 또는 `?start=&end=` | `api/users.py` | 돌봄 기록 (담당: 명석희). 기본은 최근 `days`(1~90, 기본 14)일·`limit`(1~30)건 — 챗봇 Tool과 같은 `get_recent_care_logs`로 최신순. `start`·`end`(한국 날짜, 42일 이내)를 주면 그 기간 기록 전부(달력용, 최대 300건 — 조회 함수를 30건씩 나눠 부름). 둘 중 하나만·순서 거꾸로·기간 초과는 422, 남의 환자 404 | `CareLogList` |
 | `POST /users/{user_id}/patients/{patient_id}/care-logs` | `api/users.py` | 돌봄 기록 추가 (담당: 명석희). 본문 `CareLogCreate`(내용 1~1000자, 기분 6종 선택, 시각 선택·미래/90일 초과 불가). 종류는 `patient_care` 고정. 성공 201, 남의 환자 404 | `CareLogOut` |
 | `POST /users/{user_id}/patients/{patient_id}/assessments` | `api/users.py` | 검사 결과 추가 (담당: 명석희). 본문 `AssessmentCreate` — `assessment_type`·`assessed_at` 필수, 점수는 검사별 범위(`ASSESSMENT_TYPES`). 앱 자가점검은 `KDSQ-C`. 성공 201, 남의 환자 404, 입력 오류 422 | `AssessmentOut` |
 | `POST /users/{user_id}/patients/{patient_id}/medications` | `api/users.py` | 복용 약 추가 (담당: 명석희). 본문 `MedicationCreate` — `drug_name` 필수. 성공 201 | `MedicationOut` |

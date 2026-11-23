@@ -20,7 +20,7 @@ POST  /users/{user_id}/patients/{patient_id}/visits/{visit_id}/skip  가지 않�
 사용자 목록(user_functions.list_users)은 전체 회원 정보가 나오므로 API로 열지 않는다.
 응답에는 email / phone_number가 들어 있지 않다.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -32,11 +32,14 @@ from app.user_schemas import (
     CARE_LOG_MAX_DAYS, AssessmentCreate, AssessmentOut, CareLogCreate, CareLogList, CareLogOut, CaregiverContext,
     FeedSettingsOut, FeedSettingsUpdate, MedicalVisitCreate, MedicalVisitOut, MedicalVisitUpdate, MedicationCreate,
     MedicationOut, MedicationUpdate, PatientContext, PatientCreate, PatientIn, PatientOut, PatientUpdate,
-    UserProfileContext, today,
+    APP_TIMEZONE, UserProfileContext, today,
 )
 
 # 돌봄 기록 종류. 챗봇 돌봄 기록 Tool은 patient_care만 읽는다 (간병인 자기돌봄은 caregiver_selfcare).
 CARE_LOG_TYPE = "patient_care"
+# 달력 한 화면(6주)까지 한 번에. 조회 함수가 한 번에 30건까지라 나눠 부르고, 너무 많으면 이 건수에서 자른다
+CARE_LOG_RANGE_MAX_DAYS = 42
+CARE_LOG_RANGE_MAX_ITEMS = 300
 
 router = APIRouter(tags=["feed"], dependencies=[Depends(require_user_access)])
 
@@ -189,11 +192,17 @@ def list_care_logs(
     patient_id: UUID,
     days: int = Query(14, ge=1, le=CARE_LOG_MAX_DAYS, description="최근 며칠 (1~90, 기본 14 — 챗봇과 같음)"),
     limit: int = Query(30, ge=1, le=30, description="최대 건수 (1~30)"),
+    start: Optional[date] = Query(None, description="기간 조회 시작일 (한국 날짜, 포함). end와 함께 — 달력용"),
+    end: Optional[date] = Query(None, description=f"기간 조회 끝날 (포함). start~end는 {CARE_LOG_RANGE_MAX_DAYS}일 이내"),
 ) -> CareLogList:
     """이 환자의 patient_care 기록을 최신순으로. 챗봇 돌봄 기록 Tool과 같은 함수(get_recent_care_logs)로 읽는다.
 
-    이 간병인의 환자가 아니면 404. total_count는 limit으로 자르기 전 건수다.
+    - 기본: 최근 days일, 최대 limit건. total_count는 limit으로 자르기 전 건수다.
+    - start·end를 주면 그 기간(한국 날짜)의 기록을 모두 (최대 300건, 넘으면 total_count가 더 크다). days·limit는 무시.
+    이 간병인의 환자가 아니면 404.
     """
+    if start is not None or end is not None:
+        return _care_logs_in_range(user_id, patient_id, start, end)
     now = datetime.now(timezone.utc)
     try:
         logs = user_functions.get_recent_care_logs(
@@ -206,6 +215,42 @@ def list_care_logs(
     items = [CareLogOut(patient_id=log.patient_id, content=log.content, mood_tag=log.mood_tag,
                         logged_at=log.logged_at) for log in logs.items]
     return CareLogList(items=items, total_count=logs.total_count)
+
+
+def _care_logs_in_range(user_id: UUID, patient_id: UUID, start: Optional[date], end: Optional[date]) -> CareLogList:
+    """달력용 기간 조회. get_recent_care_logs가 한 번에 30건까지라 끝 시각을 앞으로 옮기며 나눠 부른다."""
+    if start is None or end is None:
+        raise HTTPException(status_code=422, detail="start와 end를 함께 보내 주세요.")
+    if end < start:
+        raise HTTPException(status_code=422, detail="end는 start보다 앞일 수 없습니다.")
+    if (end - start).days + 1 > CARE_LOG_RANGE_MAX_DAYS:
+        raise HTTPException(status_code=422, detail=f"기간은 {CARE_LOG_RANGE_MAX_DAYS}일 이내로 조회해 주세요.")
+    start_at = datetime.combine(start, time.min, APP_TIMEZONE)
+    cursor = datetime.combine(end + timedelta(days=1), time.min, APP_TIMEZONE)
+    items: list[CareLogOut] = []
+    seen: set[tuple] = set()
+    total = 0
+    while len(items) < CARE_LOG_RANGE_MAX_ITEMS and cursor > start_at:
+        try:
+            page = user_functions.get_recent_care_logs(
+                user_id=user_id, patient_id=patient_id, start_at=start_at, end_at=cursor, limit=30,
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail=_PATIENT_NOT_FOUND) from None
+        total = max(total, page.total_count)
+        new = 0
+        for log in page.items:
+            key = (log.logged_at, log.content, log.mood_tag)
+            if key not in seen:
+                seen.add(key)
+                new += 1
+                items.append(CareLogOut(patient_id=log.patient_id, content=log.content, mood_tag=log.mood_tag,
+                                        logged_at=log.logged_at))
+        if len(page.items) < 30 or new == 0:
+            break
+        # 다음 묶음: 이번 묶음의 가장 이른 시각까지 (같은 시각 기록이 잘리지 않게 1마이크로초 겹치고 위에서 중복 제거)
+        cursor = page.items[-1].logged_at + timedelta(microseconds=1)
+    return CareLogList(items=items[:CARE_LOG_RANGE_MAX_ITEMS], total_count=max(total, len(items)))
 
 
 @router.post(
