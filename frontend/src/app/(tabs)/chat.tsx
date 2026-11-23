@@ -1,11 +1,13 @@
-import { useLocalSearchParams } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useLocalSearchParams, useNavigation } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { currentUserId, getChatHistory, getUserProfile, sendChatMessage } from '@/api';
 import { toApiError } from '@/api/client';
 import { Markdown } from '@/components/markdown';
+import { PatientPickerButton, PatientPickerSheet, type PickerOption } from '@/components/patient-picker';
 import { ThemedText } from '@/components/themed-text';
 import { Button, Chip, Disclaimer, EvidenceBadge, SectionLabel, TextField } from '@/components/ui';
 import { studyTypeLabel } from '@/constants/labels';
@@ -52,6 +54,8 @@ const CHAT_DISCLAIMER = '답변은 수집된 논문과 공식 지침을 바탕�
 
 /** 환자를 고르지 않은 대화의 키. 서버도 patient_id 없음끼리 대화를 이어 간다 (chat_history.py) */
 const NO_PATIENT = 'none';
+/** 마지막으로 고른 질문 대상 (사용자별, 이 기기에만). 값은 환자 id 또는 NO_PATIENT */
+const CHAT_PATIENT_KEY = 'mindcare.chatPatient';
 
 let messageSeq = 0;
 const nextId = (prefix: string) => `${prefix}-${Date.now()}-${messageSeq++}`;
@@ -142,15 +146,48 @@ function Bubble({ message, onRetry }: { message: ChatMessage; onRetry?: () => vo
 export default function ChatScreen() {
   const theme = useTheme();
   const scrollRef = useRef<ScrollView>(null);
+  const navigation = useNavigation();
   // 어느 분에 대한 질문인지. 고르면 서버가 그분의 기록(프로필·복약·진료·검사·안전사고·돌봄 기록) Tool을 붙인다.
-  // undefined = 아직 안 고름 → 돌보는 분이 1명이면 그분, 아니면 '기본'(특정 환자 없이)
+  // 고르는 곳은 머리글 오른쪽 '시어머니 ▾' 버튼. 정하는 순서: 이번에 고른 분 → 지난번에 고른 분(이 기기) → 첫 번째 분 → 기본
   const loadProfile = useCallback(() => getUserProfile(currentUserId()), []);
   const { data: profile, error: profileError } = useApi(loadProfile);
-  // 돌보는 분 목록을 받아야 기본 대상(1명이면 그분)이 정해진다. 그 전에 지난 대화를 부르면 엉뚱한 대화를 한 번 더 부른다
-  const profileSettled = profile !== null || profileError !== null;
   const patients = profile?.patients ?? [];
   const [chosenPatient, setChosenPatient] = useState<string | null | undefined>(undefined);
-  const patientId = chosenPatient !== undefined ? chosenPatient : patients.length === 1 ? patients[0].patient.id : null;
+  const [savedPatient, setSavedPatient] = useState<string | null | undefined>(undefined);
+  const [savedLoaded, setSavedLoaded] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const storageKey = `${CHAT_PATIENT_KEY}.${currentUserId()}`;
+  useEffect(() => {
+    AsyncStorage.getItem(storageKey)
+      .then((v) => v !== null && setSavedPatient(v === NO_PATIENT ? null : v))
+      .catch(() => {})
+      .finally(() => setSavedLoaded(true));
+  }, [storageKey]);
+  // 지난번에 고른 분이 그사이 목록에서 빠졌으면 무시한다
+  const isListed = (id: string | null | undefined) =>
+    id === null || (id !== undefined && patients.some(({ patient }) => patient.id === id));
+  const patientId =
+    chosenPatient !== undefined
+      ? chosenPatient
+      : isListed(savedPatient)
+        ? (savedPatient as string | null)
+        : (patients[0]?.patient.id ?? null);
+  // 돌보는 분 목록과 지난번 선택을 받아야 대상이 정해진다. 그 전에 지난 대화를 부르면 엉뚱한 대화를 한 번 더 부른다
+  const profileSettled = (profile !== null || profileError !== null) && savedLoaded;
+  const choosePatient = (id: string | null) => {
+    setChosenPatient(id);
+    setPickerOpen(false);
+    AsyncStorage.setItem(storageKey, id ?? NO_PATIENT).catch(() => {});
+  };
+  const pickerOptions: PickerOption[] = [
+    ...patients.map(({ patient }, index) => ({
+      id: patient.id,
+      label: patient.name || `환자 ${index + 1}`,
+      caption: [patient.dementia_stage, '증상·복약·진료·돌봄 기록을 참고해요'].filter(Boolean).join(' · '),
+    })),
+    { id: null, label: '기본', caption: '특정 분 없이 일반적인 질문' },
+  ];
+  const targetLabel = pickerOptions.find((o) => o.id === patientId)?.label ?? '기본';
 
   // 서버가 대화를 환자별로 따로 저장·기억하므로 화면도 환자별로 따로 보여 준다
   const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({});
@@ -244,6 +281,16 @@ export default function ChatScreen() {
     send(lastUser.text);
   };
 
+  // 머리글 오른쪽에 질문 대상 버튼 (돌보는 분이 없으면 고를 것이 없어 숨긴다). 답변을 기다리는 동안은 못 바꾼다
+  const hasPatients = patients.length > 0;
+  useLayoutEffect(() => {
+    navigation.setOptions({
+      headerRight: hasPatients
+        ? () => <PatientPickerButton label={targetLabel} onPress={() => setPickerOpen(true)} disabled={pending} />
+        : undefined,
+    });
+  }, [navigation, hasPatients, targetLabel, pending]);
+
   // 지난 대화를 불러오는 중에는 첫 안내를 띄우지 않는다 (불러온 뒤 대화가 있으면 사라져서 깜빡인다)
   const empty = messages.length === 0 && historyState?.status !== 'loading';
 
@@ -298,7 +345,8 @@ export default function ChatScreen() {
             </ThemedText>
             {patients.length > 0 ? (
               <ThemedText themeColor="textSecondary">
-                아래에서 돌보는 분을 고르면 그분의 증상·복약·진료 기록을 참고해서 답해요.
+                지금은 {targetLabel === '기본' ? '특정 분 없이' : `${targetLabel}에 대해`} 답해요. 오른쪽 위 ‘{targetLabel} ▾’를
+                누르면 바꿀 수 있어요.
               </ThemedText>
             ) : null}
           </View>
@@ -340,24 +388,6 @@ export default function ChatScreen() {
       </ScrollView>
 
       <View style={[styles.composer, { backgroundColor: theme.background, borderColor: theme.rule }]}>
-        {patients.length > 0 ? (
-          <View style={styles.target}>
-            <ThemedText type="smallBold" themeColor="textSecondary">
-              누구에 대해 묻나요?
-            </ThemedText>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.targetChips}>
-              {patients.map(({ patient }, index) => (
-                <Chip
-                  key={patient.id}
-                  label={patient.name || `환자 ${index + 1}`}
-                  selected={patientId === patient.id}
-                  onPress={() => !pending && setChosenPatient(patient.id)}
-                />
-              ))}
-              <Chip label="기본" selected={patientId === null} onPress={() => !pending && setChosenPatient(null)} />
-            </ScrollView>
-          </View>
-        ) : null}
         {empty ? (
           <View style={styles.suggestions}>
             {suggestedQuestions.map((s) => (
@@ -380,6 +410,13 @@ export default function ChatScreen() {
           </View>
         </View>
       </View>
+      <PatientPickerSheet
+        visible={pickerOpen}
+        options={pickerOptions}
+        selected={patientId}
+        onSelect={choosePatient}
+        onClose={() => setPickerOpen(false)}
+      />
     </View>
   );
 }
@@ -459,12 +496,6 @@ const styles = StyleSheet.create({
   composer: {
     borderTopWidth: 1,
     padding: Spacing.two,
-    gap: Spacing.two,
-  },
-  target: {
-    gap: Spacing.one,
-  },
-  targetChips: {
     gap: Spacing.two,
   },
   suggestions: {
