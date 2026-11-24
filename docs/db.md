@@ -336,7 +336,7 @@ candidates = [c for c in candidates if c.pmid not in seen]
   | 안전 | `event_date` 최근 180일 **AND** `has_fall`/`has_wandering`/`has_missing` 중 하나라도 true | `event_date DESC` | 환자당 50 |
   | 복약 | 복용 중(`is_taking = true`) **또는** 최근 중단(`is_taking = false` AND `end_date` ∈ `[reference_date - 90일, reference_date]`) | `is_taking DESC, start_date DESC NULLS LAST, created_at DESC, id` | 환자당 30 |
   | 방문 | 지난 진료(`is_visited = true` AND `visit_date` ∈ `[reference_date - 365일, reference_date]`) **또는** 예정 진료(`is_visited = false` AND `visit_date` ∈ `[reference_date, reference_date + 90일]`) | `visit_date DESC, created_at DESC, id` | 환자당 20 |
-  | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** (`patient_id IS NULL` **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
+  | 돌봄 기록 | `user_id` + `logged_at` ∈ `[recent_period_start, recent_period_end)` **AND** ((`patient_id IS NULL` AND `log_type <> 'patient_care'`) **또는** 현재 관리 환자) | `logged_at DESC, id` | 200 |
   | 월간 요약 | `period_end < reference_date` **AND** `generated_at <= reference_time` | `period_end DESC, generated_at DESC, id` | 1건 (없으면 `None`) |
   | 최근 추천 (`recently_recommended`, 2026-10-26) | 이 사용자의 `feed_items.created_at` ∈ `(reference_time - 7일, reference_time]`, **논문별로 묶음**. `get_recent_feed_papers()`와 같은 SQL을 **같은 트랜잭션**에서 실행 | `last_recommended_at DESC, paper_id` | 50편 (`total_count` 없음, 없으면 `[]`) |
   | 챗봇 하루 요약 (`recent_chat_summaries`, 2026-11-16) | 이 사용자의 `chat_daily_summaries.summary_date` ∈ `[reference_date - 7일, reference_date)` (**오늘 제외**) **AND** (`patient_id IS NULL` **또는** 현재 관리 환자). `created_at` 기준 시각 조건은 **없다** (요약을 다시 만들면 갱신돼 그날 요약이 사라지므로) | `summary_date DESC, patient_id NULLS LAST, id` | 5 (로그에는 건수만 남기고 요약 내용은 남기지 않는다) |
@@ -350,8 +350,10 @@ candidates = [c for c in candidates if c.pmid not in seen]
 - **방문 선정은 두 갈래다**: 예정 진료(`is_visited = false`)를 **가까운 순으로 최대 5건** 먼저
   잡고, 남은 자리를 지난 진료가 최근 순으로 채운다. 한쪽이 모자라면 다른 쪽이 그 자리를 쓴다.
   최종 반환 순서는 `visit_date DESC, created_at DESC, id`.
-- **돌봄 기록의 `patient_id IS NULL`은 그대로 담는다** (간병인 본인 자기돌봄 기록).
-  다른 간병인의 환자에 붙은 기록은 적격이 아니다 (`total_count`에도 반영).
+- **돌봄 기록의 `patient_id IS NULL`은 간병인 본인 기록(`caregiver_selfcare` 등)만 담는다.**
+  `patient_care`인데 `patient_id IS NULL`이면 **삭제된 환자의 기록**(`ON DELETE SET NULL`)으로 보고 뺀다 (2026-11-24).
+  다른 간병인의 환자에 붙은 기록도 적격이 아니다. 둘 다 `total_count`에 반영.
+  챗봇 돌봄 기록 Tool(`get_recent_care_logs`)은 `patient_id = 지정 환자`로 읽으므로 원래부터 NULL 기록을 보지 않는다.
 - 환자별 자식 기록은 **환자 수와 관계없이 쿼리 수가 고정**이다
   (`patient_id = ANY(...)` + 창 함수로 환자별 상한, `GROUP BY`로 건수. 건수 0인 환자는 `0`으로 채움).
 - 배열 칸(`symptoms` / `interests` / `lifestyle_tags` / `updated_tags`)은 DB에서 nullable이라

@@ -149,7 +149,8 @@
     최근 완료 턴 5개와 오늘(KST) 이전 하루 요약을 읽어 `prepare_chat_input`에 넘긴다. 고르기·토큰 예산·원문/요약 겹침은 Agent가 정한다.
     조회 실패나 2초 초과면 이전 대화 없이 답한다(경고 로그만, 422/503 아님). 저장 실패도 답변은 그대로 준다.
   - 토큰 계산 모델은 실행기와 같은 `chat_model()`(`OPENAI_AGENT_MODEL` → `OPENAI_SUMMARY_MODEL`).
-    tiktoken 인코딩은 `get_chat_execution()`에서 한 번 미리 읽는다(캐시가 없으면 처음 한 번 내려받기).
+    tiktoken 인코딩은 **서버 시작 때** `main.py` lifespan(`warm_chat_tokenizer()`)이 미리 읽는다(캐시가 없으면 처음 한 번 내려받기,
+    o200k_base 기준 프로세스(워커)당 RSS 약 66MB·약 0.7초, 2026-11-24 로컬 측정). 챗봇 모델이 없으면 건너뛰고, 실패해도 서버는 뜨며 경고만 남긴다(요청 때 UTF-8 상한으로 셈).
   - 요청/응답 예시:
     ```json
     // POST /chat/{user_id}

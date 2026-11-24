@@ -257,11 +257,14 @@ _VISITS_COUNT = f"""
 
 # 기간은 반개구간 [start, end). patient_id가 있으면 '현재 관리 환자'인 것만 적격이다
 # (조건을 WHERE에 두어 total_count에도 반영된다).
+# patient_id NULL은 간병인 본인 기록만 적격이다. patient_care인데 NULL이면 환자가 삭제된 기록
+# (ON DELETE SET NULL)이므로 뺀다.
 _CARE_LOG_WHERE = """
      WHERE user_id = %(user_id)s
        AND logged_at >= %(period_start)s
        AND logged_at <  %(period_end)s
-       AND (patient_id IS NULL OR patient_id = ANY(%(patient_ids)s))
+       AND ((patient_id IS NULL AND log_type <> 'patient_care')
+            OR patient_id = ANY(%(patient_ids)s))
 """
 _CARE_LOGS = f"""
     SELECT user_id, patient_id, log_type, content, mood_tag, logged_at
@@ -463,7 +466,7 @@ def get_feed_context_snapshot(
                 cur.execute(_VISITS_COUNT, visit_params)
                 visit_counts = _counts(cur.fetchall())
 
-                # 8) 돌봄 기록 — 기간 [start, end), 관리 환자이거나 환자 미연결인 것만
+                # 8) 돌봄 기록 — 기간 [start, end), 관리 환자이거나 간병인 본인 기록(삭제된 환자 기록 제외)
                 log_params = {
                     "user_id": user_id,
                     "period_start": recent_period_start,

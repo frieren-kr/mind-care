@@ -308,7 +308,7 @@ class ChatApiTests(unittest.TestCase):
         self.model.return_value = "m"
         fake_settings = SimpleNamespace(openai_api_key="test-key", openai_agent_model="m", openai_summary_model="m")
         with patch.object(chat, "settings", fake_settings), patch.object(chat, "OpenAI"), \
-             patch.object(chat, "chat_history_token_counter"), patch.object(chat, "OpenAIClient"), \
+             patch.object(chat, "OpenAIClient"), \
              patch.object(chat, "ChatExecutionV1") as execution:
             self.assertIs(chat.get_chat_execution(), execution.return_value)
         self.assertIs(execution.call_args.args[1], chat.build_chat_tool_registry)

@@ -44,7 +44,6 @@ from app.ai.agent.workflows.chat_context_prepare import prepare_chat_input as _p
 from app.api.ai_failure_log import ErrorRecordingClient, logged_execution
 from app.api.chat_history import ChatStoreHistoryReader
 from app.ai.agent.workflows.chat_execution import ChatExecutionV1
-from app.ai.agent.workflows.chat_history_context import chat_history_token_counter
 from app.auth.dependencies import require_user_access
 from app.config import settings
 from app.db import chat_store, functions, user_functions
@@ -98,9 +97,8 @@ def get_chat_execution() -> Optional[ChatExecution]:
     """ChatWorkflow의 2단계(chat_execution)를 돌려주는 FastAPI 의존성. get_feed_execution()과 같은 설정.
 
     키/모델이 없거나 조립이 실패하면 None (→ 503). 설정 변경 후 서버 재시작 필요.
-    조립만으로 OpenAI API를 호출하지 않는다. 다만 이전 대화 토큰 계산용 tiktoken 인코딩을 여기서 한 번 읽는다
-    (디스크 캐시가 없으면 처음 한 번 내려받아 약 3초). 요청 안의 이력 조회 제한(2초)에 걸려 첫 요청의
-    이전 대화가 빠지지 않게 하려는 것이다. 실패해도 UTF-8 상한으로 대신 세므로 오류는 나지 않는다.
+    조립만으로 OpenAI API를 호출하지 않는다. 이전 대화 토큰 계산용 tiktoken 인코딩은 서버 시작 때
+    main.lifespan이 미리 읽는다 (첫 요청이 이력 조회 제한 2초에 걸려 이전 대화가 빠지지 않게).
     테스트에서는 app.dependency_overrides[get_chat_execution]으로 바꿔 끼운다.
     """
     api_key = settings.openai_api_key.strip()
@@ -111,7 +109,6 @@ def get_chat_execution() -> Optional[ChatExecution]:
 
     sdk = None
     try:
-        chat_history_token_counter(model)
         sdk = OpenAI(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=0)
         # OpenAI 오류 코드를 실패 로그에 남기려고 감싼다 (api/ai_failure_log.py).
         client = ErrorRecordingClient(OpenAIClient(sdk, model=model, timeout_seconds=LLM_TIMEOUT_SECONDS))

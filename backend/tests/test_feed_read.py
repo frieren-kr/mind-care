@@ -462,6 +462,33 @@ class CareLogTests(FeedReadTestBase):
         self.assertEqual(col.total_count, 1)
         self.assertIsNone(col.items[0].patient_id)
 
+    def test_logs_of_deleted_patient_are_excluded(self):
+        """환자 삭제로 patient_id가 NULL이 된 patient_care 기록은 빠진다. 자기돌봄 기록은 남는다.
+
+        챗봇 돌봄 기록 Tool(get_recent_care_logs)은 환자를 지정해 읽으므로 이 기록을 원래부터 안 본다.
+        """
+        from app.db.functions import get_recent_care_logs
+
+        when = REFERENCE_TIME - timedelta(days=1)
+        gone, kept = self._add_patient(), self._add_patient()
+        save_care_log(user_id=self.user_id, log_type="patient_care", content="삭제될 환자",
+                      patient_id=gone, logged_at=when)
+        save_care_log(user_id=self.user_id, log_type="patient_care", content="남은 환자",
+                      patient_id=kept, logged_at=when)
+        save_care_log(user_id=self.user_id, log_type="caregiver_selfcare", content="본인",
+                      logged_at=when)
+        with get_connection() as conn:
+            conn.execute("DELETE FROM patient_profiles WHERE id = %s", (gone,))
+
+        col = snapshot(self.user_id).recent_care_logs
+        self.assertEqual({r.content for r in col.items}, {"남은 환자", "본인"})
+        self.assertEqual(col.total_count, 2)
+
+        chat_logs = get_recent_care_logs(user_id=self.user_id, patient_id=kept,
+                                         start_at=PERIOD_START, end_at=PERIOD_END)
+        self.assertEqual([r.content for r in chat_logs.items], ["남은 환자"])
+        self.assertEqual(chat_logs.total_count, 1)
+
     def test_logs_of_other_caregivers_patient_are_excluded(self):
         """다른 간병인의 환자에 붙은 기록은 적격이 아니다 (total_count에도 안 들어간다)."""
         other_user = self._create_user()

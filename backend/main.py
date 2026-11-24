@@ -10,18 +10,40 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.ai.agent.workflows.chat_history_context import chat_history_token_counter, utf8_token_upper_bound
 from app.api import auth, chat, papers, recommendations, users
 from app.config import settings
 
 logger = logging.getLogger("uvicorn.error")
 
 
+def warm_chat_tokenizer() -> None:
+    """챗봇 이전 대화 토큰 계산용 tiktoken 인코딩을 미리 읽는다 (tiktoken이 프로세스 안에 캐시한다).
+
+    챗봇 모델이 없으면 건너뛴다. 실패해도 예외를 내지 않고 경고만 남긴다 (요청 때 UTF-8 상한으로 센다).
+    """
+    model = chat.chat_model()
+    if not model:
+        return
+    start = time.perf_counter()
+    try:
+        counter = chat_history_token_counter(model)
+    except Exception:
+        counter = utf8_token_upper_bound
+    if counter is utf8_token_upper_bound:
+        logger.warning("챗봇 토크나이저 예열 실패 (%.1f초) — 이전 대화는 UTF-8 상한으로 센다",
+                       time.perf_counter() - start)
+    else:
+        logger.info("챗봇 토크나이저 예열 완료: %.1f초", time.perf_counter() - start)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """서버 시작 때 검색 모델(bge-m3)을 미리 불러온다. 첫 /recommendations 요청이 느려지지 않게.
+    """서버 시작 때 검색 모델(bge-m3)과 챗봇 토크나이저를 미리 불러온다. 첫 요청이 느려지지 않게.
 
-    PRELOAD_EMBEDDING_MODEL=0이면 건너뛴다. 실패해도 서버는 뜨고, 첫 검색 때 다시 불러온다.
+    임베딩은 PRELOAD_EMBEDDING_MODEL=0이면 건너뛴다. 실패해도 서버는 뜨고, 첫 검색 때 다시 불러온다.
     """
+    warm_chat_tokenizer()
     if settings.preload_embedding_model:
         start = time.perf_counter()
         try:
