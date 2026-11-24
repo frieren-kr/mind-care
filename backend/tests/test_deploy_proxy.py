@@ -65,11 +65,31 @@ class DeployConfigTests(unittest.TestCase):
         self.assertIn(ipaddress.ip_address(web_ip), ipaddress.ip_network(subnet))
 
     def test_nginx_api_overwrites_xff_and_passes_bearer(self):
-        conf = (DEPLOY / "nginx.conf").read_text(encoding="utf-8")
-        api = re.search(r"location /api/ \{(.*?)\n    \}", conf, re.S).group(1)
+        conf = (DEPLOY / "nginx-app.inc").read_text(encoding="utf-8")
+        api = re.search(r"^location /api/ \{(.*?)^\}", conf, re.S | re.M).group(1)
         self.assertIn("auth_basic off;", api)
         self.assertRegex(api, r"proxy_set_header X-Forwarded-For \$remote_addr;")
         self.assertNotIn("Authorization", re.sub(r"#.*", "", api))  # 지우면 Bearer 토큰이 백엔드에 안 간다
+
+    def test_https_settings_match(self):
+        compose = (DEPLOY / "docker-compose.prod.yml").read_text(encoding="utf-8")
+        https = (DEPLOY / "nginx.https.conf").read_text(encoding="utf-8")
+        stream = (DEPLOY / "host-nginx" / "mindcare-stream.conf").read_text(encoding="utf-8")
+        subnet = ipaddress.ip_network(re.search(r"subnet:\s*(\S+)", compose).group(1))
+        # 호스트 nginx는 도커 게이트웨이(대역의 첫 주소)로 들어온다 → 그 주소만 PROXY protocol 주소를 믿는다
+        self.assertIn(f"set_real_ip_from {next(subnet.hosts())};", https)
+        self.assertIn("real_ip_header proxy_protocol;", https)
+        self.assertIn("listen 8443 ssl proxy_protocol;", https)
+        self.assertIn('"127.0.0.1:8443:8443"', compose)  # 밖에서 PROXY 머리말을 꾸며 못 들어오게 서버 안에서만
+        self.assertRegex(stream, r"default\s+127\.0\.0\.1:8443;")
+        self.assertIn("proxy_protocol on;", stream)
+        self.assertIn("/etc/nginx/mindcare-app.inc:ro", compose)
+        for name in ("nginx.conf", "nginx.https.conf"):
+            conf = (DEPLOY / name).read_text(encoding="utf-8")
+            self.assertIn("include /etc/nginx/mindcare-app.inc;", conf)
+            acme = re.search(r"location /\.well-known/acme-challenge/ \{(.*?)\}", conf, re.S).group(1)
+            self.assertIn("auth_basic off;", acme)  # 기본 인증이 걸리면 Let's Encrypt 확인이 실패한다
+            self.assertIn("root /var/www/certbot;", acme)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,12 @@ EC2 한 대(Ubuntu 24.04, t3.medium 메모리 4GB + 스왑 4GB, Docker 설치됨
 |---|---|
 | `backend/Dockerfile` | 백엔드 이미지 (python 3.12-slim, torch **CPU 전용** 2.14.1 — 로컬 `.venv`와 같은 버전) |
 | `backend/.dockerignore` | `.env`·덤프·로그·캐시가 이미지에 들어가지 않게 |
-| `deploy/docker-compose.prod.yml` | 서버용 compose. db(127.0.0.1:5432) + backend(127.0.0.1:8000) + web(80) |
+| `deploy/docker-compose.prod.yml` | 서버용 compose. db(127.0.0.1:5432) + backend(127.0.0.1:8000) + web(80, 127.0.0.1:8443) |
 | `deploy/web.Dockerfile` (+ `.dockerignore`) | 프론트 웹 빌드(`expo export`) → nginx 이미지 |
-| `deploy/nginx.conf` | `/` 정적 파일(기본 인증), `/api/` → backend(기본 인증 없음, 로그인 토큰으로 보호 → 10번) |
+| `deploy/nginx-app.inc` | web nginx의 앱 부분: `/` 정적 파일(기본 인증), `/api/` → backend(기본 인증 없음, 로그인 토큰으로 보호 → 10번) |
+| `deploy/nginx.conf` / `deploy/nginx.https.conf` | web nginx 1단계(HTTP 80) / 2단계(HTTPS 8443 + 80은 https로 이동). 고르는 법 → 11번 |
+| `deploy/host-nginx/mindcare-stream.conf` | 서버 본체 nginx(stream): 443을 SSH·HTTPS로 나눈다 → 11번 |
+| `deploy/certbot-deploy-hook.sh` | 인증서가 갱신되면 web nginx reload → 11번 |
 | `deploy/run_update_papers.sh` | 실행 중인 backend 컨테이너 안에서 `update_papers` 배치를 돌린다 (cron용) |
 | `deploy/run_summarize_chats.sh` | 같은 방식으로 `summarize_chats`(챗봇 대화 하루 요약 + 7일 지난 원문 삭제)를 돌린다 (cron용) |
 
@@ -226,7 +229,8 @@ curl -s -o /dev/null -w "%{http_code}
 
 - **프론트 코드가 바뀌었을 때**: `git pull` → `$DC up -d --build web`.
   `EXPO_PUBLIC_*` 값은 **빌드할 때 번들에 박히므로**, `backend/.env`의 `EXPO_PUBLIC_DEV_USER_ID`를 바꿨을 때도 다시 빌드해야 한다.
-- **`deploy/nginx.conf`만 바뀌었을 때**: 볼륨으로 붙어 있어 빌드 없이 `$DC restart web`.
+- **`deploy/nginx*.conf`·`nginx-app.inc`만 바뀌었을 때**: 볼륨으로 붙어 있어 빌드 없이 `$DC restart web`.
+  (`backend/.env`의 `WEB_NGINX_CONF`를 바꿨을 때는 붙이는 파일이 바뀌므로 `$DC up -d web` → 11번)
 - **비밀번호 변경**: `htpasswd` 파일을 다시 만들고 `$DC restart web`.
 - 브라우저가 옛 화면을 보이면 강력 새로고침(Ctrl+Shift+R). JS·CSS 파일은 이름에 해시가 붙어 캐시 문제는 거의 없다.
 
@@ -367,3 +371,175 @@ PubMed 기준 2024년 1,191편 + 2025년 1,257편(동물 전용 연구 제외 �
 요약 토큰은 편당 입력 약 3,700 + 출력 약 900 (다시 만든 경우 포함) → 2,100편이면 **입력 약 790만 + 출력 약 190만 토큰**.
 비용 = 790만 × 입력 단가 + 190만 × 출력 단가. `gpt-5.6-luna`를 100만 토큰당 입력 $0.20 / 출력 $1.20으로 잡으면 **약 $4**,
 $1.00 / $6.00이면 **약 $19**다 (단가는 OpenAI 가격표에서 확인한다).
+
+## 11. HTTPS 전환 (mindcare-project.duckdns.org)
+
+도메인 `mindcare-project.duckdns.org` + Let's Encrypt(webroot, 자동 갱신). 기숙사 망이 22를 막아 SSH도 443으로 들어오므로
+**443 하나를 서버 본체 nginx(stream)가 받아 SSH와 HTTPS로 나눈다.**
+
+```
+443 → 호스트 nginx(stream, ssl_preread) ─┬ TLS가 아님 → 127.0.0.1:2222 (PROXY 머리말 떼기) → sshd 22
+     (proxy_protocol로 실제 IP 전달)     └ TLS       → 127.0.0.1:8443 → web 컨테이너(HTTPS) → backend
+80  → web 컨테이너 ─ 1단계: 지금 HTTP 서비스 그대로 + /.well-known/acme-challenge/
+                    2단계: /.well-known/acme-challenge/ + 나머지는 https://mindcare-project.duckdns.org 로 301
+```
+
+- 호스트 nginx는 **80을 쓰지 않는다** (web 컨테이너가 씀). 기본 사이트는 11-1에서 끈다.
+- 사용자 IP: 호스트 nginx가 PROXY protocol로 넘기고, web nginx는 **도커 게이트웨이 `10.231.0.1`에서 온 연결만** 그 값을 믿는다
+  (`nginx.https.conf`의 `set_real_ip_from`). backend uvicorn은 지금처럼 web(`10.231.0.10`)이 보낸 `X-Forwarded-For`만 믿는다.
+- **1단계 ↔ 2단계 전환은 `backend/.env`의 한 줄**이다. 바꾼 뒤 `$DC up -d web` (`restart`로는 안 바뀐다 — 붙이는 파일이 달라져 컨테이너를 다시 만들어야 함).
+
+  | 단계 | `backend/.env` | web이 쓰는 설정 |
+  |---|---|---|
+  | 1단계 (인증서 없어도 뜸) | `WEB_NGINX_CONF` 줄 없음 | `deploy/nginx.conf` |
+  | 2단계 (인증서 받은 뒤) | `WEB_NGINX_CONF=nginx.https.conf` | `deploy/nginx.https.conf` |
+
+**SSH 위험 표시** — 🟢 SSH와 무관 / 🔴 **443 SSH가 끊길 수 있음 → AWS 콘솔의 EC2 Instance Connect(22번)에서 한다.**
+🔴 단계 전에 Instance Connect로 한 번 들어가 보고(보안 그룹 22번이 Instance Connect 대역에 열려 있어야 한다),
+끝난 뒤 **내 PC에서 `ssh -p 443`이 되는 것을 확인할 때까지 Instance Connect 창을 닫지 않는다.**
+
+미리 확인: DuckDNS가 탄력적 IP를 가리키는지 (`getent hosts mindcare-project.duckdns.org`), 보안 그룹에 80·443이 열려 있는지.
+
+### 11-1. 설치 🟢
+
+```bash
+# apt가 nginx를 설치하자마자 기본 사이트(80)로 띄우려다 web 컨테이너와 부딪쳐 설치가 실패하지 않게, 설치하는 동안만 서비스 시작을 막는다
+printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null && sudo chmod +x /usr/sbin/policy-rc.d
+sudo apt-get update
+sudo apt-get install -y nginx libnginx-mod-stream
+sudo rm /usr/sbin/policy-rc.d
+sudo rm /etc/nginx/sites-enabled/default    # 기본 사이트(80) 끄기. 원본 sites-available/default는 남는다
+sudo systemctl disable nginx                # 11-4에서 켠다 (그 전에 재부팅돼도 443을 잡지 않게)
+systemctl is-active nginx                   # inactive
+sudo apt-get install -y certbot             # 갱신 타이머(certbot.timer, 하루 두 번 확인)가 같이 켜진다
+sudo mkdir -p /var/www/certbot
+```
+
+### 11-2. 1단계 배포 🟢
+
+```bash
+cd ~/mind-care && git pull
+$DC up -d web     # nginx-app.inc·인증서 폴더 마운트·127.0.0.1:8443이 붙어 web만 다시 만든다 (아직 HTTP 서비스 그대로)
+sudo mkdir -p /var/www/certbot/.well-known/acme-challenge
+echo ok | sudo tee /var/www/certbot/.well-known/acme-challenge/ping >/dev/null
+curl -s http://mindcare-project.duckdns.org/.well-known/acme-challenge/ping                # ok (기본 인증 없이)
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/                                 # 401 (화면은 그대로)
+sudo rm -r /var/www/certbot/.well-known
+```
+
+### 11-3. 인증서 발급 🟢
+
+```bash
+sudo certbot certonly --webroot -w /var/www/certbot -d mindcare-project.duckdns.org \
+    --email 이메일주소 --agree-tos --no-eff-email      # 이메일: 만료 알림을 받을 주소로 바꿔 넣는다
+sudo ls /etc/letsencrypt/live/mindcare-project.duckdns.org/   # fullchain.pem privkey.pem ...
+
+# 갱신되면 web nginx가 새 인증서를 읽게 (certbot이 갱신 때마다 이 폴더의 스크립트를 돌린다)
+sudo install -m 755 deploy/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/mindcare-web-reload.sh
+sudo certbot renew --dry-run                  # 갱신 연습 (webroot 방식이 저장돼 있다. 훅은 연습 때 안 돈다)
+systemctl list-timers certbot.timer           # 다음 확인 시각
+```
+
+### 11-4. sshd 443 끄기 → 호스트 nginx 켜기
+
+**① 준비 🟢** (포트를 잡지 않으므로 지금 SSH 그대로 해도 된다)
+
+```bash
+cd ~/mind-care
+sudo install -m 644 deploy/host-nginx/mindcare-stream.conf /etc/nginx/mindcare-stream.conf
+# stream은 http 블록 밖이어야 하므로 nginx.conf 맨 끝에 한 줄
+grep -q mindcare-stream /etc/nginx/nginx.conf || echo 'include /etc/nginx/mindcare-stream.conf;' | sudo tee -a /etc/nginx/nginx.conf
+sudo nginx -t                                                       # syntax is ok
+
+# sshd가 443을 어디서 받는지 확인
+sudo sshd -T | grep -i '^port'                                      # port 22, port 443
+sudo grep -rn -i '^\s*port\s' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+systemctl is-active ssh.socket                                      # active면 소켓 방식 (우분투 24.04 기본)
+systemctl cat ssh.socket | grep -i listen                           # ListenStream에 443을 직접 넣었다면 여기 보인다
+```
+
+**② 전환 🔴 — EC2 Instance Connect에서**
+
+```bash
+# 1) Port 443 줄을 지운다. Port 22 줄은 남긴다 (Port 줄이 443 하나뿐이었다면 Port 22로 바꾼다).
+#    ①에서 ssh.socket 쪽 ListenStream=443이 보였다면 그 override 파일에서 그 줄을 지운다.
+sudo nano /etc/ssh/sshd_config           # (①의 grep이 가리킨 파일)
+sudo sshd -t && sudo sshd -T | grep -i '^port'           # port 22만
+
+# 2) 적용 — ssh.socket이 active였으면 첫 줄, 아니면 둘째 줄
+sudo systemctl daemon-reload && sudo systemctl restart ssh.socket
+# sudo systemctl restart ssh
+
+# 3) 443이 비었는지 보고 호스트 nginx 켜기
+sudo ss -ltnp | grep ':443 '             # 아무것도 안 나와야 한다
+sudo systemctl enable --now nginx
+sudo ss -ltnp | grep -E ':(443|2222) '   # nginx가 0.0.0.0:443, 127.0.0.1:2222
+```
+
+내 PC에서 `ssh -p 443 -i C:\Users\PJH\.ssh\mindcare-ec2.pem ubuntu@mindcare-project.duckdns.org`가 되면 Instance Connect를 닫는다.
+안 되면 Instance Connect 창에서 바로 11-7 ②로 되돌린다.
+
+이 시점엔 web이 아직 1단계라 화면은 `http://`로 그대로 열리고, `https://`만 아직 안 된다.
+
+### 11-5. 2단계 배포 🟢
+
+```bash
+cd ~/mind-care
+echo 'WEB_NGINX_CONF=nginx.https.conf' >> backend/.env
+$DC up -d web
+$DC logs --tail 20 web                   # [emerg]가 없으면 OK
+```
+
+### 11-6. 확인 🟢
+
+내 PC(PowerShell):
+
+```powershell
+curl.exe -sI http://mindcare-project.duckdns.org/feed          # 301, Location: https://mindcare-project.duckdns.org/feed
+curl.exe -sI http://탄력적IP/                                   # 301, 도메인으로
+curl.exe -s -o NUL -w "%{http_code} %{http_version}\n" https://mindcare-project.duckdns.org/      # 401 2 (기본 인증, HTTP/2)
+curl.exe -s -o NUL -w "%{http_code}\n" https://mindcare-project.duckdns.org/api/health            # 200
+curl.exe -s -o NUL -w "%{http_code}\n" https://mindcare-project.duckdns.org/api/docs              # 404
+```
+
+서버:
+
+```bash
+sudo tail -n 5 /var/log/nginx/mindcare-stream.log   # 내 공인 IP와 127.0.0.1:8443(HTTPS)·127.0.0.1:2222(SSH)
+docker network inspect mindcare_default -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}'   # 10.231.0.1 (nginx.https.conf와 같아야)
+$DC logs --tail 5 web                               # 맨 앞 IP가 내 공인 IP (10.231.0.1이면 위 게이트웨이가 다른 것)
+```
+
+브라우저에서 `https://mindcare-project.duckdns.org/` → 기본 인증 → 로그인 → `$DC logs --tail 20 backend`의 접속 IP가 내 공인 IP인지 (10번과 같음).
+
+### 11-7. 되돌리기
+
+**① HTTPS만 되돌리기 🟢** (web이 다시 80에서 화면을 낸다. SSH·호스트 nginx는 그대로)
+
+```bash
+cd ~/mind-care
+sed -i '/^WEB_NGINX_CONF=/d' backend/.env
+$DC up -d web
+```
+
+**② 443을 다시 sshd로 🔴 — EC2 Instance Connect에서** (①도 같이 한다)
+
+```bash
+sudo systemctl disable --now nginx
+sudo nano /etc/ssh/sshd_config           # Port 443 줄을 다시 넣는다 (Port 22는 그대로)
+sudo sshd -t
+sudo systemctl daemon-reload && sudo systemctl restart ssh.socket    # 소켓 방식이 아니면: sudo systemctl restart ssh
+sudo ss -ltnp | grep ':443 '             # sshd
+```
+
+### 주의
+
+- **SSH 클라이언트가 먼저 말해야 나뉜다.** OpenSSH(`ssh`·`scp`·`sftp`, VS Code Remote-SSH)는 접속하자마자 자기 버전을 보내서 바로 SSH로 간다
+  (로컬 도커로 확인). 서버 인사말을 먼저 기다리는 도구(`ssh-keyscan` 등)는 443으로는 30초 뒤 끊긴다 → 그런 건 Instance Connect에서.
+- sshd 로그(`/var/log/auth.log`)에는 443으로 들어온 SSH가 **모두 127.0.0.1**로 찍힌다. 실제 IP는 `/var/log/nginx/mindcare-stream.log`.
+  sshd 로그로 IP를 막는 도구(fail2ban 등)를 쓰면 모두를 막게 되니 쓰지 않는다.
+- 8443은 PROXY protocol이 있어야 받으므로 서버 안에서 `curl https://127.0.0.1:8443`으로는 확인할 수 없다. 도메인으로 확인한다.
+- 2단계부터 `http://127.0.0.1/…`는 301이다. 8-3·10-4의 확인 명령은 `https://mindcare-project.duckdns.org/…`로 바꿔 친다.
+- 인증서 갱신은 80번의 `/.well-known/acme-challenge/`로 확인받는다. **보안 그룹에서 80을 닫으면 갱신이 실패한다** (90일 인증서, 만료 30일 전부터 갱신 시도).
+- 호스트 nginx 설정(`deploy/host-nginx/`)을 고쳤으면 다시 복사 → `sudo nginx -t && sudo systemctl reload nginx` (reload는 연결된 SSH를 끊지 않는다).
+- HSTS 헤더는 아직 넣지 않았다 (한 번 걸면 되돌리기 어렵다). HTTPS가 안정되면 `nginx.https.conf`에 추가를 검토한다.
